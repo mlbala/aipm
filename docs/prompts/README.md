@@ -14,6 +14,30 @@ These prompts build aipm step by step, following [ARCHITECTURE.md](../architectu
 | 08 | [Codex, Copilot and Gemini adapters, `auto`, plugins, release pipeline](08-multi-tool-and-auto.md) | v0.4 | 4 days |
 | 09 | [Security red-team pass (run after 05, 06, 07 and 08)](09-security-red-team.md) | each | 1 day |
 
+## Run order
+
+Run the steps in this order, one branch each. Every step ends with `ship`, which pushes the branch, opens a PR and merges it under the owner's name only (the `ship` skill).
+
+| # | Prompt | Branch | Paste into Claude |
+|---|---|---|---|
+| 1 | 01 | `step/01-scaffold` | `Read docs/prompts/01-review-and-scaffold.md and docs/architecture/reviews/01-design-review.md. Part A is done and decided. Apply decisions 1, 2 and 4 from the review file, then do Part B.` |
+| 2 | 02 | `step/02-core` | `Read docs/prompts/02-core-foundation.md and follow it exactly.` |
+| 3 | 03 | `step/03-discover` | `Read docs/prompts/03-llm-gateway-and-discover.md and follow it exactly.` |
+| 4 | 04 | `step/04-design-plan` | `Read docs/prompts/04-design-and-plan.md and follow it exactly.` |
+| 5 | 05 | `step/05-prompts-context` | `Read docs/prompts/05-prompts-and-context.md and follow it exactly.` |
+| 6 | 09 | `security/redteam-v0.1` | `Read docs/prompts/09-security-red-team.md and follow it. Milestone: v0.1.` |
+| | tag | `main` | The owner tags `v0.1.0`. |
+| 7 | 06 | `step/06-verify` | `Read docs/prompts/06-verify-and-scan.md and follow it exactly.` |
+| 8 | 09 | `security/redteam-v0.2` | `Read docs/prompts/09-security-red-team.md and follow it. Milestone: v0.2.` |
+| | tag | `main` | The owner tags `v0.2.0`. |
+| 9 | 07 | `step/07-build` | `Read docs/prompts/07-dispatch-and-build.md and follow it exactly.` |
+| 10 | 09 | `security/redteam-v0.3` | `Read docs/prompts/09-security-red-team.md and follow it. Milestone: v0.3.` |
+| | tag | `main` | The owner tags `v0.3.0`. |
+| 11 | 08 | `step/08-multi-tool` | `Read docs/prompts/08-multi-tool-and-auto.md and follow it exactly.` |
+| 12 | 09 | `security/redteam-v0.4` | `Read docs/prompts/09-security-red-team.md and follow it. Milestone: v0.4.` |
+
+The owner runs the tag commands (the `ship` skill, "Tags"). Claude never tags or pushes tags.
+
 ## How to run a prompt
 
 ```bash
@@ -32,7 +56,8 @@ In Claude Code:
    Read docs/prompts/02-core-foundation.md and follow it exactly.
    ```
 3. Review the plan Claude produces. Answer its questions, then reply `go`.
-4. When it reports done, review the diff yourself, run `uv run pytest -q`, then merge the branch: `git switch main && git merge --ff-only step/02-core`.
+4. When it reports done, review the diff yourself and run `uv run pytest -q`.
+5. Reply `ship` (or run `/ship`). Claude pushes the branch, opens a PR against `main`, waits for the checks and merges it, as described in AGENTS.md "Shipping a step". Every commit, the PR and the merge carry only your name. The `pre-push` hook refuses any commit with another author or committer, or with a co-author or AI line.
 
 ## Working method (every prompt follows this)
 

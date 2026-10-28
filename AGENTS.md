@@ -73,10 +73,25 @@ Import only downward. L0 does no I/O.
 
 ## Git
 
+These rules cover how you, the coding agent, work on this repository. They do not change what aipm itself does: aipm never pushes or opens PRs (ARCHITECTURE §12.2, SECURITY §11).
+
 - Small commits using Conventional Commits (`feat:`, `fix:`, `test:`, `docs:`, `refactor:`, `chore:`, `security:`).
-- Never `git push`, never change remotes, never force-push, never rewrite history.
-- **Commits have one author: the repository owner, from their git config.** Never add `Co-Authored-By`, `Claude-Session`, "Generated with …" or any other AI attribution line to commit messages or PR descriptions. Never run `git config`, never pass `--author`, and never use `--no-verify` (the `commit-msg` hook in `.githooks/` must always run).
+- **The repository owner is the only author of everything that leaves this machine:** commits, pushes, pull requests and merges. The owner is the name and email in their git config and the account `gh auth status` shows. Never add `Co-Authored-By`, `Claude-Session`, "Generated with …", 🤖 or any other AI attribution to commit messages, PR titles, PR bodies, PR comments or merge messages.
+- Never run `git config`, never pass `--author`, never set `GIT_AUTHOR_*` or `GIT_COMMITTER_*`, and never use `--no-verify`. The `commit-msg` and `pre-push` hooks in `.githooks/` must always run. If a hook refuses, stop and report it. Do not work around it.
+- Never change remotes, never force-push, never rewrite history, never push tags, never push to `main` directly, and never delete remote branches.
 - Do not commit generated run data, caches or `.env` files.
+
+### Shipping a step: push, PR, merge
+
+Ship only when the owner asks (for example "ship", or a runbook step that says so), and only after the definition of done below is met.
+
+1. Run `gh auth status`. It must show the owner's GitHub account. If it does not, stop and ask.
+2. Push the step's branch, as named in `docs/prompts/README.md` "Run order" (`step/*` or `security/*`): `git push -u origin <branch>`. The `pre-push` hook refuses any commit whose author or committer is not the owner, or that has a co-author or AI line.
+3. Open the PR against `main`: `gh pr create --base main --head <branch> --title "<Conventional Commit subject>" --body-file <file outside the repo>`. The body is the step report (what changed, tests added, deviations, open questions) and nothing else.
+4. Wait for the checks: `gh pr checks <number> --watch`. Never merge with a failing check, and never use `gh pr merge --admin`.
+5. Merge with a merge commit, which keeps every commit exactly as the owner made it: `gh pr merge <number> --merge`. Use GitHub's default merge message. If you pass `--subject` or `--body`, the attribution rule above applies to them.
+6. Update the local `main`: `git switch main && git pull --ff-only`.
+7. Report the PR URL and the merge commit.
 
 ## Definition of done (every step)
 
