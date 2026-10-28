@@ -1,0 +1,10 @@
+#!/bin/sh
+# Remove AI attribution trailers so every commit carries only the human author.
+# Enable once per clone:  git config core.hooksPath .githooks
+set -eu
+msg_file="$1"
+tmp="$(mktemp)"
+grep -v -i -E '^(co-authored-by:.*(claude|anthropic|copilot|codex|gemini)|claude-session:|.*generated with \[?(claude|claude code))' "$msg_file" > "$tmp" || true
+# Drop trailing blank lines left behind by the removed trailers.
+awk 'NF { for (i = 0; i < blank; i++) print ""; blank = 0; print; next } { blank++ }' "$tmp" > "$msg_file"
+rm -f "$tmp"
