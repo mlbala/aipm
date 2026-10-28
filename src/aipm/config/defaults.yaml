@@ -1,0 +1,4 @@
+# Built-in configuration defaults (ARCHITECTURE §15).
+# Placeholder: build prompt 02 fills this in, with every key's class
+# (user-only, tighten-only or repo-ok) recorded in aipm/config/schema.py.
+schema_version: 1
