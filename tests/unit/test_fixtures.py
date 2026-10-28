@@ -1,12 +1,14 @@
 """The shared fixtures in tests/conftest.py behave as documented."""
 
 import os
+import re
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
 
-from tests.conftest import FakeSecrets
+from tests.conftest import REPO_ROOT, FakeSecrets
 from tests.fakes.secrets import FAKE_SECRETS
 
 
@@ -37,7 +39,11 @@ def test_fake_secrets_detects_a_leak(fake_secrets: FakeSecrets) -> None:
         fake_secrets.assert_absent(value)
 
 
-def test_fake_secret_values_are_long_and_fake() -> None:
+def test_fake_secret_values_match_the_gitleaks_allowlist() -> None:
+    """gitleaks allowlists fakes by value, so a real key in tests/fakes/secrets.py is caught."""
+    config = tomllib.loads((REPO_ROOT / ".gitleaks.toml").read_text(encoding="utf-8"))
+    (pattern,) = config["allowlist"]["regexes"]
+    assert "paths" not in config["allowlist"]
     for value in FAKE_SECRETS.values():
-        assert value.startswith("aipm-fake-")
+        assert re.fullmatch(pattern, value), value
         assert len(value) >= 32

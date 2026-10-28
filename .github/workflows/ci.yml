@@ -9,7 +9,8 @@ permissions: {}
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel a run on main: each push's commit-authorship check covers only its own commits.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   checks:
@@ -80,19 +81,36 @@ jobs:
           # A new branch has no "before" commit: compare with the default branch instead.
           case "$base" in *[!0]*) ;; *) base="$(gh api "repos/$REPO" --jq .default_branch)" ;; esac
 
+          expected="$(gh api "repos/$REPO/compare/$base...$head" --jq .total_commits)"
           gh api --paginate "repos/$REPO/compare/$base...$head?per_page=100" \
-            --jq '.commits[] | {sha: .sha[0:12], login: (.author.login // ""), message: .commit.message}' \
+            --jq '.commits[] | {sha: .sha[0:12], login: (.author.login // ""), committer: (.committer.login // ""), message: .commit.message}' \
             > commits.jsonl
 
           fail=0
+          # Fail closed if the API returned fewer commits than the comparison holds.
+          checked="$(wc -l < commits.jsonl | tr -d ' ')"
+          if [ "$checked" != "$expected" ]; then
+            echo "::error::Read $checked commits but the comparison holds $expected."
+            fail=1
+          fi
+
           # The author must be a GitHub account: the owner, or Dependabot. An email that is not
-          # linked to any account has no login and fails.
-          while IFS=$'\t' read -r sha login; do
+          # linked to any account has no login and fails. The committer must be the owner, or
+          # GitHub itself (web-flow) for merges and edits made on github.com, or Dependabot.
+          # "|" never appears in a login, and unlike a tab it does not collapse empty fields.
+          while IFS='|' read -r sha login committer; do
             if [ "$login" != "$OWNER" ] && [ "$login" != "dependabot[bot]" ]; then
               echo "::error::Commit $sha is authored by '${login:-an unlinked email}', not $OWNER."
               fail=1
             fi
-          done < <(jq -r '[.sha, .login] | @tsv' commits.jsonl)
+            case "$committer" in
+              "$OWNER" | web-flow | "dependabot[bot]") ;;
+              *)
+                echo "::error::Commit $sha was committed by '${committer:-an unlinked email}', not $OWNER."
+                fail=1
+                ;;
+            esac
+          done < <(jq -r '[.sha, .login, .committer] | join("|")' commits.jsonl)
 
           # No co-author, session or "Generated with" lines (AGENTS.md "Git").
           attributed="$(jq -r 'select(.message | split("\n") | any(test("^(co-authored-by:|claude-session:)|generated with \\[?claude"; "i"))) | .sha' commits.jsonl)"
@@ -101,5 +119,5 @@ jobs:
             fail=1
           done
 
-          echo "Checked $(wc -l < commits.jsonl | tr -d ' ') commits between $base and $head."
+          echo "Checked $checked commits between $base and $head."
           exit "$fail"

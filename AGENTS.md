@@ -87,7 +87,7 @@ These rules cover how you, the coding agent, work on this repository. They do no
 Ship only when the owner asks (for example "ship", or a runbook step that says so), and only after the definition of done below is met.
 
 1. Run `gh auth status`. It must show the owner's GitHub account. If it does not, stop and ask.
-2. Push the step's branch, as named in `docs/prompts/README.md` "Run order" (`step/*` or `security/*`): `git push -u origin <branch>`. The `pre-push` hook refuses any commit whose author or committer is not the owner, or that has a co-author or AI line.
+2. Push the step's branch, as named in `docs/prompts/README.md` "Run order" (`step/*` or `security/*`): `git push -u origin <branch>`. The `pre-push` hook refuses any commit whose author or committer is not the owner, or that has a co-author or AI line. It also refuses any push that is not a fast-forward of a `step/*` or `security/*` branch: no `main`, no deletions, no force pushes, and no tags unless the owner sets `AIPM_RELEASE_TAG=1`.
 3. Open the PR against `main`: `gh pr create --base main --head <branch> --title "<Conventional Commit subject>" --body-file <file outside the repo>`. The body is the step report (what changed, tests added, deviations, open questions) and nothing else.
 4. Wait for the checks: `gh pr checks <number> --watch`. Never merge with a failing check, and never use `gh pr merge --admin`.
 5. Merge with a merge commit, which keeps every commit exactly as the owner made it: `gh pr merge <number> --merge`. Use GitHub's default merge message. If you pass `--subject` or `--body`, the attribution rule above applies to them.

@@ -87,8 +87,8 @@ include = ["src/aipm", "tests", "docs", "examples", "README.md", "LICENSE", "SEC
 target-version = "py312"
 line-length = 100
 src = ["src", "tests"]
-# Deliberately violating fixtures; the ban tests lint them explicitly.
-extend-exclude = ["tests/security/fixtures"]
+# A deliberately violating fixture; tests/security/test_banned_api.py lints it explicitly.
+extend-exclude = ["tests/security/fixtures/banned_apis.py"]
 
 [tool.ruff.lint]
 select = [
@@ -106,10 +106,19 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# The only module that may start a process (ARCHITECTURE §5.1, SECURITY.md §10 rule 1).
-"src/aipm/execution/process.py" = ["TID251"]
-# Test fixtures run git and the CLI as subprocesses before run_safe exists (review 01, §6).
-"tests/**" = ["TID251", "S101", "S603", "S607", "PLC0415"]
+# No file-wide TID251 exemption, not even for execution/process.py: it imports subprocess with
+# a line-level `# noqa: TID251`, and tests/security/test_banned_api.py allows that comment
+# nowhere else (ARCHITECTURE §5.1).
+"tests/**" = ["S101"]
+# Only these tests run subprocesses (git, the CLI, ruff, lint-imports) or import dynamically.
+"tests/conftest.py" = ["TID251", "S603", "S607"]
+"tests/security/test_banned_api.py" = ["TID251", "S603"]
+"tests/security/test_layers.py" = ["TID251", "S603"]
+"tests/security/test_no_hidden_characters.py" = ["TID251", "S603", "S607"]
+"tests/security/test_pre_push_hook.py" = ["TID251", "S603", "S607"]
+"tests/unit/test_fixtures.py" = ["TID251", "S603", "S607"]
+"tests/unit/test_package_imports.py" = ["TID251"]
+"tests/unit/test_startup.py" = ["TID251", "S603"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "subprocess".msg = "Only aipm.execution.process may start a process; use run_safe()."
@@ -145,6 +154,16 @@ ignore = [
 "multiprocessing".msg = "Only aipm.execution.process may start a process."
 "pickle".msg = "Never unpickle data (AGENTS.md rule 1)."
 "marshal".msg = "Never unmarshal data (AGENTS.md rule 1)."
+"ctypes".msg = "No foreign calls: ctypes can reach system() and exec*() directly."
+"concurrent.futures.ProcessPoolExecutor".msg = "Only aipm.execution.process may start a process."
+"webbrowser".msg = "webbrowser runs $BROWSER."
+"pydoc".msg = "pydoc can run $PAGER."
+"runpy".msg = "No running code by path or module name."
+"code".msg = "No interactive interpreters."
+"codeop".msg = "No compiling code from strings."
+"importlib.util".msg = "No loading modules from files or specs."
+"importlib.machinery".msg = "No loading modules from files or specs."
+"importlib.__import__".msg = "No dynamic imports (ARCHITECTURE §5.1)."
 "importlib.import_module".msg = "No dynamic imports; plugins/loader.py gets a line-level exemption in v0.4."
 # ruff cannot match the bare `__import__` builtin; tests/security/test_banned_api.py scans for it.
 "builtins".msg = "No access to __import__, exec or eval through the builtins module."

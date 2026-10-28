@@ -53,7 +53,9 @@ jobs:
           version: "0.13.6"
           enable-cache: false
 
-      # Pinned rule packs, never --config auto (ARCHITECTURE §13.3). Excludes: .semgrepignore.
+      # Explicit rule packs, never --config auto (ARCHITECTURE §13.3). semgrep itself is pinned;
+      # the packs are fetched from the registry on each run (vendoring them is a follow-up).
+      # Excludes: .semgrepignore.
       - name: Scan with semgrep
         run: >-
           uvx --from semgrep==1.182.1 semgrep scan

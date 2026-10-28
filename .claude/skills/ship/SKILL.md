@@ -54,7 +54,7 @@ Ship only when the owner says "ship", runs `/ship`, or the run order says to, an
    git log origin/main..HEAD --format='%B' | grep -i -E '^(co-authored-by:|claude-session:)|generated with \[?claude'
    ```
 
-3. Push: `git push -u origin <branch>`. The `pre-push` hook checks the commits again. If it refuses, stop and report.
+3. Push: `git push -u origin <branch>`, exactly this form with no other flags. The `pre-push` hook checks the commits again, and refuses anything but a fast-forward of a `step/*` or `security/*` branch. If it refuses, stop and report.
 4. Write the PR body to a file in the scratchpad, outside the repo. The body is the step report: what changed, tests added, deviations, open questions. Read the title and body once more for attribution lines, then:
 
    ```bash
@@ -84,7 +84,7 @@ At a tag point in the run order (`v0.1.0`, `v0.2.0`, `v0.3.0`), do not tag and d
 ```bash
 git switch main && git pull --ff-only
 git tag -a v0.1.0 -m "aipm v0.1.0"
-git push origin v0.1.0
+AIPM_RELEASE_TAG=1 git push origin v0.1.0   # the pre-push hook refuses tags without it
 ```
 
 ## Never
