@@ -34,7 +34,7 @@ Create the following. Every module gets a docstring, typed public stubs, and `No
    - `[project.scripts] aipm = "aipm.cli.main:app"`.
    - Runtime dependencies exactly as in ARCHITECTURE §19, with lower bounds only. Dev dependencies go in a `dev` dependency group. Extras: `otel`, `keyring`.
    - Tool configuration:
-     - `ruff`: enable the rule sets `E`, `F`, `I`, `B`, `UP`, `S` (bandit), `PTH`, `RUF`, `ASYNC`, `PL` (selected), `T20`. Ban the `subprocess`, `os.system` and `pickle` imports everywhere except `src/aipm/execution/process.py`, using `flake8-tidy-imports` banned-api settings.
+     - `ruff`: enable the rule sets `E`, `F`, `I`, `B`, `UP`, `S` (bandit), `PTH`, `RUF`, `ASYNC`, `PL` (selected), `T20`. Ban every way to start a process listed in ARCHITECTURE §5.1, plus `pickle` and `marshal`, in `src/aipm/**` except `src/aipm/execution/process.py`, using `flake8-tidy-imports` banned-api settings (TID251). `tests/**` are exempt, because their fixtures need `git` and the CLI as subprocesses.
      - `pyright`: strict for `src/aipm`.
      - `pytest`: `--disable-socket`, strict markers, `--strict-config`.
      - `coverage`: branch coverage.
@@ -46,7 +46,7 @@ Create the following. Every module gets a docstring, typed public stubs, and `No
 3. **CLI skeleton (`aipm.cli`):**
    - A Typer app that registers every command in ARCHITECTURE §16, with its flags and help text.
    - Global flags.
-   - The JSON envelope (§16.2) and the exit-code enum (§16.1) in `cli/errors.py`.
+   - The JSON envelope (§16.2) in `cli/errors.py`. The exit-code enum (§16.1) and the `AipmError` hierarchy live in `domain/errors.py`; `cli/errors.py` re-exports `ExitCode`.
    - Commands for later milestones print `available in vX.Y` and exit 2.
    - `aipm --version` works.
    - Startup must be fast: no heavy imports at module level. Add a test that `aipm --help` takes less than 300 ms (skip on slow CI with a marker, but run it locally).
@@ -63,7 +63,7 @@ Create the following. Every module gets a docstring, typed public stubs, and `No
      - matrix `ubuntu-latest` and `macos-latest` × Python 3.12 and 3.13;
      - steps: `uv sync --frozen`, ruff, `ruff format --check`, pyright, lint-imports, pytest with coverage;
      - `permissions: {}` at the top, granting `contents: read` per job.
-   - `workflows/security.yml`: gitleaks, semgrep (`--metrics off`), `pip-audit` (or osv-scanner) on `uv.lock`, zizmor on the workflows. Runs on PRs and weekly.
+   - `workflows/security.yml`: gitleaks, semgrep (`--metrics off`, explicit rule packs), osv-scanner on `uv.lock`, zizmor on the workflows. Runs on PRs and weekly.
    - A `commit-authorship` job in `ci.yml`. It fails if any commit in the push or PR has a message line matching `Co-Authored-By:` with an AI tool name, `Claude-Session:` or `Generated with Claude Code`, or an author other than the repository owner. Keep the existing `.githooks/commit-msg` hook as is.
    - `dependabot.yml` covering `github-actions` and `uv`.
    - `release.yml`: a stub with a TODO for prompt 08, which completes it.

@@ -50,7 +50,7 @@ You are building the architect and planner, and the deterministic validators tha
   - an acceptance criterion containing an OSC 52 escape;
   - a `deps_add` name with shell metacharacters.
 - G3 output must display argv from config only. Add a test showing that LLM text never appears in the command list.
-- Taint: architecture and threat-model content counts as untrusted until G2. The planner may read them only after approval, and through `Untrusted` wrapping if unapproved content is ever passed with `--accept-stale`.
+- Taint: every `.pm/` artifact a role reads (PRD, architecture, threat model) is rendered as `Untrusted` with a source label such as `approved:architecture`, whether it is approved or not (SECURITY §4, §7.2). Approval decides when the planner may run (the phase), not whether its input is wrapped. Unapproved or stale content reaches the planner only with `--accept-stale`. Add a test that approved content is still wrapped.
 
 ## Tests (other)
 

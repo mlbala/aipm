@@ -26,13 +26,14 @@ You are building the parts every later feature trusts. Correctness and security 
    - `make_env()`, which returns a `SandboxedEnvironment` with `StrictUndefined` and a `finalize` hook that raises `UntrustedRenderError` when `Untrusted` is rendered without the filter.
    - A template loader that reads only from package resources.
 3. **`aipm.security.redact`** (SECURITY §8):
-   - `Redactor`, built from environment values, built-in patterns and config patterns. It provides `redact(str) -> str`, `contains_secret(str) -> bool` and a logging filter.
+   - `Redactor`, built from an environment snapshot passed to its constructor (it never reads `os.environ` itself), built-in patterns and config patterns. It provides `redact(str) -> str`, `contains_secret(str) -> bool` and a logging filter.
+   - A test asserts that the redactors used by the LLM gateway, `StateStore` and logging are built from the full `os.environ`.
 4. **`aipm.security.paths`:**
    - `safe_relpath(root, p) -> SafeRelPath` and `safe_rel_glob(g) -> SafeRelGlob`. These reject absolute paths, `..`, a leading `-`, NUL, protected paths and `.pm/`, and resolve symlinks to confirm containment.
    - `PROTECTED_PATHS` from SECURITY §9.2, combined with config.
 5. **`aipm.security.command_policy`** (SECURITY §10):
    - `CommandPolicy`.
-   - `compile_gate(gate, paths, policy) -> Argv`, with the hard-deny list, argument-pattern denials and placeholder expansion.
+   - `compile_gate(gate, paths, policy, report_file=None) -> Argv`, which stays pure: argv-prefix matching against `allowed_executables` (SECURITY §10 rule 2), the hard-deny list (also at any position after a runner), inline-code and argument-pattern denials, and placeholder expansion for `{paths}`, `{test_paths}` and `{report_file}` (rule 5).
    - `check_forbidden_flags(tool, argv)`, using the forbidden table in ARCHITECTURE §11.
 6. **`aipm.execution.process`** (the only module that imports `subprocess`):
    - `run_safe` and `run_safe_async`: argv only, timeout, new session, process-group kill (SIGTERM, then SIGKILL after 10 s), output cap, constructed environment.
@@ -43,15 +44,17 @@ You are building the parts every later feature trusts. Correctness and security 
    - `frontmatter`: parse and dump.
    - `layout`: the `.pm/` paths.
    - `store.StateStore`: atomic writes (temp file + fsync + replace + directory fsync), the `filelock` lock (exit 7, with the holder's PID), redaction before every write, a pre-write secret scan, sha256 normalization (§6.2), and schema validation on load.
-   - `migrations/`: the framework, with no migrations yet.
+   - The schema-version check: a file with a newer `schema_version` than aipm knows exits 2. The migration framework is deferred to the first v2 schema (review 01, D-2).
+   - Security events: append to `.pm/events.jsonl` (gitignored, append-only) with random IDs (ARCHITECTURE §6.1).
 8. **`aipm.domain.models`:** Pydantic v2 models for every schema in ARCHITECTURE §6.3. All of them use `extra="forbid"`, length limits, ID regexes and enums. Include the run-journal event model.
 9. **`aipm.config`:**
    - The schema (§15).
    - The layered loader: defaults < user < repo < env < flags.
-   - **Repo config can only tighten security keys** (SECURITY §6, rule 5). Relaxations from the repo are ignored and reported as warnings.
+   - **Key classes** (ARCHITECTURE §15, SECURITY §6 rule 5), stored as field metadata in the schema. A user-only key from the repo is ignored with a warning. A tighten-only key from the repo can only make the setting stricter (`budget.*`: the minimum wins; `context.allowed_url_domains`: the intersection). Relaxations are reported as warnings.
    - `defaults.yaml`.
-   - Stack templates `python-uv`, `python-pip`, `node-npm`, `node-pnpm` (ARCHITECTURE §13.1), each with `allowed_executables`, `prepare`, `gates` and `test_roots`.
-10. **`aipm.security.trust_store`:**
+   - The stack template `python-uv` (ARCHITECTURE §13.1), with `allowed_executables` (argv prefixes), `prepare`, `gates` and `test_roots`. `python-pip`, `node-npm` and `node-pnpm` come in prompt 06 (review 01, D-1).
+10. **`aipm.state.trust_store`:**
+    - Resolves each `argv[0]` with `shutil.which` at trust time; the resolved absolute paths are part of the surface hash.
     - The canonical execution surface and its hash (SECURITY §6, rule 1).
     - `trust.json` in `platformdirs.user_state_dir("aipm")`, mode 0600, written atomically.
     - `is_trusted`, `trust`, `revoke`.
@@ -80,12 +83,13 @@ You are building the parts every later feature trusts. Correctness and security 
 - These modules need 100% branch coverage: `sanitize`, `untrusted`, `paths`, `command_policy`, `process`.
 - Property tests (hypothesis):
   - the path validators never accept an escaping path;
-  - `compile_gate` never emits a hard-denied executable, a denied pattern, or an unvalidated placeholder value;
+  - `compile_gate` never emits an argv outside the allowed prefixes, a hard-denied executable, a denied pattern, or an unvalidated placeholder value, and no hard-denied name or inline-code flag appears after a runner in any argv it returns;
   - `sanitize_text` is idempotent and never outputs the removed character classes;
   - the redactor never outputs a registered fake secret.
 - Corpus cases: path traversal, argument injection, a YAML alias bomb, Unicode smuggling, a fake closing tag, ANSI/OSC in text.
 - Integration tests:
   - a repo `.pm/config.yaml` that tries to set `security.require_sandbox: false` or add `bash` to the gates is ignored or rejected, as specified;
+  - a repo `.pm/config.yaml` that sets `llm.base_url` and `llm.api_key_env` (the config-redirection corpus case) is ignored with a warning (invariant I-8);
   - the global `--yes` flag never writes trust: `aipm --yes trust` without `--confirm` exits 4 in non-interactive mode; `--confirm` with a wrong or stale hash exits 6.
 
 ## Tests (other)

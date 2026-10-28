@@ -28,17 +28,19 @@ Read the current Claude Code docs for the formats of `CLAUDE.md` imports (`@AGEN
    - `claude_code.py`, implementing `render_prompt`, `context_files` and `detect` (`claude --version`, cached). `build_invocation` and `parse_result` raise `NotImplementedError("v0.3")`.
 3. **`aipm.context`:**
    - `managed_block.py`: insert or replace content between `<!-- aipm:begin … -->` and `<!-- aipm:end -->`. Content outside the markers is preserved byte for byte. Malformed or duplicate markers produce exit 2 with a hint and no write.
-   - `generator.py`: produces `AGENTS.md` (block size at most 24 KiB), `CLAUDE.md` (`@AGENTS.md` plus Claude notes), `.claude/agents/aipm-test-writer.md`, `.claude/agents/aipm-reviewer.md`, `.claude/skills/aipm-task-protocol/SKILL.md` and `.claude/skills/aipm-run-checks/SKILL.md`.
-     - Instructions only: **no scripts** in skills.
+   - `generator.py`: produces `AGENTS.md` (block size at most 24 KiB) and `CLAUDE.md` (`@AGENTS.md` plus Claude notes). The Claude subagents and skills move to prompt 06 (review 01, D-3).
      - Every interpolated field goes through `sanitize_for_context` (URLs and HTML comments removed, invisible characters removed).
    - The `AGENTS.md` sections are: Overview, Stack, How to run checks (gate argv), Architecture map (components → paths), Conventions, Boundaries (protected paths, the no-new-dependencies rule, no network), Task protocol.
+   - "How to run checks" is rendered only from `compile_gate` output, and only when the execution surface is trusted; otherwise exit 6 with the `aipm trust` hint (SECURITY §6 rule 3).
 4. **`aipm prompt <T-ID>`:**
+   - Requires trust, because the prompt's `verify[]` carries gate argv rendered through `compile_gate`; exits 6 otherwise (SECURITY §6 rule 3).
    - Prints the compiled prompt (or `--out FILE`), and writes `.pm/prompts/<T-ID>.claude.md`.
    - Sets `status: in_progress` and `base_sha: HEAD`.
    - `--copy` uses `pbcopy`, `wl-copy` or `xclip` through `run_safe` if available; otherwise it prints a hint.
    - `--fix` as described above.
    - Refuses with exit 2 if the task's dependencies are not done, unless `--force`.
 5. **`aipm sync-context`:**
+   - Requires trust for the gate-command section; exits 6 otherwise.
    - Shows a unified diff of every managed block that changed, asks for approval (or takes `approve context`), then writes the files and records the hash.
    - `--check` exits 3 on drift, for CI.
    - `--tool` is repeatable.
@@ -59,7 +61,7 @@ Read the current Claude Code docs for the formats of `CLAUDE.md` imports (`@AGEN
 
 ## E2E (the v0.1 acceptance criteria, ARCHITECTURE §22)
 
-The clinic-booking example runs `init` → `discover --answers` → `design` → `plan` → `prompt T-001` → `sync-context`, all with `FakeLLM`. Measure the timing of `aipm --help` and `aipm status`. Document the offline Ollama check as manual steps in the README.
+The clinic-booking example runs `init` → `discover --answers` → `design` → `plan` → `trust --confirm <hash>` → `prompt T-001` → `sync-context`, all with `FakeLLM`. Also check that `prompt` and `sync-context` exit 6 before `trust`. Measure the timing of `aipm --help` and `aipm status`. Document the offline Ollama check as manual steps in the README.
 
 ## Out of scope
 
