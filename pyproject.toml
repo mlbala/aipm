@@ -1,0 +1,252 @@
+[build-system]
+requires = ["hatchling>=1.33", "hatch-vcs>=0.5"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aipm"
+description = "An AI product manager for your terminal: interviews, specs, plans, prompts and verified builds."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Balakrishnan" }]
+requires-python = ">=3.12"
+dynamic = ["version"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+]
+# Runtime dependencies: ARCHITECTURE §19, lower bounds only.
+dependencies = [
+    "typer>=0.27",
+    "rich>=15.0",
+    "questionary>=2.1",
+    "pydantic>=2.14",
+    "ruamel.yaml>=0.19",
+    "jinja2>=3.1.6",        # 3.1.6 fixes a sandbox escape; aipm relies on SandboxedEnvironment
+    "filelock>=4.2",
+    "platformdirs>=4.13",
+    "pathspec>=1.1",
+    "anthropic>=2.0.0",     # first release that sends API version 2026-10-21 (ARCHITECTURE §14)
+    "openai>=3.40",
+]
+
+[project.optional-dependencies]
+otel = [
+    "opentelemetry-api>=1.45",
+    "opentelemetry-sdk>=1.45",
+    "opentelemetry-exporter-otlp-proto-http>=1.45",
+]
+keyring = ["keyring>=25.7"]
+
+[project.scripts]
+aipm = "aipm.cli.main:app"
+
+[project.urls]
+Homepage = "https://github.com/mlbala/aipm"
+Source = "https://github.com/mlbala/aipm"
+Issues = "https://github.com/mlbala/aipm/issues"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2",
+    "pytest-socket>=0.8.1",
+    "pytest-cov>=7.1",
+    "hypothesis>=6.170",
+    "syrupy>=6.1",
+    "ruff>=0.17.3",
+    "pyright>=1.1.414",
+    "import-linter>=2.15",
+    "zizmor==1.31.1",
+]
+
+# ---------------------------------------------------------------- build
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.version.raw-options]
+fallback_version = "0.0.0"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/aipm/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aipm"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/aipm", "tests", "docs", "examples", "README.md", "LICENSE", "SECURITY.md", "CHANGELOG.md"]
+
+# ---------------------------------------------------------------- ruff
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+# Deliberately violating fixtures; the ban tests lint them explicitly.
+extend-exclude = ["tests/security/fixtures"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "I", "B", "UP",
+    "S",       # bandit
+    "PTH", "RUF", "ASYNC",
+    "PL",      # pylint, with the noisy rules ignored below
+    "T20",     # no print()
+    "TID251",  # banned APIs (ARCHITECTURE §5.1)
+]
+ignore = [
+    "PLR0913", # too many arguments: run_safe and the CLI commands take many keyword flags
+    "PLR0917", # too many positional arguments: Typer commands mirror their flags
+    "PLR2004", # magic values
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The only module that may start a process (ARCHITECTURE §5.1, SECURITY.md §10 rule 1).
+"src/aipm/execution/process.py" = ["TID251"]
+# Test fixtures run git and the CLI as subprocesses before run_safe exists (review 01, §6).
+"tests/**" = ["TID251", "S101", "S603", "S607", "PLC0415"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"subprocess".msg = "Only aipm.execution.process may start a process; use run_safe()."
+"asyncio.subprocess".msg = "Only aipm.execution.process may start a process; use run_safe_async()."
+"asyncio.create_subprocess_exec".msg = "Only aipm.execution.process may start a process; use run_safe_async()."
+"asyncio.create_subprocess_shell".msg = "No shell, ever (SECURITY.md §10 rule 1)."
+"os.system".msg = "No shell, ever (SECURITY.md §10 rule 1)."
+"os.popen".msg = "No shell, ever (SECURITY.md §10 rule 1)."
+"os.spawnl".msg = "Only aipm.execution.process may start a process."
+"os.spawnle".msg = "Only aipm.execution.process may start a process."
+"os.spawnlp".msg = "Only aipm.execution.process may start a process."
+"os.spawnlpe".msg = "Only aipm.execution.process may start a process."
+"os.spawnv".msg = "Only aipm.execution.process may start a process."
+"os.spawnve".msg = "Only aipm.execution.process may start a process."
+"os.spawnvp".msg = "Only aipm.execution.process may start a process."
+"os.spawnvpe".msg = "Only aipm.execution.process may start a process."
+"os.execl".msg = "Only aipm.execution.process may start a process."
+"os.execle".msg = "Only aipm.execution.process may start a process."
+"os.execlp".msg = "Only aipm.execution.process may start a process."
+"os.execlpe".msg = "Only aipm.execution.process may start a process."
+"os.execv".msg = "Only aipm.execution.process may start a process."
+"os.execve".msg = "Only aipm.execution.process may start a process."
+"os.execvp".msg = "Only aipm.execution.process may start a process."
+"os.execvpe".msg = "Only aipm.execution.process may start a process."
+"os.posix_spawn".msg = "Only aipm.execution.process may start a process."
+"os.posix_spawnp".msg = "Only aipm.execution.process may start a process."
+"os.fork".msg = "Only aipm.execution.process may start a process."
+"os.forkpty".msg = "Only aipm.execution.process may start a process."
+"os.startfile".msg = "Only aipm.execution.process may start a process."
+"posix".msg = "Use os; posix exposes system(), fork() and exec*() directly."
+"_posixsubprocess".msg = "Only aipm.execution.process may start a process."
+"pty".msg = "Only aipm.execution.process may start a process."
+"multiprocessing".msg = "Only aipm.execution.process may start a process."
+"pickle".msg = "Never unpickle data (AGENTS.md rule 1)."
+"marshal".msg = "Never unmarshal data (AGENTS.md rule 1)."
+"importlib.import_module".msg = "No dynamic imports; plugins/loader.py gets a line-level exemption in v0.4."
+# ruff cannot match the bare `__import__` builtin; tests/security/test_banned_api.py scans for it.
+"builtins".msg = "No access to __import__, exec or eval through the builtins module."
+
+# ---------------------------------------------------------------- pyright
+
+[tool.pyright]
+include = ["src/aipm"]
+strict = ["src/aipm"]
+pythonVersion = "3.12"
+venvPath = "."
+venv = ".venv"
+
+# ---------------------------------------------------------------- pytest
+
+[tool.pytest.ini_options]
+minversion = "9.0"
+testpaths = ["tests"]
+addopts = ["--disable-socket", "--strict-markers", "--strict-config", "-ra"]
+markers = [
+    "timing: wall-clock budget tests; skipped when CI is set unless AIPM_RUN_TIMING=1",
+    "live: real-provider smoke tests; skipped unless AIPM_LIVE=1 (never in CI)",
+]
+xfail_strict = true
+
+# ---------------------------------------------------------------- coverage
+
+[tool.coverage.run]
+branch = true
+source = ["aipm"]
+omit = ["src/aipm/_version.py"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "^\\s*\\.\\.\\.$",
+]
+
+# ---------------------------------------------------------------- import-linter
+
+[tool.importlinter]
+root_package = "aipm"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Layers (ARCHITECTURE §5.1)"
+type = "layers"
+layers = [
+    "aipm.cli",
+    "aipm.app",
+    "aipm.gates | aipm.adapters | aipm.reporting",
+    "aipm.roles | aipm.context",
+    "aipm.state : aipm.config : aipm.llm : aipm.execution : aipm.scanners : aipm.observability : aipm.plugins",
+    "aipm.domain : aipm.security",
+]
+
+[[tool.importlinter.contracts]]
+name = "L0 is pure: domain and security import no process, network or LLM SDK modules"
+type = "forbidden"
+source_modules = ["aipm.domain", "aipm.security"]
+forbidden_modules = ["subprocess", "socket", "httpx", "anthropic", "openai"]
+
+[[tool.importlinter.contracts]]
+name = "Only aipm.llm.providers imports the LLM SDKs"
+type = "forbidden"
+source_modules = [
+    "aipm.cli", "aipm.app", "aipm.domain", "aipm.security", "aipm.state", "aipm.config",
+    "aipm.execution", "aipm.scanners", "aipm.observability", "aipm.plugins", "aipm.roles",
+    "aipm.context", "aipm.adapters", "aipm.gates", "aipm.reporting",
+    "aipm.llm.gateway", "aipm.llm.structured", "aipm.llm.cache", "aipm.llm.cost", "aipm.llm.fake",
+]
+forbidden_modules = ["anthropic", "openai"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "Only aipm.execution.process imports subprocess"
+type = "forbidden"
+source_modules = [
+    "aipm.cli", "aipm.app", "aipm.domain", "aipm.security", "aipm.state", "aipm.config",
+    "aipm.llm", "aipm.scanners", "aipm.observability", "aipm.plugins", "aipm.roles",
+    "aipm.context", "aipm.adapters", "aipm.gates", "aipm.reporting",
+    "aipm.execution.sandbox", "aipm.execution.git", "aipm.execution.worktree",
+    "aipm.execution.journal",
+]
+forbidden_modules = ["subprocess", "multiprocessing", "pty"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+name = "cli imports only app, domain.errors and security.sanitize"
+type = "forbidden"
+source_modules = ["aipm.cli"]
+forbidden_modules = [
+    "aipm.state", "aipm.config", "aipm.llm", "aipm.execution", "aipm.scanners",
+    "aipm.observability", "aipm.plugins", "aipm.roles", "aipm.context", "aipm.adapters",
+    "aipm.gates", "aipm.reporting",
+    "aipm.domain.models", "aipm.domain.phase", "aipm.domain.coverage", "aipm.domain.dag",
+    "aipm.domain.scheduler", "aipm.domain.ids",
+    "aipm.security.untrusted", "aipm.security.redact", "aipm.security.paths",
+    "aipm.security.command_policy", "aipm.security.diff_checks", "aipm.security.supply_chain",
+    "aipm.security.budget", "aipm.security.network",
+]
+allow_indirect_imports = true
