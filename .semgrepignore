@@ -1,0 +1,7 @@
+# Deliberately violating code, used to prove the ruff ban works.
+tests/security/fixtures/
+# Fake, non-functional secrets used by redaction tests (AGENTS.md rule 9).
+tests/fakes/secrets.py
+# Generated or third-party content.
+.venv/
+uv.lock

@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Checks (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.12", "3.13"]
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # hatch-vcs derives the version from tags and history
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.13.6"
+          python-version: ${{ matrix.python }}
+          enable-cache: false
+
+      - name: Install
+        run: uv sync --frozen --all-extras
+
+      - name: Lint
+        run: uv run --frozen ruff check .
+
+      - name: Format
+        run: uv run --frozen ruff format --check .
+
+      - name: Types (pyright, strict)
+        run: uv run --frozen pyright
+
+      - name: Layers (import-linter)
+        run: uv run --frozen lint-imports
+
+      - name: Tests with coverage
+        run: uv run --frozen pytest --cov --cov-report=term
+
+  commit-authorship:
+    name: Commit authorship
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Every new commit is the owner's, with no AI attribution
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            base="$PR_BASE"; head="$PR_HEAD"
+          else
+            base="$PUSH_BEFORE"; head="$PUSH_AFTER"
+          fi
+          # A new branch has no "before" commit: compare with the default branch instead.
+          case "$base" in *[!0]*) ;; *) base="$(gh api "repos/$REPO" --jq .default_branch)" ;; esac
+
+          gh api --paginate "repos/$REPO/compare/$base...$head?per_page=100" \
+            --jq '.commits[] | {sha: .sha[0:12], login: (.author.login // ""), message: .commit.message}' \
+            > commits.jsonl
+
+          fail=0
+          # The author must be a GitHub account: the owner, or Dependabot. An email that is not
+          # linked to any account has no login and fails.
+          while IFS=$'\t' read -r sha login; do
+            if [ "$login" != "$OWNER" ] && [ "$login" != "dependabot[bot]" ]; then
+              echo "::error::Commit $sha is authored by '${login:-an unlinked email}', not $OWNER."
+              fail=1
+            fi
+          done < <(jq -r '[.sha, .login] | @tsv' commits.jsonl)
+
+          # No co-author, session or "Generated with" lines (AGENTS.md "Git").
+          attributed="$(jq -r 'select(.message | split("\n") | any(test("^(co-authored-by:|claude-session:)|generated with \\[?claude"; "i"))) | .sha' commits.jsonl)"
+          for sha in $attributed; do
+            echo "::error::Commit $sha has a co-author or AI attribution line."
+            fail=1
+          done
+
+          echo "Checked $(wc -l < commits.jsonl | tr -d ' ') commits between $base and $head."
+          exit "$fail"

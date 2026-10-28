@@ -1,0 +1,9 @@
+# gitleaks configuration: the default rules, plus one allowlisted file.
+title = "aipm gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fake, non-functional secrets used by redaction tests (AGENTS.md rule 9)."
+paths = ['''^tests/fakes/secrets\.py$''']
