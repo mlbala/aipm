@@ -54,6 +54,18 @@ class NotImplementedYet(UsageError):
     code = "NOT_IMPLEMENTED"
 
 
+class InputRejected(UsageError):
+    """Untrusted input is too large, binary or not valid UTF-8 (SECURITY.md §7.1)."""
+
+    code = "INPUT_REJECTED"
+
+
+class SchemaError(UsageError):
+    """A `.pm/` file or a config layer fails validation, or has a newer schema_version."""
+
+    code = "SCHEMA_ERROR"
+
+
 class VerificationFailed(AipmError):
     """Gates or checks failed, or `sync-context --check` found drift."""
 
