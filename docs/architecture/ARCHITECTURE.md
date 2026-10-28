@@ -138,52 +138,57 @@ External dependencies:
 ```mermaid
 flowchart TB
   cli[L4 cli - Typer commands, output, exit codes]
-  app[L3 app - one use-case per command]
-  l2[L2 roles, context, adapters, gates, reporting]
-  l1[L1 state, config, llm, execution, scanners]
-  l0[L0 domain and security - pure, no I/O]
+  app[L3 app - one use-case per command, dispatcher, build loop]
+  l2b[L2b gates, adapters, reporting]
+  l2a[L2a roles, context]
+  l1[L1 state, config, llm, execution, scanners, observability, plugins]
+  l0[L0 domain and security - pure]
   cli --> app
-  app --> l2
+  app --> l2b
+  app --> l2a
   app --> l1
-  l2 --> l1
-  l2 --> l0
+  l2b --> l2a
+  l2b --> l1
+  l2a --> l1
+  l2a --> l0
   l1 --> l0
 ```
 
-**Dependency rules.** These are enforced in CI with `import-linter`:
+**Dependency rules.** These are enforced in CI with `import-linter` and ruff:
 
-- A layer may import only from layers below it.
-- `cli` may import only `app`, plus `cli`'s own output helpers.
-- L0 imports only the standard library and `pydantic`. L0 MUST NOT import any of: `subprocess`, `socket`, `httpx`, `anthropic`, `openai`, the `os.system` family, or file I/O helpers.
-- `subprocess` is imported in exactly one module: `aipm.execution.process`.
+- A layer may import only from layers below it. L2 has two sub-layers: L2b (`gates`, `adapters`, `reporting`) may import L2a (`roles`, `context`), so `gates → roles` (the AC reviewer) and `adapters → context` (context files) are legal. Packages inside L2a, and inside L2b, are independent of each other. Packages inside L0, and inside L1, may import each other.
+- `cli` may import only `aipm.app`, `aipm.domain.errors` (the exit codes and error types) and `aipm.security.sanitize` (to clean text before printing), plus `cli`'s own output helpers.
+- L0 is pure: no subprocess, no network, no file writes, no LLM SDKs. It imports only the standard library and `pydantic`, and MUST NOT import `subprocess`, `socket`, `httpx`, `anthropic`, `openai`, the `os.system` family, or file I/O helpers. The one exception is `security/paths.py`, which may make read-only `lstat`/`realpath` calls to detect symlink escapes.
+- A process can be started from exactly one module, `aipm.execution.process`. A ruff `banned-api` list (TID251) applies to `src/aipm/**` and bans `subprocess`, `os.system`, `os.popen`, `os.spawn*`, `os.exec*`, `os.posix_spawn*`, `os.fork`, `os.forkpty`, `pty`, `multiprocessing`, `asyncio.create_subprocess_exec`, `asyncio.create_subprocess_shell`, `importlib.import_module` and `__import__`. `execution/process.py` is the only exemption, except that `plugins/loader.py` may call `importlib.import_module` once entry-point loading arrives (v0.4). import-linter forbids the `subprocess` import as a second layer; it sees module imports only, not attribute calls such as `os.system`.
+- Network access exists in exactly two places: the LLM gateway (`aipm.llm`) and the registry lookups in `aipm.scanners.registry`.
 - LLM SDKs are imported only inside `aipm.llm.providers.*`, and lazily (at call time, not at module import), to keep CLI startup fast.
 
 ### 5.2 Components
 
 | # | Component | Package | Responsibility | Milestone |
 |---|---|---|---|---|
-| C-1 | CLI layer | `aipm.cli` | Parse commands, global flags, render Rich or JSON output, map errors to exit codes | v0.1 |
-| C-2 | Config manager | `aipm.config` | Merge config layers, validate the schema, load stack templates | v0.1 |
-| C-3 | State store | `aipm.state` | `.pm/` I/O: atomic writes, lock, deterministic YAML, front matter, schema migrations | v0.1 |
+| C-1 | CLI layer | `aipm.cli` | Parse commands, global flags, render Rich or JSON output, map errors to exit codes. The error types and the `ExitCode` enum live in `aipm.domain.errors`. | v0.1 |
+| C-2 | Config manager | `aipm.config` | Merge config layers, enforce the key classes (§15), validate the schema, load stack templates | v0.1 |
+| C-3 | State store | `aipm.state` | `.pm/` I/O: atomic writes, lock, deterministic YAML, front matter, schema validation, security events. Schema migrations come with the first v2 schema (§6.2). | v0.1 |
 | C-4 | Phase engine | `aipm.domain.phase` | Derive the phase from files, detect staleness, decide the next step | v0.1 |
-| C-5 | LLM gateway | `aipm.llm` | Providers, role→model routing, structured output, retries, cache, cost accounting, redaction | v0.1 |
+| C-5 | LLM gateway | `aipm.llm` | Providers, role→model routing, structured output, retries, cost accounting, redaction; response cache | v0.1 (cache in v0.2) |
 | C-6 | LLM roles | `aipm.roles` | Interviewer, PRD writer, architect, threat modeler, planner, AC reviewer. All are tool-less. | v0.1 (AC reviewer in v0.2) |
 | C-7 | Coverage engine | `aipm.domain.coverage` | Checklist scoring, assumptions, open questions, stop rule | v0.1 |
 | C-8 | Plan validator | `aipm.domain.dag` | Acyclicity, ownership overlap, gate-menu validation, size caps | v0.1 |
 | C-9 | Prompt compiler | `aipm.adapters.compiler` | Canonical `TaskSpec` → tool-specific prompt (no LLM) | v0.1 |
-| C-10 | Context generator | `aipm.context` | `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, Copilot instructions, skills, subagents | v0.1 (Claude Code + AGENTS.md); other tools in v0.4 |
+| C-10 | Context generator | `aipm.context` | `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, Copilot instructions, skills, subagents | v0.1 (`AGENTS.md`, `CLAUDE.md`); v0.2 (Claude subagents and skills); other tools in v0.4 |
 | C-11 | Tool adapters | `aipm.adapters` | Per-tool rendering, capability detection, headless invocation, output parsing | Claude Code: v0.1 render, v0.3 dispatch; Codex, Copilot, Gemini: v0.4 |
 | C-12 | Process runner | `aipm.execution.process` | The only subprocess entry point: argv only, timeouts, env allowlist, output caps, process-group kill | v0.1 |
 | C-13 | Sandbox | `aipm.execution.sandbox` | Wrap a process in `srt` or a tool-native sandbox, with network profiles | v0.2 |
 | C-14 | Git and worktrees | `aipm.execution.git`, `aipm.execution.worktree` | Safe git calls (hooks off), worktrees, integration branch, integrity checks | v0.2 (git), v0.3 (worktrees) |
 | C-15 | Gate runner | `aipm.gates` | Prepare step, command gates, built-in gates, AC traceability, AC review veto | v0.2 |
-| C-16 | Post-change checks | `aipm.security.diff_checks` | Scope, protected paths, test tampering, dependency changes, git integrity | v0.2 |
-| C-17 | Scanners | `aipm.scanners` | Run semgrep, gitleaks, osv-scanner and trivy; normalize findings | v0.2 |
-| C-18 | Dispatcher and build loop | `aipm.execution.dispatcher`, `aipm.execution.build_loop` | Scheduler, parallel attempts, retries, budgets, resume | v0.3 |
+| C-16 | Post-change checks | `aipm.security.diff_checks` | Scope, protected paths, test tampering, dependency changes, git integrity. A pure function over a `ChangeSet` that `aipm.execution.git` builds. | v0.2 |
+| C-17 | Scanners | `aipm.scanners` | Run semgrep, gitleaks, osv-scanner and trivy; normalize findings. `aipm.scanners.registry` makes the package-registry lookups for the deps gate (the only network access besides the LLM gateway). | v0.2 |
+| C-18 | Dispatcher and build loop | `aipm.app.dispatcher`, `aipm.app.build_loop` | Scheduler, parallel attempts, retries, budgets, resume | v0.3 |
 | C-19 | Run journal | `aipm.execution.journal` | Append-only JSONL events for resume and audit | v0.3 |
 | C-20 | Budget and policy engine | `aipm.security.command_policy`, `aipm.security.budget` | Command policy, network profiles, budget enforcement | v0.1 (policy), v0.3 (budgets) |
-| C-21 | Trust store | `aipm.security.trust_store` | Per-user approval of the execution surface | v0.1 |
-| C-22 | Security primitives | `aipm.security.*` | Sanitize, untrusted wrapping, redaction, safe paths | v0.1 |
+| C-21 | Trust store | `aipm.state.trust_store` | Per-user approval of the execution surface; resolves each executable with `shutil.which` at trust time | v0.1 |
+| C-22 | Security primitives | `aipm.security.*` | Sanitize, untrusted wrapping, redaction (from an environment snapshot passed in), safe paths, pure supply-chain checks (name, typosquat distance, age policy) | v0.1 |
 | C-23 | Reporting | `aipm.reporting` | Worksheet, status, JSON views | v0.1 |
 | C-24 | Observability | `aipm.observability` | Structured logs; optional OpenTelemetry | v0.1 (logs), v0.4 (OpenTelemetry) |
 | C-25 | Plugins | `aipm.plugins` | Entry-point discovery for adapters, gates, scanners, providers and stacks | v0.4 |
@@ -243,15 +248,22 @@ def run_safe(argv: Sequence[str], *, cwd: Path, env: Mapping[str, str],
              sandbox: SandboxProfile | None = None) -> ProcessResult: ...
 async def run_safe_async(...) -> ProcessResult: ...
 
-# aipm.security.command_policy
+# aipm.security.command_policy (pure: no executable resolution here)
 def compile_gate(gate: GateDef, *, paths: Sequence[SafeRelPath],
-                 policy: CommandPolicy) -> Argv: ...         # raises PolicyViolation → exit 6
+                 policy: CommandPolicy,
+                 report_file: Path | None = None) -> Argv: ...  # raises PolicyViolation → exit 6
+                                                            # report_file: aipm-generated, outside the worktree (§13.1)
 
 # aipm.gates.runner
 class GateRunner(Protocol):
     def run(self, task: Task, ws: Workspace, base_sha: str) -> GateReport: ...
 
-# aipm.security.trust_store
+# aipm.domain.errors
+class ExitCode(IntEnum): ...                                  # §16.1
+class AipmError(Exception):
+    exit_code: ExitCode                                       # cli maps it to the process exit code
+
+# aipm.state.trust_store
 class TrustStore(Protocol):
     def surface_hash(self, cfg: Config) -> str: ...            # canonical hash of execution surface
     def is_trusted(self, repo: RepoId, surface_hash: str) -> bool: ...
@@ -262,7 +274,7 @@ class TrustStore(Protocol):
 
 | Component | Failure | Handling |
 |---|---|---|
-| State store | Schema validation error on load (for example, a bad hand edit) | Exit 2, showing the file, line and field, plus a hint (`aipm doctor --fix-schema` offers a migration when one applies) |
+| State store | Schema validation error on load (for example, a bad hand edit) | Exit 2, showing the file, line and field, plus a hint. A newer `schema_version` than aipm knows also exits 2 and suggests upgrading aipm. |
 | State store | Lock held | Exit 7, showing the PID and start time of the lock holder. A stale lock (dead PID) is reclaimed only after the user confirms. |
 | LLM gateway | 429 / 5xx / timeout | Exponential backoff with jitter, up to 5 tries, honouring `retry-after`; then exit 1 with the provider's message |
 | LLM gateway | Output fails schema validation | One repair attempt that includes the validation errors; then exit 1. Partial output is never written. |
@@ -290,11 +302,14 @@ class TrustStore(Protocol):
 ├── approvals.yaml           # human approvals (record, not trust)              tracked
 ├── repo-map.md              # generated summary of the existing repo           tracked
 ├── prompts/<TASK>.<tool>.md # compiled prompts (rebuildable)                   tracked
-├── .gitignore               # ignores runs/, cache/, .lock
+├── .gitignore               # ignores runs/, cache/, events.jsonl, .lock
+├── events.jsonl             # security events and their acknowledgements       ignored
 ├── runs/<run-id>/           # journal.jsonl, logs, gate reports, cost.json     ignored
-├── cache/llm/               # response cache                                   ignored
+├── cache/llm/               # response cache (v0.2)                            ignored
 └── .lock                    # process lock                                     ignored
 ```
+
+**Security events** (SECURITY.md §7.9) are appended to `.pm/events.jsonl`, only through `StateStore`. The file is gitignored and append-only. Event IDs are random (`EV-` plus 12 hex characters), so a file committed by a malicious repo cannot acknowledge future events in advance; `aipm status --ack` accepts only IDs that this machine recorded.
 
 **Worktrees** live outside the repo, at `<user_cache_dir>/aipm/worktrees/<repo-id>/<task-id>` (via `platformdirs`). Keeping them out of the repo stops agents from reaching the main repo's `.pm/`.
 
@@ -310,7 +325,7 @@ class TrustStore(Protocol):
 - **Front matter:** Markdown artifacts carry YAML front matter between `---` lines; the body is free Markdown.
 - **IDs:** stable and never reused. `F-001` (feature), `C-01` (component), `TM-01` (threat), `T-001` (task), `AC-T001-1` (acceptance criterion), `Q-001` (question), `A-001` (assumption), `ADR-0001`.
 - **Hashes:** a file hash is `sha256` of its normalized bytes (LF line endings, trailing whitespace stripped).
-- **Schema version:** every file carries `schema_version: <int>`. Migrations live in `aipm/state/migrations/v<N>_to_v<N+1>.py` and are pure functions. A file with a newer schema than aipm knows is refused (exit 2).
+- **Schema version:** every file carries `schema_version: <int>`. A file with a newer schema than aipm knows is refused (exit 2). Schema migrations (`aipm/state/migrations/v<N>_to_v<N+1>.py`, pure functions) and `aipm doctor --fix-schema` arrive with the release that introduces the first v2 schema.
 
 ### 6.3 Schemas (v1)
 
@@ -576,7 +591,7 @@ A stale artifact is reported with its downstream impact, for example "PRD change
 
 - task: `id`, `title`, `description`, `acceptance[]`, `owns_files[]`, `reads_files[]`, `deps_add[]`
 - `upstream[]`: titles and `done.commit` of the tasks this task depends on
-- `verify[]`: for each gate, the exact argv the agent may run itself, rendered from the gate menu
+- `verify[]`: for each gate, the exact argv the agent may run itself. It is rendered only through `compile_gate` (policy-checked), and only when the execution surface is trusted; otherwise the command exits 6 and prints the `aipm trust` hint ([SECURITY.md §6](SECURITY.md#6-execution-trust) rule 3). In manual mode the user's agent runs these commands outside aipm's sandbox, so untrusted argv must never reach it.
 - `constraints`: the protected paths, the no-new-dependencies rule (except declared `deps_add`), the no-network rule, and the "do not edit tests you do not own" rule
 - `protocol`:
   - tag every test that covers an acceptance criterion with its ID, e.g. `AC-T007-1` in the test name or docstring;
@@ -591,10 +606,10 @@ All context files are rendered from built-in templates (`aipm/context/templates/
 
 | File | Tool | Content | Milestone |
 |---|---|---|---|
-| `AGENTS.md` | All (native for Codex and Copilot) | Overview, stack, how to run checks (gate argv), architecture map, conventions, boundaries, task protocol | v0.1 |
+| `AGENTS.md` | All (native for Codex and Copilot) | Overview, stack, how to run checks (gate argv, trusted only), architecture map, conventions, boundaries, task protocol | v0.1 |
 | `CLAUDE.md` | Claude Code | `@AGENTS.md` import plus Claude-specific notes | v0.1 |
-| `.claude/agents/aipm-*.md` | Claude Code | Subagents: `aipm-test-writer`, `aipm-reviewer` (template-only) | v0.1 |
-| `.claude/skills/aipm-*/SKILL.md`, `.agents/skills/aipm-*/SKILL.md` | Claude Code, Codex | Skills: `aipm-task-protocol`, `aipm-run-checks`. Instructions only; they never include scripts. | v0.1 (Claude), v0.4 (Codex) |
+| `.claude/agents/aipm-*.md` | Claude Code | Subagents: `aipm-test-writer`, `aipm-reviewer` (template-only) | v0.2 |
+| `.claude/skills/aipm-*/SKILL.md`, `.agents/skills/aipm-*/SKILL.md` | Claude Code, Codex | Skills: `aipm-task-protocol`, `aipm-run-checks`. Instructions only; they never include scripts. | v0.2 (Claude), v0.4 (Codex) |
 | `GEMINI.md` and/or `.gemini/settings.json` (`context.fileName: ["AGENTS.md"]`) | Gemini CLI | Pointer to `AGENTS.md` | v0.4 |
 | `.github/copilot-instructions.md` | Copilot | Pointer to `AGENTS.md` | v0.4 |
 
@@ -606,6 +621,7 @@ All context files are rendered from built-in templates (`aipm/context/templates/
   - Unicode clean-up and control-character removal ([SECURITY.md §7.1](SECURITY.md#71-l1-input-hygiene));
   - HTML comments removed;
   - URLs removed unless their domain is in `context.allowed_url_domains` (default: empty).
+- **Gate commands.** The "how to run checks" section is rendered only from `compile_gate` output, and only when the execution surface is trusted. Otherwise `sync-context` exits 6 and prints the `aipm trust` hint (§10.1).
 - **Approval of changes.** `sync-context` shows a unified diff and asks for approval when a block changes. `--check` exits 3 when files are out of date, for CI. `approve context` records the hash.
 
 ## 11. Tool adapters
@@ -762,12 +778,18 @@ Gate menus come from stack templates (`aipm/config/stacks/<stack>.yaml`). They a
 
 ```yaml
 # aipm/config/stacks/python-uv.yaml
+allowed_executables:                  # argv prefixes; every argv must start with one (SECURITY.md §10 rule 2)
+  - ["uv", "sync", "--frozen"]
+  - ["uv", "run", "--frozen", "--offline", "ruff"]
+  - ["uv", "run", "--frozen", "--offline", "pyright"]
+  - ["uv", "run", "--frozen", "--offline", "pytest"]
+test_roots: ["tests"]                 # where {test_paths} looks for owned tests
 prepare: {run: ["uv", "sync", "--frozen"], network: registries}
 gates:
   lint:     {run: ["uv", "run", "--frozen", "--offline", "ruff", "check", "{paths}"], required: true}
   format:   {run: ["uv", "run", "--frozen", "--offline", "ruff", "format", "--check", "{paths}"], required: false}
   types:    {run: ["uv", "run", "--frozen", "--offline", "pyright", "{paths}"], required: false}
-  unit:     {run: ["uv", "run", "--frozen", "--offline", "pytest", "-q", "{test_paths}"], required: true}
+  unit:     {run: ["uv", "run", "--frozen", "--offline", "pytest", "-q", "--junitxml", "{report_file}", "{test_paths}"], required: true}
   secrets:  {builtin: gitleaks, required: true}
   sast:     {builtin: semgrep, fail_on: high, required: false}
   deps:     {builtin: osv, fail_on: high, required: true}
@@ -775,13 +797,20 @@ gates:
   ac_review:{builtin: ac_review, mode: veto, required: false}
 ```
 
-**Placeholders:** `{paths}` expands to the task's owned paths that exist. `{test_paths}` expands to owned paths under the stack's test roots, or to the stack's default test root when the task owns none. Every expanded value passes `safe_relpath`. No other placeholders exist.
+**Placeholders.** Exactly three exist:
+
+- `{paths}` expands to the task's owned paths that exist.
+- `{test_paths}` expands to owned paths under the stack's `test_roots`, or to the first test root when the task owns none.
+- `{report_file}` expands to an absolute path that aipm generates in the per-attempt temp dir, outside the worktree. Its value is never derived from task, LLM or config data. aipm deletes the file immediately before the gate runs and reads `ac_trace`'s report only from it (§13.3).
+
+Each placeholder must be a whole argv element, and each expanded value is its own argv element. `{paths}` and `{test_paths}` values pass `safe_relpath`.
 
 **Stack templates shipped:**
 
 | Stack | Milestone |
 |---|---|
-| `python-uv`, `python-pip`, `node-npm`, `node-pnpm` | v0.1 |
+| `python-uv` | v0.1 |
+| `python-pip`, `node-npm`, `node-pnpm` | v0.2 |
 | `go`, `rust-cargo` | v0.4 |
 | `java-maven` | Later |
 
@@ -789,17 +818,17 @@ gates:
 
 - Gates run in the worktree (or the working tree in manual mode), in the sandbox, with the `gates` network profile (none). The `prepare` step uses the `registries` profile.
 - **Order:** cheap gates first (`secrets` → `lint` → `format` → `types` → `unit` → `ac_trace` → `sast` → `deps`), then `ac_review` last.
-- **Short-circuit:** with `gates.fail_fast: true` (the default during build), aipm stops at the first required failure. `verify` runs all gates.
+- **Short-circuit:** with `dispatch.fail_fast: true` (the default during build), aipm stops at the first required failure. `verify` runs all gates.
 - **Results:** each gate produces `{name, status: pass|fail|error|skipped, duration_ms, summary, findings[], output_ref}`. Full output is stored in the run directory and redacted.
 
 ### 13.3 Built-in gates and checks
 
 | Gate / check | What it does |
 |---|---|
-| `ac_trace` | Every `AC-…` ID of the task appears in at least one test file in the diff or in owned test paths, and those tests ran in `unit` (pytest: `--junitxml`; node: the reporter output) |
+| `ac_trace` | Every `AC-…` ID of the task appears in at least one test file in the diff or in owned test paths, and those tests ran in `unit`. aipm reads the run's report only from `{report_file}` (pytest: `--junitxml {report_file}`; jest and vitest: the JSON reporter writing to `{report_file}`). Deleting the file before the gate runs stops a report planted in advance. Agent-written test code that forges the report while the gate runs is not stopped; that is residual risk R-1/R-5 ([SECURITY.md §15](SECURITY.md#15-residual-risks)). |
 | `ac_review` | An LLM gets the acceptance criteria and the diff (untrusted) and returns `met`, `not_met` or `unclear` per criterion. Any `not_met` fails the task (veto). All `met` adds nothing (P-6). `unclear` produces a warning. Override with `aipm verify --override-ac <ID> --reason "…"`, which is logged. |
 | `secrets` | `gitleaks` on the diff (`--log-opts` range) in v0.2; built-in regex fallback when gitleaks is absent (with a warning) |
-| `sast` | `semgrep --config auto` in v0.2. Runs on owned paths with `--metrics off`. Rule packs are pinned in config. |
+| `sast` | `semgrep` in v0.2, with the rule packs pinned in `scanners.semgrep.configs` (§15) and `--metrics off`. Runs on owned paths. `--config auto` is never used. |
 | `deps` | `osv-scanner` on lockfiles. Every new dependency is checked for existence and first-release age in its registry (default minimum 30 days) and against `deps_add`. Typosquat warning when within edit distance 1 of a top package name. |
 | Tamper heuristics (post-change check, not a gate) | On tests the task does not own: any change is a violation. On owned tests: added skip/xfail markers (`pytest.mark.skip`, `xfail`, `it.skip`, `describe.skip`, `t.Skip`), deleted test functions, or a falling assertion count. Changes to test configuration (`pytest.ini`, `[tool.pytest]`, `jest.config.*`, coverage omit lists) count as protected unless the task owns them. |
 | `container` (v0.4) | `trivy fs` / `trivy config` when a Dockerfile or IaC exists |
@@ -816,9 +845,10 @@ gates:
   - The system template comes from `aipm/roles/prompts/<role>.system.j2`, rendered in a sandboxed Jinja environment with `StrictUndefined`.
   - The user content is assembled from typed inputs. Untrusted parts are wrapped ([SECURITY.md §7.2](SECURITY.md#72-l2-spotlighting-and-typed-untrusted-content)).
 - **Redaction:** the redactor runs on the fully rendered prompt before it is sent ([SECURITY.md §8](SECURITY.md#8-secrets)).
-- **Cache:**
+- **No sampling parameters.** The gateway never sends `temperature`, `top_p` or `top_k` to any provider, and the config has no key for them. Anthropic API version `2026-10-21` returns a 400 for any of them on every model, even at default values. The `anthropic` provider requires `anthropic>=2.0.0`, the first Python SDK release that sends `2026-10-21` by default, and sets no `anthropic-version` header of its own.
+- **Cache (v0.2):**
   - Key: `sha256(provider, model, role, template_version, rendered_prompt, schema_json)`.
-  - Stored under `.pm/cache/llm/`. Disable with `--no-cache`. Caching is skipped for temperature > 0 unless `llm.cache_nondeterministic: true`.
+  - Stored under `.pm/cache/llm/`. Disable with `--no-cache`. Its determinism rule is defined when the cache arrives in v0.2.
 - **Limits:** per call, `max_output_tokens` (8,000) and a request timeout (120 s). Per run, the token budget.
 - **Cost:** token usage comes from the provider. USD is computed only when `llm.pricing` defines prices for the model; aipm ships no prices, so they cannot go stale. Costs are recorded per role and per task in `runs/<id>/cost.json`.
 - **Offline:** `provider: openai-compatible` with `base_url: http://localhost:11434/v1` uses Ollama. No network calls are made except to `base_url`.
@@ -834,50 +864,69 @@ gates:
 | `planner` | PRD, architecture, threat model (T1), gate menu (T0) | `Plan{tasks[]}` | strong |
 | `ac_reviewer` | Acceptance criteria (T1), diff (T2), gate summary (T0) | `ACReview{criteria[{id, verdict, evidence ≤ 500}]}` | fast |
 
+**Every input is wrapped.** Every `.pm/` artifact rendered into a role prompt is wrapped as `Untrusted`, whatever its trust level, with a source label such as `approved:prd` or `unapproved:architecture` ([SECURITY.md §4](SECURITY.md#4-trust-levels-and-boundaries)). Approval (T1) decides which artifacts a role may read and when (the phase, §7.1). It never removes the wrapping, because `approvals.yaml` can be forged by anyone who can write to the repo.
+
 Every output schema includes `injection_suspected: list[str]` (each entry at most 300 characters, at most 10 entries). Role system prompts instruct the model to report, in this field, any instructions it finds inside untrusted blocks ([SECURITY.md §7.9](SECURITY.md#79-l9-detection)).
 
 ## 15. Configuration
 
 **Layering** (later layers win): built-in defaults < `<user_config_dir>/aipm/config.yaml` < `.pm/config.yaml` < `AIPM_*` environment variables < CLI flags.
 
-**Security keys cannot be relaxed from the repo.** For keys under `security.*`, `dispatch.tools.*.bare` and `dispatch.sandbox`, a repo-level value may only make the setting stricter than the user-level one. Relaxing it requires the user-level config or a CLI flag ([SECURITY.md §6](SECURITY.md#6-execution-trust)).
+**Repo config is limited by key class.** Every config field carries one of three classes in the schema (field metadata), and the loader enforces them ([SECURITY.md §6](SECURITY.md#6-execution-trust) rule 5). Where two classes could apply, the more specific key wins (`security.extra_allowed_executables` is user-only although `security.*` is tighten-only).
+
+| Class | A repo-level (`.pm/config.yaml`) value | Keys |
+|---|---|---|
+| **user-only** | Ignored, with a warning | `llm.provider`, `llm.base_url`, `llm.api_key_env`, `llm.pricing`, `dispatch.tools.*.pass_env`, `dispatch.tools.*.allow_auto_mode`, `security.extra_allowed_executables` |
+| **tighten-only** | May only make the setting stricter than the user-level value | `security.*`, `dispatch.sandbox`, `dispatch.tools.*.bare`, `dispatch.parallel`, `dispatch.max_retries`, `dispatch.task_timeout`, `budget.*` (the minimum wins), `context.allowed_url_domains` (the intersection) |
+| **repo-ok** | Honoured as written | Everything else |
+
+Setting a user-only key, or relaxing a tighten-only key, requires the user-level config or a CLI flag for that invocation. Each relaxation is printed as a warning on every run. Without these classes, a cloned repo could point `llm.base_url` at its own server with `llm.api_key_env: ANTHROPIC_API_KEY`, and the first `aipm discover` would send it the user's key and the repo content.
 
 ```yaml
 schema_version: 1
 project: {name: clinic-booking}
 stack_template: python-uv
 llm:
-  provider: anthropic                 # anthropic | openai-compatible
-  base_url: null
-  api_key_env: ANTHROPIC_API_KEY      # name of the env var, never the key
+  provider: anthropic                 # user-only; anthropic | openai-compatible
+  base_url: null                      # user-only
+  api_key_env: ANTHROPIC_API_KEY      # user-only; name of the env var, never the key
   models: {default: claude-sonnet-5-5, interviewer: claude-haiku-5-5, ac_reviewer: claude-haiku-5-5}
-  max_output_tokens: 8000
-  temperature: 0.2
-  pricing: {}                         # optional {model: {input_per_mtok: x, output_per_mtok: y}}
+  max_output_tokens: 8000             # no sampling keys: the gateway never sends temperature, top_p or top_k (§14)
+  pricing: {}                         # user-only; optional {model: {input_per_mtok: x, output_per_mtok: y}}
 discover: {coverage_threshold: 0.85, max_rounds: 6, questions_per_round: 4}
 approvals: {gates: [G1, G2, G3]}
 plan: {serialized_paths: ["pyproject.toml", "uv.lock", "package.json", "*lock*", "migrations/**"]}
 dispatch:
   enabled: true
   default_tool: claude
-  parallel: 1
-  max_retries: 3
-  task_timeout: 20m
-  sandbox: auto                       # auto | srt | tool-native | none
+  parallel: 1                         # tighten-only
+  max_retries: 3                      # tighten-only
+  task_timeout: 20m                   # tighten-only
+  fail_fast: true                     # stop at the first required gate failure during build (§13.2)
+  sandbox: auto                       # tighten-only; auto | srt | tool-native | none
   tools:
-    claude: {bare: true}
-budget: {run_usd: 10.0, task_usd: 2.0, run_tokens: 2000000}
+    claude:
+      bare: true                      # tighten-only
+      pass_env: []                    # user-only; extra env var names passed to the agent (SECURITY.md §8)
+      allow_auto_mode: false          # user-only (SECURITY.md §9.3)
+budget: {run_usd: 10.0, task_usd: 2.0, run_tokens: 2000000}   # tighten-only (the minimum wins)
+allowed_executables: []               # argv prefixes, copied from the stack template (§13.1)
+test_roots: []                        # copied from the stack template
 prepare: {run: ["uv", "sync", "--frozen"], network: registries}
 gates: {}                             # copied from the stack template (§13.1)
-security:
+scanners:                             # v0.2
+  semgrep: {configs: ["p/python", "p/secrets"]}   # rule packs, pinned
+  extra: {}                           # config-defined scanners {name: {run: [argv]}}; part of the execution surface
+security:                             # tighten-only
   require_sandbox: false              # true = refuse to run agents or gates without a sandbox
   network: {agent: api-only, gates: none, prepare: registries}
   allow_new_dependencies: ask         # ask | allow | deny
   min_dependency_age_days: 30
   extra_protected_paths: []
   extra_redact_patterns: []
+  extra_allowed_executables: []       # user-only; argv prefixes added to the stack's list
   max_input_kib: 256
-context: {allowed_url_domains: []}
+context: {allowed_url_domains: []}    # tighten-only (the intersection)
 git: {integration_branch: aipm/integration}
 logging: {level: info, json: false}
 ```
@@ -897,28 +946,35 @@ logging: {level: info, json: false}
 | `-y/--yes` | Skip the G1–G3 review gates only |
 | `-v/--verbose` | More log output |
 | `--no-plugins` | Do not load plugins |
+| `--no-cache` | Bypass the LLM response cache (v0.2, with the cache) |
+| `--trace` | Emit OpenTelemetry spans (§17; v0.4, accepted as a no-op before) |
 | `--version` | Print the version |
+
+`--yes` is accepted both as a global flag and after a command (`approve --yes`, `auto --yes`), with the same meaning.
 
 | Command | Milestone | Key flags | Notes |
 |---|---|---|---|
 | `aipm` | v0.1 | | Phase report and next step (§7.3) |
 | `aipm init` | v0.1 | `--provider`, `--tool`, `--stack`, `--force` | Creates `.pm/`, detects the stack, writes the repo map, copies gates, runs the trust flow |
-| `aipm doctor` | v0.1 | `--fix-schema` | Tool versions, capabilities, sandbox, which API key env vars are set (never their values), plugins |
+| `aipm doctor` | v0.1 | | Tool versions, capabilities, sandbox, which API key env vars are set (never their values), plugins. `--fix-schema` arrives with the first v2 schema (§6.2). |
 | `aipm trust` | v0.1 | `--show`, `--revoke`, `--confirm HASH12` | Shows the exact argv of `prepare` and all gates, dispatch flags, network profiles and the surface hash, then records trust ([SECURITY.md §6](SECURITY.md#6-execution-trust)) |
-| `aipm discover` | v0.1 | `--from FILE`, `--answers FILE`, `--defaults`, `--edit Q-ID`, `--max-rounds`, `--threshold` | §8 |
+| `aipm discover` | v0.1 | `--from FILE`, `--answers FILE`, `--defaults`, `--edit Q-ID`, `--max-rounds`, `--threshold`, `--accept-risk` | §8 |
 | `aipm approve <prd\|design\|plan\|context>` | v0.1 | `--yes` | Non-interactive approval |
-| `aipm design` | v0.1 | `--regenerate` | Architecture, ADRs, threat model |
-| `aipm plan` | v0.1 | `--max-tasks N` | §9 |
-| `aipm status` | v0.1 | `--all`, `--task T-ID`, `--ack EVENT-ID` | Worksheet view and security events; works without an LLM |
-| `aipm prompt <T-ID>` | v0.1 | `--tool`, `--copy`, `--out FILE`, `--fix` | §12.7 |
-| `aipm sync-context` | v0.1 | `--tool` (repeatable), `--check` | §10.2 |
-| `aipm verify <T-ID>` | v0.2 | `--commit`, `--base SHA`, `--gate NAME`, `--override-ac ID --reason` | §12.7, §13 |
+| `aipm design` | v0.1 | `--regenerate`, `--accept-risk`, `--accept-stale` | Architecture, ADRs, threat model |
+| `aipm plan` | v0.1 | `--max-tasks N`, `--accept-risk`, `--accept-stale` | §9 |
+| `aipm status` | v0.1 | `--all`, `--task T-ID`, `--ack EVENT-ID` | Worksheet view and security events (`.pm/events.jsonl`, §6.1); works without an LLM |
+| `aipm prompt <T-ID>` | v0.1 | `--tool`, `--copy`, `--out FILE`, `--fix`, `--accept-stale` | §12.7. Needs trust, because the prompt carries gate argv (§10.1); exits 6 otherwise. |
+| `aipm sync-context` | v0.1 | `--tool` (repeatable), `--check` | §10.2. Needs trust for the gate-command section; exits 6 otherwise. |
+| `aipm verify <T-ID>` | v0.2 | `--commit`, `--base SHA`, `--gate NAME`, `--override-ac ID --reason`, `--accept-risk`, `--accept-stale` | §12.7, §13 |
 | `aipm scan` | v0.2 | `--scanner NAME`, `--fail-on SEVERITY` | Whole repo |
 | `aipm task <show\|reset\|block\|unblock\|skip> <T-ID>` | v0.2 | `--reason` | Manual control of task state |
-| `aipm run <T-ID>` | v0.3 | `--tool`, `--timeout`, `--budget`, `--dry-run` | One attempt loop for one task |
-| `aipm build` | v0.3 | `--tool`, `--parallel`, `--max-retries`, `--budget`, `--timeout`, `--only T-IDs`, `--dry-run` | §12 |
+| `aipm run <T-ID>` | v0.3 | `--tool`, `--timeout`, `--budget`, `--dry-run`, `--accept-stale` | One attempt loop for one task |
+| `aipm build` | v0.3 | `--tool`, `--parallel`, `--max-retries`, `--budget`, `--timeout`, `--only T-IDs`, `--dry-run`, `--accept-stale` | §12 |
 | `aipm merge` | v0.3 | `--into BRANCH` | Fast-forwards the user's branch to the integration branch, after showing the log |
-| `aipm auto` | v0.4 | `--yes`, plus the build flags | §7.3 |
+| `aipm auto` | v0.4 | `--yes`, `--accept-risk`, `--accept-stale`, plus the build flags | §7.3 |
+
+- `--accept-risk` continues in non-interactive mode when a role reports `injection_suspected` (§5.4, [SECURITY.md §7.9](SECURITY.md#79-l9-detection)). It exists on the commands that call the LLM.
+- `--accept-stale` runs on stale upstream artifacts (§7.1). The override is recorded in `approvals.yaml`. It exists on the commands that consume downstream artifacts.
 
 ### 16.1 Exit codes
 
@@ -972,7 +1028,8 @@ aipm/
 ├── uv.lock
 ├── README.md  LICENSE  SECURITY.md  CONTRIBUTING.md  CODE_OF_CONDUCT.md  CHANGELOG.md
 ├── AGENTS.md  CLAUDE.md      # rules for coding agents developing aipm itself
-├── .claude/settings.json  .claude/agents/security-reviewer.md
+├── .claude/settings.json  .claude/agents/security-reviewer.md  .claude/skills/ship/
+├── .githooks/{commit-msg, pre-push}   # owner-only authorship
 ├── .github/workflows/{ci.yml, security.yml, release.yml}  .github/dependabot.yml
 ├── install.sh                # v0.2
 ├── docs/architecture/{ARCHITECTURE.md, SECURITY.md, adr/}
@@ -983,11 +1040,12 @@ aipm/
 │   ├── cli/          main.py  output.py  errors.py  commands/<one module per command>.py
 │   ├── app/          init.py doctor.py trust.py discover.py approve.py design.py plan.py
 │   │                 status.py prompt.py sync_context.py verify.py scan.py task.py
-│   │                 run.py build.py merge.py auto.py
-│   ├── domain/       models/ (pydantic schemas)  phase.py  coverage.py  dag.py  scheduler.py  ids.py
+│   │                 run.py build.py merge.py auto.py  dispatcher.py  build_loop.py
+│   ├── domain/       models/ (pydantic schemas)  errors.py  phase.py  coverage.py  dag.py  scheduler.py  ids.py
 │   ├── security/     sanitize.py  untrusted.py  redact.py  paths.py  command_policy.py
-│   │                 trust_store.py  diff_checks.py  supply_chain.py  budget.py  network.py
-│   ├── state/        store.py  yamlio.py  frontmatter.py  layout.py  migrations/
+│   │                 diff_checks.py  supply_chain.py  budget.py  network.py
+│   ├── state/        store.py  yamlio.py  frontmatter.py  layout.py  trust_store.py
+│   │                 migrations/ (from the first v2 schema)
 │   ├── config/       schema.py  loader.py  defaults.yaml  stacks/*.yaml
 │   ├── llm/          gateway.py  structured.py  cache.py  cost.py  fake.py  providers/{anthropic,openai_compat}.py
 │   ├── roles/        base.py  interviewer.py  prd_writer.py  architect.py  threat_modeler.py
@@ -995,9 +1053,9 @@ aipm/
 │   ├── context/      generator.py  managed_block.py  templates/**
 │   ├── adapters/     base.py  registry.py  compiler.py  claude_code.py  codex.py  copilot.py
 │   │                 gemini.py  templates/**
-│   ├── execution/    process.py  sandbox.py  git.py  worktree.py  dispatcher.py  build_loop.py  journal.py
+│   ├── execution/    process.py  sandbox.py  git.py  worktree.py  journal.py
 │   ├── gates/        runner.py  command_gate.py  builtin/{ac_trace,ac_review,secrets,sast,deps}.py
-│   ├── scanners/     base.py  semgrep.py  gitleaks.py  osv.py  trivy.py
+│   ├── scanners/     base.py  registry.py  semgrep.py  gitleaks.py  osv.py  trivy.py
 │   ├── reporting/    worksheet.py  status.py  templates/*.j2
 │   ├── observability/ logging.py  tracing.py
 │   └── plugins/      loader.py
@@ -1009,9 +1067,9 @@ aipm/
 
 **Dependencies** (runtime, minimal):
 
-- `typer`, `rich`, `questionary`, `pydantic>=2`, `ruamel.yaml`, `jinja2`, `filelock`, `platformdirs`, `pathspec`, `anthropic`, `openai`.
+- `typer`, `rich`, `questionary`, `pydantic>=2`, `ruamel.yaml`, `jinja2`, `filelock`, `platformdirs`, `pathspec`, `anthropic>=2.0.0` (sends API version `2026-10-21`, §14), `openai`.
 - Optional extras: `otel` and `keyring`.
-- Development: `pytest`, `pytest-socket`, `hypothesis`, `syrupy`, `ruff`, `pyright`, `import-linter`, `pip-audit`.
+- Development: `pytest`, `pytest-socket`, `pytest-cov`, `hypothesis`, `syrupy`, `ruff`, `pyright`, `import-linter`, `zizmor` (exact pin). Dependency advisories are checked by `osv-scanner` in CI.
 
 ## 20. Testing strategy
 
@@ -1046,16 +1104,16 @@ aipm/
   - The default is `permissions: {}`, with each job granting only what it needs.
   - Dependabot covers both `github-actions` and `uv`.
   - `zizmor` lints the workflows.
-  - OpenSSF Scorecard runs weekly.
+  - OpenSSF Scorecard runs weekly (from v0.4, with the release pipeline).
 
 ## 22. Roadmap
 
 | Milestone | Scope | Acceptance criteria |
 |---|---|---|
-| **v0.1: PM core** (about 2 weeks) | `init`, `doctor`, `trust`, `discover`, `approve`, `design`, `plan`, `status`, `prompt` (Claude Code), `sync-context` (`AGENTS.md`, `CLAUDE.md`, Claude subagents and skills), bare `aipm`; LLM gateway with both providers; state store; security primitives L1–L6 | 1. E2E on `examples/clinic-booking` with the fake LLM passes. 2. The security corpus passes for every v0.1 input path. 3. Works offline with Ollama (manual check documented). 4. `aipm --help` < 300 ms. 5. No subprocess outside `process.py`, enforced by import-linter. |
-| **v0.2: Verify** | `verify`, `scan`, `task`, gate runner, prepare step, sandbox (`srt`), post-change checks, `ac_trace`, `ac_review` veto, deps gate, `install.sh` | Every malicious stub-agent scenario is caught with the right exit code; gates run with no network; a missing scanner degrades as documented |
+| **v0.1: PM core** (about 2 weeks) | `init`, `doctor`, `trust`, `discover`, `approve`, `design`, `plan`, `status`, `prompt` (Claude Code), `sync-context` (`AGENTS.md`, `CLAUDE.md`), bare `aipm`; LLM gateway with both providers; state store; the `python-uv` stack; security primitives L1–L6 | 1. E2E on `examples/clinic-booking` with the fake LLM passes. 2. The security corpus passes for every v0.1 input path. 3. Works offline with Ollama (manual check documented). 4. `aipm --help` < 300 ms. 5. No process started outside `process.py`, enforced by ruff `banned-api` and import-linter. |
+| **v0.2: Verify** | `verify`, `scan`, `task`, gate runner, prepare step, sandbox (`srt`), post-change checks, `ac_trace`, `ac_review` veto, deps gate, `install.sh`; stacks `python-pip`, `node-npm`, `node-pnpm`; Claude subagents and skills; the LLM response cache and `--no-cache` | Every malicious stub-agent scenario is caught with the right exit code; gates run with no network; a missing scanner degrades as documented |
 | **v0.3: Build** | `run`, `build`, `merge`, worktrees, scheduler, parallel attempts, retries with feedback, budgets, journal, resume, Claude Code dispatch | `kill -9` mid-build then `aipm build` finishes with no duplicate commits; parallel 3 on a 12-task sample completes; budget exit 5 is respected |
-| **v0.4: Multi-tool and automation** | Codex, Copilot and Gemini adapters and context files, `auto`, plugins, OpenTelemetry, `go` and `rust-cargo` stacks, release attestations | Adapter contract tests pass for all four tools; `aipm auto --yes` on the sample stops correctly at the trust gate |
+| **v0.4: Multi-tool and automation** | Codex, Copilot and Gemini adapters and context files, `auto`, plugins, OpenTelemetry, `go` and `rust-cargo` stacks, release attestations, OpenSSF Scorecard | Adapter contract tests pass for all four tools; `aipm auto --yes` on the sample stops correctly at the trust gate |
 
 ## 23. Decision log
 

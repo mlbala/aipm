@@ -1,0 +1,45 @@
+#!/bin/sh
+# Refuse to push any commit that is not the repository owner's alone.
+# Each new commit must have the owner (git config user.name / user.email) as
+# both author and committer, and no co-author or AI attribution lines.
+# Enabled together with commit-msg:  git config core.hooksPath .githooks
+set -eu
+
+owner_name="$(git config user.name || true)"
+owner_email="$(git config user.email || true)"
+if [ -z "$owner_name" ] || [ -z "$owner_email" ]; then
+  echo "pre-push: set git user.name and user.email before pushing." >&2
+  exit 1
+fi
+owner="$owner_name <$owner_email>"
+attribution='^(co-authored-by:|claude-session:|.*generated with \[?(claude|claude code))'
+
+fail=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  # Deleting a remote ref pushes no commits.
+  case "$local_sha" in *[!0]*) ;; *) continue ;; esac
+
+  # Only check commits that no remote has yet. Fail closed if git cannot list them.
+  commits="$(git rev-list "$local_sha" --not --remotes)" || {
+    echo "pre-push: cannot list the commits for $local_ref; push refused." >&2
+    exit 1
+  }
+
+  for c in $commits; do
+    author="$(git log -1 --no-show-signature --format='%an <%ae>' "$c")"
+    committer="$(git log -1 --no-show-signature --format='%cn <%ce>' "$c")"
+    if [ "$author" != "$owner" ] || [ "$committer" != "$owner" ]; then
+      echo "pre-push: $c has author '$author' and committer '$committer'; both must be '$owner'." >&2
+      fail=1
+    fi
+    if git log -1 --no-show-signature --format='%B' "$c" | grep -q -i -E "$attribution"; then
+      echo "pre-push: $c has a co-author or AI attribution line." >&2
+      fail=1
+    fi
+  done
+done
+
+if [ "$fail" -ne 0 ]; then
+  echo "pre-push: push refused. Every pushed commit must carry only the owner's name." >&2
+  exit 1
+fi

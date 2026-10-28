@@ -45,7 +45,7 @@ If any flag has changed, propose the adapter change and an ADR before coding.
 3. **`aipm.execution.journal`:** append-only JSONL, fsync on every write, the event types from §6.3, and replay for resume (§12.6).
 4. **`aipm.domain.scheduler`:** pure. Ready set, disjoint-ownership batching, serialized resources, deterministic order.
 5. **`aipm.security.budget`:** run and task USD caps and the token cap. Checked before each dispatch; exit 5 when exceeded (finish the running tasks first).
-6. **`aipm.execution.build_loop`:** the asyncio orchestrator for §12.4:
+6. **`aipm.app.build_loop`** (with `aipm.app.dispatcher`; both live in L3 because they drive adapters and gates, ARCHITECTURE §5.1): the asyncio orchestrator for §12.4:
    - snapshot → dispatch (sandboxed with `api-only`) → post-change checks → gates → commit and merge, or a fix prompt (with `--resume <session_id>`), or blocked;
    - `--parallel` (at most 8), `--max-retries`, `--timeout`;
    - Ctrl-C handling: the first press stops scheduling and gives running tasks a 30 s grace period, then terminates them; a second press kills immediately; exit 130;

@@ -40,11 +40,12 @@ Mark each cell as verified (with a source link and the tool version) or unknown.
    - Loops `next_command` until the phase is `built`, pausing at G1–G3 unless `--yes`.
    - Stops on exit codes 4, 5, 6 and 8 and prints the exact command to run next.
    - **Never records trust**: with an untrusted surface it stops with exit 6 and prints `aipm trust`.
-5. **Plugins (`aipm.plugins.loader`):** the entry-point groups from §18, loaded only from aipm's own environment. `--no-plugins`. `doctor` lists loaded plugins.
+5. **Plugins (`aipm.plugins.loader`):** the entry-point groups from §18, loaded only from aipm's own environment. `--no-plugins`. `doctor` lists loaded plugins. `plugins/loader.py` is the only module allowed `importlib.import_module` (ARCHITECTURE §5.1). Allow it with a line-level `# noqa: TID251` on that one call, never a per-file ignore (which would exempt every banned API), and add a test that fails if `noqa: TID251` appears anywhere else in `src/aipm` besides `execution/process.py`.
 6. **OpenTelemetry:** the `aipm[otel]` extra, with spans as in §17 and no prompt or output content in attributes. Enabled only with `--trace` plus `OTEL_EXPORTER_OTLP_ENDPOINT`.
 7. **Stacks:** the `go` and `rust-cargo` templates, with golden tests.
 8. **Release pipeline (`release.yml`):** on a `v*` tag: `uv build`, a CycloneDX SBOM, `actions/attest-build-provenance`, checksums, and a GitHub Release. Minimal permissions (`contents: write` and `id-token: write`, `attestations: write` only in the release job). SHA-pinned actions. A README section explaining how users verify a release (`gh attestation verify`).
-9. **Docs:** a README section per tool (setup, the auth environment variable, known limits), the tested versions table, and an `auto` walkthrough.
+9. **OpenSSF Scorecard** (moved here by review 01, D-6): a weekly `scorecard.yml` workflow with SHA-pinned actions and minimal permissions, and a badge in the README.
+10. **Docs:** a README section per tool (setup, the auth environment variable, known limits), the tested versions table, and an `auto` walkthrough.
 
 ## Security requirements
 
