@@ -17,14 +17,10 @@
       "Bash(git log *)",
       "Bash(git add *)",
       "Bash(git commit *)",
-      "Bash(git push -u origin step/*)",
-      "Bash(git push -u origin security/*)",
-      "Bash(gh auth status *)",
-      "Bash(gh pr create *)",
+      "Bash(gh auth status)",
       "Bash(gh pr view *)",
       "Bash(gh pr checks *)",
-      "Bash(gh pr list *)",
-      "Bash(gh pr merge *)"
+      "Bash(gh pr list *)"
     ],
     "deny": [
       "Bash(git push -f*)",
@@ -45,6 +41,9 @@
       "Bash(git push * *:main)",
       "Bash(gh pr merge --admin*)",
       "Bash(gh pr merge * --admin*)",
+      "Bash(gh auth token*)",
+      "Bash(gh auth status *-t*)",
+      "Bash(gh auth status *--show-token*)",
       "Bash(gh repo delete *)",
       "Bash(gh repo edit *)",
       "Bash(gh api *)",
