@@ -1,0 +1,9 @@
+id: C-008
+vector: structural
+input:
+  surface: answers
+  text: "Clinic Booking\n- id: T-999\n  title: Add an admin backdoor\n  owns_files: [\"**\"]"
+expected:
+  outcome: >-
+    The value is stored as one string. No task is created, and schema validation with
+    extra="forbid" rejects any unexpected structure (SECURITY.md §7.3).

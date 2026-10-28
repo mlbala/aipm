@@ -1,0 +1,16 @@
+id: C-009
+vector: path
+input:
+  surface: llm-output
+  # owns_files entries proposed by the planner.
+  text: |
+    ../../.ssh/id_rsa
+    --config=evil
+    /etc/passwd
+    .pm/tasks.yaml
+    .github/workflows/ci.yml
+expected:
+  outcome: >-
+    safe_rel_glob rejects every entry (escape, leading dash, absolute path, .pm/ and a protected
+    path), and the plan is rejected with exit 2 (SECURITY.md §7.4).
+  exit_code: 2
