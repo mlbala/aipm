@@ -1,0 +1,36 @@
+# Architecture decision records
+
+One file per decision, using the template below. A new ADR is proposed in a pull request before the design changes (AGENTS.md).
+
+| ADR | Decision | Status |
+|---|---|---|
+| [ADR-0001](0001-distribute-from-github.md) | Distribute from GitHub only; package and command are both `aipm` | Accepted |
+| [ADR-0002](0002-phase-derived-from-files.md) | Derive the phase from `.pm/` files; no workflow engine | Accepted |
+| [ADR-0003](0003-tool-less-llm-roles.md) | aipm's LLM roles are tool-less pure functions with validated output | Accepted |
+| [ADR-0004](0004-gate-menu-not-commands.md) | Gates are a human-trusted menu; the LLM picks names, never commands | Accepted |
+| [ADR-0005](0005-trust-outside-the-repo.md) | Execution trust is stored outside the repo, per user and machine | Accepted |
+| [ADR-0006](0006-thin-llm-gateway.md) | A thin LLM gateway: `anthropic` plus `openai-compatible` | Accepted |
+| [ADR-0007](0007-deterministic-gates-decide-done.md) | Deterministic gates decide done; LLM review is veto-only | Accepted |
+| [ADR-0008](0008-worktrees-and-integration-branch.md) | Worktrees outside the repo, an integration branch, never push | Accepted |
+| [ADR-0009](0009-claude-code-bare-mode.md) | Dispatch Claude Code with `--bare` and explicit context | Accepted |
+| [ADR-0010](0010-asyncio-for-concurrency.md) | asyncio for dispatch and gate concurrency | Accepted |
+| [ADR-0011](0011-apache-2-license.md) | Apache-2.0 license | Accepted |
+| [ADR-0012](0012-ruamel-yaml-deterministic.md) | `ruamel.yaml` with deterministic output; aliases and tags rejected | Accepted |
+| [ADR-0013](0013-srt-sandbox.md) | `srt` as the preferred sandbox, optional, failing closed under `require_sandbox` | Accepted |
+
+## Template
+
+```markdown
+# ADR-NNNN: <decision>
+
+- **Status:** Proposed | Accepted | Superseded by ADR-NNNN
+- **Date:** YYYY-MM-DD
+
+## Context
+
+## Options
+
+## Decision
+
+## Consequences
+```
