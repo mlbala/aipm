@@ -1,0 +1,3 @@
+# Stack template: python-uv (ARCHITECTURE §13.1).
+# Placeholder: build prompt 02 fills in allowed_executables (argv prefixes), test_roots,
+# prepare and gates, and tests them against the command policy (SECURITY.md §10).

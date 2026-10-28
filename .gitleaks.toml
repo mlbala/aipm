@@ -1,0 +1,11 @@
+# gitleaks configuration: the default rules, plus one allowlisted value pattern.
+title = "aipm gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fake, non-functional secrets used by redaction tests (AGENTS.md rule 9)."
+# Allowlisted by value, not by path, so a real key pasted into tests/fakes/secrets.py is still
+# reported. tests/unit/test_fixtures.py checks that every fake value matches this pattern.
+regexes = ['''aipm-fake-[a-z-]+-not-a-real-secret-\d{4}''']

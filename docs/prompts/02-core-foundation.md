@@ -35,7 +35,7 @@ You are building the parts every later feature trusts. Correctness and security 
    - `CommandPolicy`.
    - `compile_gate(gate, paths, policy, report_file=None) -> Argv`, which stays pure: argv-prefix matching against `allowed_executables` (SECURITY §10 rule 2), the hard-deny list (also at any position after a runner), inline-code and argument-pattern denials, and placeholder expansion for `{paths}`, `{test_paths}` and `{report_file}` (rule 5).
    - `check_forbidden_flags(tool, argv)`, using the forbidden table in ARCHITECTURE §11.
-6. **`aipm.execution.process`** (the only module that imports `subprocess`):
+6. **`aipm.execution.process`** (the only module that imports `subprocess`). There is no file-wide lint exemption: put `# noqa: TID251` on each `subprocess` and `asyncio.create_subprocess_*` line only; `tests/security/test_banned_api.py` allows that comment nowhere else.
    - `run_safe` and `run_safe_async`: argv only, timeout, new session, process-group kill (SIGTERM, then SIGKILL after 10 s), output cap, constructed environment.
    - `build_env(base_allowlist, extra)`.
    - Sandbox support is only a parameter for now; `None` is the only option until prompt 06.
@@ -80,6 +80,10 @@ You are building the parts every later feature trusts. Correctness and security 
 ## Security requirements
 
 - Write `tests/security` and `tests/property` for modules 1–6 **first**, then implement them until the tests pass.
+- Tighten the import-linter contracts (step 01 security review, finding 7):
+  - give the SDK and `subprocess` contracts `source_modules = ["aipm"]`, with `ignore_imports` for the real exceptions (`aipm.llm.providers.*` → the SDKs, `aipm.execution.process` → `subprocess`), so new modules are covered by default;
+  - add a contract that keeps network modules (`socket`, `ssl`, `http`, `httpx`, `ftplib`, `smtplib`, `xmlrpc`, and `urllib` where it fetches) out of every package except `aipm.llm` and `aipm.scanners.registry`. import-linter does not follow imports inside the standard library, so name the modules themselves;
+  - turn the `cli` contract into an allow-list (a test of `cli`'s imports), so a new `domain` or `security` module is not allowed by default.
 - These modules need 100% branch coverage: `sanitize`, `untrusted`, `paths`, `command_policy`, `process`.
 - Property tests (hypothesis):
   - the path validators never accept an escaping path;

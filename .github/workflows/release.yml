@@ -1,0 +1,26 @@
+name: Release
+
+# Stub until build prompt 08 adds the real pipeline: uv build, a CycloneDX SBOM, build
+# provenance attestation, checksums and a GitHub Release (ARCHITECTURE §21). Until then a
+# tag push fails here, so nothing is ever released by accident.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release (not implemented yet)
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Refuse to release
+        run: |
+          echo "::error::The release pipeline arrives in build prompt 08."
+          exit 1

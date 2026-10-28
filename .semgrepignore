@@ -1,0 +1,5 @@
+# Deliberately violating code, used to prove the ruff ban works.
+tests/security/fixtures/banned_apis.py
+# Generated or third-party content.
+.venv/
+uv.lock
