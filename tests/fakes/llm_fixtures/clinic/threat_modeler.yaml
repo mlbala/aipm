@@ -1,0 +1,38 @@
+# The threat model for the clinic-booking architecture.
+responses:
+  - json:
+      threats:
+        - id: TM-01
+          stride: S
+          owasp_llm: null
+          component: C-01
+          title: "One-time code brute force"
+          severity: high
+          mitigation: "Five attempts per phone number in ten minutes, then a lockout and a 429."
+        - id: TM-02
+          stride: T
+          owasp_llm: null
+          component: C-03
+          title: "Forged WhatsApp webhook calls"
+          severity: medium
+          mitigation: "Verify the X-Hub-Signature-256 header with the app secret; reject others."
+        - id: TM-03
+          stride: I
+          owasp_llm: null
+          component: C-02
+          title: "Patient data exposed through move and cancel links"
+          severity: high
+          mitigation: "Links carry a random 128-bit token, expire after the visit, show no name."
+        - id: TM-04
+          stride: D
+          owasp_llm: null
+          component: C-01
+          title: "Spam bookings fill the schedule"
+          severity: low
+          mitigation: "At most two open bookings per phone number."
+      summary: >-
+        The main risks are account-less patient flows (one-time codes and booking links) and the
+        WhatsApp webhook.
+      assumptions: "The hosting provider encrypts disks and backups at rest."
+      residual_risks: "A stolen phone can move or cancel that patient's bookings."
+      injection_suspected: []

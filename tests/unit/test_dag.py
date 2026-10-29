@@ -504,3 +504,27 @@ def test_owned_test_or_config() -> None:
         "src/x_test.go",
     ]
     assert task.type is TaskType.FEATURE
+
+
+def test_a_long_merged_title_is_cut() -> None:
+    result = validate_plan(
+        [
+            proposed(1, title="a" * 100, owns_files=["src/a.py"]),
+            proposed(2, title="b" * 100, owns_files=["src/a.py"]),
+        ],
+        rules(),
+    )
+    (task,) = result.tasks
+    assert len(task.title) == 120
+    assert task.title.endswith("…")
+
+
+def test_the_reported_overlap_skips_disjoint_and_serialized_pairs() -> None:
+    result = validate_plan(
+        [
+            proposed(1, owns_files=["uv.lock", "docs/a.md", "src/x.py"]),
+            proposed(2, owns_files=["uv.lock", "lib/b.py", "src/x.py"]),
+        ],
+        rules(),
+    )
+    assert result.changes == ("merged T-002 into T-001: both own src/x.py and src/x.py",)

@@ -20,6 +20,7 @@ from aipm.cli.commands import (
     doctor,
     init,
     merge,
+    phase,
     plan,
     prompt,
     run,
@@ -30,7 +31,7 @@ from aipm.cli.commands import (
     trust,
     verify,
 )
-from aipm.cli.output import GlobalOptions, not_implemented_yet
+from aipm.cli.output import GlobalOptions
 
 app = typer.Typer(
     name="aipm",
@@ -101,7 +102,7 @@ def main(
         trace=trace,
     )
     if ctx.invoked_subcommand is None:
-        not_implemented_yet(ctx, "aipm", prompt="04")
+        phase.show(ctx)
 
 
 # Order follows ARCHITECTURE §16.

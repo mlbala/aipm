@@ -4,7 +4,7 @@ from typing import Annotated
 
 import typer
 
-from aipm.cli.output import not_implemented_yet
+from aipm.cli.output import global_options, handled, print_untrusted, succeed, warn
 
 
 def command(
@@ -18,4 +18,13 @@ def command(
     ] = None,
 ) -> None:
     """Show task status and security events."""
-    not_implemented_yet(ctx, "status", prompt="04")
+    opts = global_options(ctx)
+    with handled(ctx, "status"):
+        from aipm.app import status as use_case
+
+        result = use_case.run(opts.project, show_all=show_all, task_id=task_id, ack=ack)
+        warn(result.warnings)
+        if not opts.json:
+            for line in result.lines:
+                print_untrusted(line)
+        succeed(ctx, "status", result.to_data())
