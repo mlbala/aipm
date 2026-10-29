@@ -6,6 +6,10 @@ All notable changes to aipm are recorded here. The format follows [Keep a Change
 
 ### Added
 
+- `aipm init`: refuses outside a git repository (exit 2), detects the stack and greenfield or brownfield, writes `.pm/config.yaml` (with the `python-uv` gate menu when detected), `.pm/.gitignore` and a sanitized `.pm/repo-map.md`, then shows the execution surface and offers to trust it. `--force` keeps existing artifacts.
+- `aipm trust`: prints every argv in full with the surface hash, records trust only after an interactive yes or `--confirm <hash12>`, and supports `--show` and `--revoke`. Trust lives in `trust.json` in the user state directory (mode 0600).
+- `aipm doctor`, with `--json`: tool versions, whether API key variables are set (never their values), `.pm/` schema validity, lock and trust status.
+- The core: the state store (atomic, locked, redacted writes; deterministic YAML; front matter; security events), Pydantic models for every `.pm/` schema, the layered config with key classes, the `python-uv` stack template, the trust store and structured logging.
 - Repository skeleton: the `aipm` package laid out by layer (ARCHITECTURE §19), with typed stubs that name the build step that implements them.
 - The `aipm` command line with every command and flag from ARCHITECTURE §16, the JSON envelope and the exit codes. Commands exit 2 until their build step lands, saying which one.
 - Tests: CLI smoke tests, a startup-time test (`aipm --help` under 300 ms), the ruff process ban, the import-linter layer contracts, a hidden-character check, and the first 10 cases of the injection corpus.
@@ -14,6 +18,13 @@ All notable changes to aipm are recorded here. The format follows [Keep a Change
 
 ### Security
 
+- Path validation (`safe_relpath`, `safe_rel_glob`): no absolute paths, `..`, leading `-`, control or invisible characters, protected paths (case-insensitive, at any depth) or symlinks that escape the workspace.
+- The command policy: argv-prefix allow-list, hard-denied executables (also after a runner), inline-code flags, install patterns outside the prepare step, whole-element placeholders, and the forbidden coding-agent flags.
+- The process runner: argv only, constructed environment, new session, SIGTERM then SIGKILL to the whole process group, output caps; a sandbox profile is refused until v0.2.
+- Repo config is limited by key class: user-only keys are ignored and tighten-only keys can only get stricter, with a warning each time. A shell gate in a repo config can never be trusted (exit 6).
+- YAML loading rejects aliases, anchors, tags, deep nesting and files over 1 MiB before constructing anything.
+- The import-linter contracts for SDKs, `subprocess` and network modules now cover the whole package, and the CLI's imports are checked against an allow-list.
+- Corpus cases C-011 (YAML alias bomb), C-012 (config redirection) and C-013 (config relaxation).
 - The `pre-push` hook refuses any push that is not a fast-forward of a `step/*` or `security/*` branch: no `main`, no deletions, no force pushes, and no tags unless the owner sets `AIPM_RELEASE_TAG=1`.
 - More process and dynamic-import routes are banned (ctypes, ProcessPoolExecutor, webbrowser, pydoc, runpy, importlib loaders, event-loop `subprocess_exec`, `sys.modules[...]`, `getattr` lookups). `execution/process.py` no longer has a file-wide lint exemption.
 - The commit-authorship check also verifies the committer, and fails if it reads fewer commits than the comparison holds.

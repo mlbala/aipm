@@ -7,7 +7,7 @@
 
 **An AI product manager for your terminal.** aipm interviews you for requirements, designs the architecture, splits the work into tasks, and writes prompts and `AGENTS.md` for Claude Code, Codex, Copilot and Gemini CLI. It then verifies every task with tests and security gates.
 
-> **Status: pre-alpha.** The repository skeleton is in place; the commands are being built, step by step, from the prompts in [`docs/prompts/`](docs/prompts/README.md). Every command below is registered, and until its build step lands it exits with code 2 and says which step or milestone brings it.
+> **Status: pre-alpha.** The commands are being built, step by step, from the prompts in [`docs/prompts/`](docs/prompts/README.md). `aipm init`, `aipm doctor` and `aipm trust` work today. Every other command is registered, and until its build step lands it exits with code 2 and says which step or milestone brings it.
 
 ## Install
 
@@ -54,6 +54,18 @@ aipm status
 | `aipm auto` | Run every step in order, pausing at the review gates | v0.4 |
 
 Every command accepts `--json`, which prints exactly one result object to stdout. Exit codes are listed in [ARCHITECTURE.md §16.1](docs/architecture/ARCHITECTURE.md#161-exit-codes).
+
+### Getting started: `init`, `trust` and `doctor`
+
+`aipm init` must run inside a git repository. It detects the stack from the manifests at the repository root (`python-uv` ships today; `python-pip`, `node-npm` and `node-pnpm` arrive in v0.2), copies that stack's gate menu into `.pm/config.yaml`, writes `.pm/.gitignore` and `.pm/repo-map.md`, and shows the execution surface: every command aipm may run, in full, with the executable it resolves to on your `PATH`. `--force` re-initializes and keeps your other `.pm/` files. `--provider` is a user-level setting, so aipm tells you where to put it instead of writing it into the repository.
+
+`aipm trust` records your approval of that exact surface, for you and this machine only, in your user state directory. It asks interactively, or takes `--confirm` with the first 12 characters of the surface hash, so a script has to name the surface it trusts. `--yes` never grants trust. Any change to a gate, the prepare step, a dispatch flag, a security setting or the resolved path of an executable changes the hash and needs trust again. `aipm trust --show` prints the surface without recording anything, and `--revoke` removes your trust.
+
+`aipm doctor` lists the versions of git, uv, the coding agents and the scanners (missing tools are listed, not errors), whether your API key variables are set (never their values), whether the `.pm/` files are valid, and the lock and trust status.
+
+### Configuration
+
+Settings come in layers, later ones winning: built-in defaults, your user config (`$AIPM_CONFIG`, or `config.yaml` in your platform's user config directory), the repository's `.pm/config.yaml`, `AIPM_*` environment variables (`AIPM_LLM__MODELS__DEFAULT` sets `llm.models.default`), then command-line flags. A repository cannot set user-only keys such as `llm.base_url` or `llm.api_key_env`, and it can only make security settings and budgets stricter; aipm prints a warning for every repository setting it ignores and every relaxation you make ([ARCHITECTURE.md §15](docs/architecture/ARCHITECTURE.md#15-configuration)).
 
 ## Security model
 
