@@ -189,15 +189,19 @@ def describe_errors(exc: ValidationError, model: type[BaseModel]) -> list[str]:
     return problems
 
 
-_JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"', re.DOTALL)
-_BRACKETS = re.compile(r"[\[\]{}]")
+_TOKEN = re.compile(r'"(?:[^"\\]++|\\.)*+(?:"|\\?\Z)|[\[\]{}]', re.DOTALL)
+"""A JSON string, or one bracket. Possessive, and an unclosed string runs to the end of the text,
+so every `"` matches once and the scan stays linear on hostile input."""
 
 
 def _depth(text: str) -> int:
     """The deepest nesting of arrays and objects, counting brackets outside strings."""
     deepest = level = 0
-    for match in _BRACKETS.finditer(_JSON_STRING.sub('""', text)):
-        level += 1 if match.group() in "[{" else -1
+    for match in _TOKEN.finditer(text):
+        piece = match.group()
+        if piece[0] == '"':
+            continue
+        level += 1 if piece in "[{" else -1
         deepest = max(deepest, level)
     return deepest
 

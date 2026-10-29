@@ -85,6 +85,27 @@ def test_a_cancelled_call_leaves_no_zombie(
     assert reaped(child, timeout=0.5), "the leader is reaped before the call returns"
 
 
+def test_a_second_cancel_does_not_cut_the_reap_short(tmp_path: Path, leftovers: list[int]) -> None:
+    pid_file = tmp_path / "child.pid"
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            run_safe_async([PY, "-c", CODE, str(pid_file)], cwd=tmp_path, env=build_env(),
+                           timeout_s=30)
+        )  # fmt: skip
+        await asyncio.to_thread(read_pid, pid_file)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    child = read_pid(pid_file)
+    leftovers.append(child)
+    assert reaped(child, timeout=0.5)
+
+
 def test_another_error_while_waiting_kills_the_group(
     tmp_path: Path, leftovers: list[int], monkeypatch: pytest.MonkeyPatch
 ) -> None:

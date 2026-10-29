@@ -294,6 +294,19 @@ def _close_pipes(proc: asyncio.subprocess.Process) -> None:  # noqa: TID251
     transport.close()
 
 
+async def _reap(proc: asyncio.subprocess.Process) -> None:  # noqa: TID251
+    """Wait, up to `KILL_GRACE_S`, for the killed leader to be reaped, through further cancels.
+
+    On Linux asyncio reaps children inside the loop (through a pidfd), so a leader not reaped
+    before the loop stops stays a zombie. SIGKILL has been sent, so the wait is short.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + KILL_GRACE_S
+    while proc.returncode is None and loop.time() < deadline:
+        with contextlib.suppress(asyncio.CancelledError):
+            await _leader_exited(proc, deadline - loop.time())
+
+
 def _stop_reading(proc: asyncio.subprocess.Process, tasks: list[asyncio.Task[None]]) -> None:  # noqa: TID251
     for task in tasks:
         task.cancel()
@@ -354,11 +367,10 @@ async def run_safe_async(
         timed_out = await _await_exit(proc, timeout_s)
     except asyncio.CancelledError:
         _signal_group(proc.pid, signal.SIGKILL)
-        # On Linux asyncio reaps children inside the loop (through a pidfd): wait for the killed
-        # leader to be reaped, so no zombie outlives a cancelled call. SIGKILL makes this short.
-        with contextlib.suppress(asyncio.CancelledError):
-            await _leader_exited(proc, KILL_GRACE_S)
-        _stop_reading(proc, tasks)
+        try:
+            await _reap(proc)
+        finally:
+            _stop_reading(proc, tasks)
         raise
     except BaseException:
         _signal_group(proc.pid, signal.SIGKILL)

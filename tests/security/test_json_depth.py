@@ -4,10 +4,12 @@ Python 3.14's JSON decoder no longer raises RecursionError at depths that 3.12 a
 so the limit is an explicit bracket count, not the interpreter's recursion limit.
 """
 
+import time
+
 import pytest
 from pydantic import BaseModel
 
-from aipm.llm.structured import MAX_JSON_DEPTH, OutputInvalid, parse_response
+from aipm.llm.structured import MAX_JSON_DEPTH, MAX_RESPONSE_CHARS, OutputInvalid, parse_response
 
 
 class Loose(BaseModel):
@@ -42,3 +44,20 @@ def test_the_limit_itself_is_allowed() -> None:
 def test_brackets_inside_strings_do_not_count() -> None:
     text = '{"a": "' + "[" * 1000 + '\\"' + "{" * 1000 + '"}'
     assert parse_response(text, Loose).a == "[" * 1000 + '"' + "{" * 1000
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    [
+        '\\"' * (MAX_RESPONSE_CHARS // 2),
+        '"' * MAX_RESPONSE_CHARS,
+        '"a' * (MAX_RESPONSE_CHARS // 2 - 1) + "\\",
+    ],
+    ids=["backslash-quote", "quotes", "trailing-backslash"],
+)
+def test_the_depth_scan_is_linear_on_unclosed_strings(hostile: str) -> None:
+    """Unclosed strings once made the scan quadratic (minutes at the size cap)."""
+    start = time.perf_counter()
+    with pytest.raises(OutputInvalid):
+        parse_response(hostile, Loose)
+    assert time.perf_counter() - start < 2.0
