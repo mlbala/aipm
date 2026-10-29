@@ -495,7 +495,8 @@ A stale artifact is reported with its downstream impact, for example "PRD change
 |---|---|---|---|
 | G1 | PRD | PRD summary, assumptions, open questions | `prd.md` hash |
 | G2 | Design | Stack, components, ADR titles, threats with severity ≥ medium | `architecture.md`, `threat-model.md`, `adr/` hashes |
-| G3 | Plan | Task table, DAG depth, parallel width, gate menu with **exact argv**, new dependencies | `tasks.yaml` hash, plus a **trust store** entry for the execution surface |
+| G3 | Plan | Task table, DAG depth, parallel width, gate menu with **exact argv**, new dependencies | `tasks.yaml` hash (the plan without task progress once work has started, [ADR-0016](adr/0016-g3-pins-the-plan-not-progress.md)), plus a **trust store** entry for the execution surface |
+| context | `sync-context` | Unified diff of every managed block that changes | Each managed block's hash |
 
 - G3 is the only gate that also records trust (P-13). Trust is recorded only through an interactive confirmation, or through `aipm trust --confirm <surface-hash-prefix>` run by the user themselves.
 - `auto --yes` never writes trust. If the execution surface is untrusted, `auto --yes` stops with exit 6 and prints the exact `aipm trust` command to run.
@@ -591,14 +592,15 @@ A stale artifact is reported with its downstream impact, for example "PRD change
 
 - task: `id`, `title`, `description`, `acceptance[]`, `owns_files[]`, `reads_files[]`, `deps_add[]`
 - `upstream[]`: titles and `done.commit` of the tasks this task depends on
-- `verify[]`: for each gate, the exact argv the agent may run itself. It is rendered only through `compile_gate` (policy-checked), and only when the execution surface is trusted; otherwise the command exits 6 and prints the `aipm trust` hint ([SECURITY.md §6](SECURITY.md#6-execution-trust) rule 3). In manual mode the user's agent runs these commands outside aipm's sandbox, so untrusted argv must never reach it.
+- `verify[]`: for each gate, the exact argv the agent may run itself. It is rendered only through `compile_gate` (policy-checked), and only when the execution surface is trusted; otherwise the command exits 6 and prints the `aipm trust` hint ([SECURITY.md §6](SECURITY.md#6-execution-trust) rule 3). In manual mode the user's agent runs these commands outside aipm's sandbox, so untrusted argv must never reach it. The list holds the command gates the task names plus every required gate. Placeholders render the same on every machine ([ADR-0017](adr/0017-gate-commands-as-agents-see-them.md)): `{paths}` expands to nothing (the whole project), `{test_paths}` to the first test root, and `{report_file}` to `/dev/null`, because only aipm's own gate run reads a report.
 - `constraints`: the protected paths, the no-new-dependencies rule (except declared `deps_add`), the no-network rule, and the "do not edit tests you do not own" rule
 - `protocol`:
   - tag every test that covers an acceptance criterion with its ID, e.g. `AC-T007-1` in the test name or docstring;
   - if blocked, end the run with one line `AIPM-BLOCKED: <question>`.
-- for fix attempts: `previous_attempt`, holding the failing check and gate output, truncated (head 4 KiB plus tail 4 KiB per gate) and wrapped as untrusted.
+- for fix attempts: `previous_attempt`, holding the failing check and gate output, truncated (head 4 KiB plus tail 4 KiB per gate) and wrapped as untrusted. Until `verify` saves reports (v0.2), `aipm prompt --fix` reads a saved gate report named with `--report FILE`.
+- Model-written fields (title, description, criteria, upstream titles) pass `sanitize_for_context` and are rendered only inside untrusted blocks. Protected paths appear only as "MUST NOT modify" rules.
 
-**Size budget:** the rendered prompt is at most 24 KiB. Over budget, `reads_files` lists and upstream summaries are trimmed first.
+**Size budget:** the rendered prompt is at most 24 KiB. Over budget, `reads_files` lists and upstream summaries are trimmed first, then more of the previous gate output. A prompt still over budget is refused (exit 2).
 
 ### 10.2 Context files
 
@@ -620,9 +622,13 @@ All context files are rendered from built-in templates (`aipm/context/templates/
 - **Sanitization.** Every interpolated field passes `sanitize_for_context()`:
   - Unicode clean-up and control-character removal ([SECURITY.md §7.1](SECURITY.md#71-l1-input-hygiene));
   - HTML comments removed;
-  - URLs removed unless their domain is in `context.allowed_url_domains` (default: empty).
-- **Gate commands.** The "how to run checks" section is rendered only from `compile_gate` output, and only when the execution surface is trusted. Otherwise `sync-context` exits 6 and prints the `aipm trust` hint (§10.1).
-- **Approval of changes.** `sync-context` shows a unified diff and asks for approval when a block changes. `--check` exits 3 when files are out of date, for CI. `approve context` records the hash.
+  - URLs removed unless their domain is in `context.allowed_url_domains` (default: empty);
+  - `@path` mentions neutralized (`@x` becomes `@ x`), because Claude Code reads `@path` in `CLAUDE.md` and `AGENTS.md` as a file import.
+
+  Model-written text (the one-liner, feature titles, component names and responsibilities) appears only inside fenced untrusted blocks, whose ids derive from their content so an unchanged project renders the same bytes. IDs, stack names, globs and argv go in code spans. Each generated block is checked against invariant I-3 before it is written.
+- **Gate commands.** The "how to run checks" section is rendered only from `compile_gate` output, and only when the execution surface is trusted. Otherwise `sync-context` exits 6 and prints the `aipm trust` hint (§10.1). `--check` is the exception: it writes nothing and prints only file names, so it needs no trust ([ADR-0017](adr/0017-gate-commands-as-agents-see-them.md)).
+- **Approval of changes.** `sync-context` shows a unified diff of every managed block that changes. It writes them after an interactive yes, or when `aipm approve context` approved those exact blocks; otherwise a non-interactive run exits 4. Each written block's hash is recorded (gate `context`). `--check` exits 3 when files are out of date, for CI.
+- **Files.** Context files are never read or written through a symbolic link, and only regular files are accepted.
 
 ## 11. Tool adapters
 
@@ -963,8 +969,8 @@ logging: {level: info, json: false}
 | `aipm design` | v0.1 | `--regenerate`, `--accept-risk`, `--accept-stale` | Architecture, ADRs, threat model |
 | `aipm plan` | v0.1 | `--max-tasks N`, `--accept-risk`, `--accept-stale` | §9 |
 | `aipm status` | v0.1 | `--all`, `--task T-ID`, `--ack EVENT-ID` | Worksheet view and security events (`.pm/events.jsonl`, §6.1); works without an LLM |
-| `aipm prompt <T-ID>` | v0.1 | `--tool`, `--copy`, `--out FILE`, `--fix`, `--accept-stale` | §12.7. Needs trust, because the prompt carries gate argv (§10.1); exits 6 otherwise. |
-| `aipm sync-context` | v0.1 | `--tool` (repeatable), `--check` | §10.2. Needs trust for the gate-command section; exits 6 otherwise. |
+| `aipm prompt <T-ID>` | v0.1 | `--tool`, `--copy`, `--out FILE`, `--fix`, `--report FILE`, `--force`, `--accept-stale` | §12.7. Needs trust, because the prompt carries gate argv (§10.1); exits 6 otherwise. Refuses a task whose dependencies are not done unless `--force` (exit 2). `--report` names the saved gate report for `--fix` until `verify` saves them (v0.2). |
+| `aipm sync-context` | v0.1 | `--tool` (repeatable), `--check` | §10.2. Needs trust for the gate-command section; exits 6 otherwise. `--check` needs no trust (ADR-0017). |
 | `aipm verify <T-ID>` | v0.2 | `--commit`, `--base SHA`, `--gate NAME`, `--override-ac ID --reason`, `--accept-risk`, `--accept-stale` | §12.7, §13 |
 | `aipm scan` | v0.2 | `--scanner NAME`, `--fail-on SEVERITY` | Whole repo |
 | `aipm task <show\|reset\|block\|unblock\|skip> <T-ID>` | v0.2 | `--reason` | Manual control of task state |
