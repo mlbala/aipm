@@ -28,7 +28,10 @@ type NonceFactory = Callable[[], str]
 
 _TAG = re.compile(r"<(?=\s*/?\s*untrusted)", re.IGNORECASE)
 _NONCE = re.compile(r"u[0-9a-f]{8}")
-_TEMPLATE_NAME = re.compile(r"[A-Za-z0-9_\-]+(?:/[A-Za-z0-9_\-]+)*\.j2")
+# Components of letters, digits, `_` and `-`, with single dots inside a name
+# (`interviewer.system.j2`), so `.` and `..` can never be a component.
+_NAME_PART = r"[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)*"
+_TEMPLATE_NAME = re.compile(rf"(?:[A-Za-z0-9_\-]+/)*{_NAME_PART}\.j2")
 _SOURCE_MAX = 200
 _MAX_DEPTH = 8
 

@@ -185,6 +185,11 @@ def test_nested_template_names_load(env: jinja2.Environment) -> None:
     assert env.get_template("nested/inner.j2").render(name="x") == "nested x\n"
 
 
+def test_dotted_template_names_load(env: jinja2.Environment) -> None:
+    """Role templates are named `<role>.system.j2` (ARCHITECTURE §14)."""
+    assert env.get_template("dotted.name.j2").render(name="x") == "dotted x\n"
+
+
 def test_raw_untrusted_fails_closed(env: jinja2.Environment) -> None:
     with pytest.raises(UntrustedRenderError):
         env.get_template("raw.j2").render(value=Untrusted(PAYLOAD, source="x"))
@@ -281,6 +286,12 @@ def test_env_uses_the_given_nonce_factory() -> None:
         "missing.j2",
         "nested",
         "",
+        "..j2",
+        "raw..j2",
+        ".raw.j2",
+        "nested/.inner.j2",
+        "nested./inner.j2",
+        "raw.system.j2.txt",
     ],
 )
 def test_loader_refuses_bad_names(env: jinja2.Environment, name: str) -> None:
