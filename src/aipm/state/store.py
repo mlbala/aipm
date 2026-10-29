@@ -304,6 +304,22 @@ class FileStateStore:
             )
         return normalized_sha256(data)
 
+    def read_text(self, kind: ArtifactKind) -> str | None:
+        """Read an artifact's text with the store's safety checks, or None if it is missing.
+
+        For readers that validate on their own, such as the layered config loader.
+        """
+        name = artifact_name(kind)
+        if not os.path.lexists(self.root):
+            return None
+        data = self._read(name, limit=MAX_YAML_BYTES)
+        if data is None:
+            return None
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise SchemaError(f".pm/{name} is not valid UTF-8 (byte {exc.start})") from None
+
     def exists(self, kind: ArtifactKind) -> bool:
         """Return whether the artifact exists."""
         return os.path.lexists(self.root / artifact_name(kind))

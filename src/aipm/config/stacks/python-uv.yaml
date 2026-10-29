@@ -1,3 +1,23 @@
 # Stack template: python-uv (ARCHITECTURE §13.1).
-# Placeholder: build prompt 02 fills in allowed_executables (argv prefixes), test_roots,
-# prepare and gates, and tests them against the command policy (SECURITY.md §10).
+# Copied into .pm/config.yaml by `aipm init` and covered by the trust hash. Every argv must
+# start with one of allowed_executables and pass the command policy (SECURITY.md §10);
+# tests/unit/test_config.py compiles each gate against it.
+allowed_executables:                  # argv prefixes (SECURITY.md §10 rule 2)
+  - [uv, sync, --frozen]
+  - [uv, run, --frozen, --offline, ruff]
+  - [uv, run, --frozen, --offline, pyright]
+  - [uv, run, --frozen, --offline, pytest]
+test_roots: [tests]                   # where {test_paths} looks for owned tests
+prepare: {run: [uv, sync, --frozen], network: registries}
+gates:
+  lint: {run: [uv, run, --frozen, --offline, ruff, check, "{paths}"], required: true}
+  format: {run: [uv, run, --frozen, --offline, ruff, format, --check, "{paths}"], required: false}
+  types: {run: [uv, run, --frozen, --offline, pyright, "{paths}"], required: false}
+  unit:
+    run: [uv, run, --frozen, --offline, pytest, -q, --junitxml, "{report_file}", "{test_paths}"]
+    required: true
+  secrets: {builtin: gitleaks, required: true}
+  sast: {builtin: semgrep, fail_on: high, required: false}
+  deps: {builtin: osv, fail_on: high, required: true}
+  ac_trace: {builtin: ac_trace, required: true}
+  ac_review: {builtin: ac_review, mode: veto, required: false}

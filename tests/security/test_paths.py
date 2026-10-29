@@ -10,6 +10,7 @@ from aipm.domain.errors import ExitCode, PolicyViolation
 from aipm.security.paths import (
     PROTECTED_PATHS,
     is_protected,
+    normalize_glob,
     normalize_relpath,
     protected_patterns,
     safe_rel_glob,
@@ -228,6 +229,12 @@ def test_normalize_relpath_checks_syntax_only() -> None:
     assert normalize_relpath("AGENTS.md") == "AGENTS.md"  # metadata: protection is not checked
     with pytest.raises(PolicyViolation, match=r"'\.\.'"):
         normalize_relpath("../idea.md")
+
+
+def test_normalize_glob_checks_syntax_only() -> None:
+    assert normalize_glob("./*lock*") == "*lock*"
+    with pytest.raises(PolicyViolation, match="whole component"):
+        normalize_glob("a**")
 
 
 def test_protected_patterns_adds_validated_extras() -> None:

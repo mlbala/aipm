@@ -190,10 +190,18 @@ def normalize_relpath(path: str) -> str:
     return "/".join(_parts(path, glob=False))
 
 
+def normalize_glob(glob: str) -> str:
+    """Check a relative glob's syntax and normalize it, without protection checks.
+
+    For patterns that grant nothing, such as `plan.serialized_paths` or extra protected paths.
+    Ownership globs use `safe_rel_glob`.
+    """
+    return "/".join(_parts(glob, glob=True))
+
+
 def protected_patterns(extra: Iterable[str] = ()) -> tuple[str, ...]:
     """Return `PROTECTED_PATHS` plus validated extra patterns (`security.extra_protected_paths`)."""
-    added = tuple("/".join(_parts(pattern, glob=True)) for pattern in extra)
-    return PROTECTED_PATHS + added
+    return PROTECTED_PATHS + tuple(normalize_glob(pattern) for pattern in extra)
 
 
 def is_protected(relpath: str, patterns: Sequence[str] = PROTECTED_PATHS) -> bool:
