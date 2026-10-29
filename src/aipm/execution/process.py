@@ -294,6 +294,25 @@ def _close_pipes(proc: asyncio.subprocess.Process) -> None:  # noqa: TID251
     transport.close()
 
 
+async def _reap(proc: asyncio.subprocess.Process) -> None:  # noqa: TID251
+    """Wait, up to `KILL_GRACE_S`, for the killed leader to be reaped, through further cancels.
+
+    On Linux asyncio reaps children inside the loop (through a pidfd), so a leader not reaped
+    before the loop stops stays a zombie. SIGKILL has been sent, so the wait is short.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + KILL_GRACE_S
+    while proc.returncode is None and loop.time() < deadline:
+        with contextlib.suppress(asyncio.CancelledError):
+            await _leader_exited(proc, deadline - loop.time())
+
+
+def _stop_reading(proc: asyncio.subprocess.Process, tasks: list[asyncio.Task[None]]) -> None:  # noqa: TID251
+    for task in tasks:
+        task.cancel()
+    _close_pipes(proc)
+
+
 async def _await_exit(proc: asyncio.subprocess.Process, timeout_s: float) -> bool:  # noqa: TID251
     """The asyncio variant of `_wait`."""
     if await _leader_exited(proc, timeout_s):
@@ -346,11 +365,16 @@ async def run_safe_async(
         tasks.append(asyncio.create_task(_afeed(cast("asyncio.StreamWriter", proc.stdin), stdin)))
     try:
         timed_out = await _await_exit(proc, timeout_s)
-    except BaseException:  # cancellation included
+    except asyncio.CancelledError:
         _signal_group(proc.pid, signal.SIGKILL)
-        for task in tasks:
-            task.cancel()
-        _close_pipes(proc)
+        try:
+            await _reap(proc)
+        finally:
+            _stop_reading(proc, tasks)
+        raise
+    except BaseException:
+        _signal_group(proc.pid, signal.SIGKILL)
+        _stop_reading(proc, tasks)
         raise
     _signal_group(proc.pid, signal.SIGKILL)
     _, pending = await asyncio.wait(tasks, timeout=DRAIN_S)

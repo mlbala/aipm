@@ -124,7 +124,7 @@ flowchart LR
 
 External dependencies:
 
-- **Required:** git 2.40+ and Python 3.12+ (via `uv`).
+- **Required:** git 2.40+ and Python 3.13+ (via `uv`; [ADR-0015](adr/0015-python-3-13-or-later.md)).
 - **Optional:**
   - The coding agent CLIs.
   - The scanners.
@@ -1086,7 +1086,7 @@ aipm/
 
 **Coverage:** at least 85% line coverage overall. Branch coverage of 100% for `security/command_policy.py`, `security/paths.py`, `security/untrusted.py`, `security/sanitize.py`, `execution/process.py` and `security/diff_checks.py`.
 
-**CI matrix:** `ubuntu-latest` and `macos-latest`, Python 3.12 and 3.13. The network is disabled in tests (`pytest --disable-socket`).
+**CI matrix:** `ubuntu-latest` and `macos-latest`, Python 3.13 and 3.14. The network is disabled in tests (`pytest --disable-socket`).
 
 ## 21. Distribution and release
 
@@ -1135,6 +1135,7 @@ These are the decisions in ADR form. Each will also get an `adr/NNNN-*.md` file 
 | ADR-0012 | `ruamel.yaml` with deterministic output; aliases and tags rejected | Clean diffs, comment preservation, no YAML bombs | PyYAML |
 | ADR-0013 | `srt` as the preferred sandbox, optional, with fail-closed behaviour under `require_sandbox` | OS-level filesystem and network isolation with no containers, on macOS and Linux | Docker-only sandboxing |
 | ADR-0014 | Structured output: native schema, then JSON mode, then prompt; no forced tool calls | Current Claude models reject forced `tool_choice`, and roles stay tool-less | Forced tool-call output as the second mechanism |
+| ADR-0015 | Python 3.13 or later; CI tests 3.13 and 3.14 | The owner's choice; uv installs a managed Python when needed | Keeping 3.12 as the floor |
 
 ## 24. Open questions (defaults apply unless changed)
 

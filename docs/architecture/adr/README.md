@@ -18,6 +18,7 @@ One file per decision, using the template below. A new ADR is proposed in a pull
 | [ADR-0012](0012-ruamel-yaml-deterministic.md) | `ruamel.yaml` with deterministic output; aliases and tags rejected | Accepted |
 | [ADR-0013](0013-srt-sandbox.md) | `srt` as the preferred sandbox, optional, failing closed under `require_sandbox` | Accepted |
 | [ADR-0014](0014-structured-output-without-forced-tools.md) | Structured output: native schema, then JSON mode, then prompt; no forced tool calls | Accepted |
+| [ADR-0015](0015-python-3-13-or-later.md) | Python 3.13 or later; CI tests 3.13 and 3.14 | Accepted |
 
 ## Template
 

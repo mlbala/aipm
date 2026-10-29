@@ -4,7 +4,7 @@ Thank you for helping. aipm is security-sensitive: it reads untrusted text and l
 
 ## Setup
 
-You need [uv](https://docs.astral.sh/uv/) and git. uv installs Python 3.12 if you do not have it.
+You need [uv](https://docs.astral.sh/uv/) and git. uv installs Python 3.13 if you do not have it.
 
 ```bash
 git clone https://github.com/mlbala/aipm && cd aipm

@@ -9,15 +9,15 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "Balakrishnan" }]
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 dynamic = ["version"]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development",
 ]
 # Runtime dependencies: ARCHITECTURE §19, lower bounds only.
@@ -84,7 +84,7 @@ include = ["src/aipm", "tests", "docs", "examples", "README.md", "LICENSE", "SEC
 # ---------------------------------------------------------------- ruff
 
 [tool.ruff]
-target-version = "py312"
+target-version = "py313"
 line-length = 100
 src = ["src", "tests"]
 # A deliberately violating fixture; tests/security/test_banned_api.py lints it explicitly.
@@ -178,7 +178,7 @@ ignore = [
 [tool.pyright]
 include = ["src/aipm"]
 strict = ["src/aipm"]
-pythonVersion = "3.12"
+pythonVersion = "3.13"
 venvPath = "."
 venv = ".venv"
 
