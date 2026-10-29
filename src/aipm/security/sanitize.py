@@ -44,6 +44,11 @@ _URL = re.compile(
     re.IGNORECASE,
 )
 _HOST = re.compile(r"[a-z0-9.\-]+")
+# A Claude Code `@path` import (in CLAUDE.md and AGENTS.md) or file mention (in a prompt): an `@`
+# that does not follow a word character, an email-local character or a dot, directly followed by
+# text. It becomes `@ ` so no tool reads a path after it; `name@example.com` stays as it is.
+_MENTION = re.compile(r"(?<![\w.%+\-])@(?=\S)")
+MENTION_SPACER = "@ "
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,10 +149,13 @@ def _url_allowed(match: re.Match[str], allowed: tuple[str, ...]) -> bool:
 
 
 def sanitize_for_context(s: str, *, allowed_url_domains: Iterable[str]) -> SanitizeResult:
-    """Clean a field for a context file: L1, plus HTML comments and non-allowlisted URLs removed.
+    """Clean a field for a context file or task prompt: L1, HTML comments and non-allowlisted
+    URLs removed, `@path` mentions neutralized.
 
     Only `http` and `https` URLs whose host is an allowlisted domain (or a subdomain of one)
-    survive (SECURITY.md §7.10, invariant I-3). Every other URL becomes `«URL removed»`.
+    survive (SECURITY.md §7.10, invariant I-3). Every other URL becomes `«URL removed»`. An `@`
+    that would start a Claude Code import or file mention (`@.env`, `@~/.ssh/id_rsa`) gets a
+    space after it, counted as `mention`.
     """
     base = sanitize_text(s, source="context")
     removed = base.removed
@@ -165,7 +173,15 @@ def sanitize_for_context(s: str, *, allowed_url_domains: Iterable[str]) -> Sanit
         removed["url"] += 1
         return URL_MARKER
 
-    return SanitizeResult(_URL.sub(replace, text), removed, base.source)
+    text, mentions = _MENTION.subn(MENTION_SPACER, _URL.sub(replace, text))
+    if mentions:
+        removed["mention"] += mentions
+    return SanitizeResult(text, removed, base.source)
+
+
+def has_mention(s: str) -> bool:
+    """Whether `s` holds an `@` that `sanitize_for_context` would neutralize."""
+    return _MENTION.search(s) is not None
 
 
 def _cut_bytes(data: bytes, limit: int, *, from_end: bool = False) -> str:

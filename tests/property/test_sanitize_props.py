@@ -1,11 +1,17 @@
 """Property tests for L1 hygiene (§20): idempotent, and removed classes never survive."""
 
+import re
 import unicodedata
 
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from aipm.security.sanitize import sanitize_for_context, sanitize_text, strip_terminal_escapes
+from aipm.security.sanitize import (
+    has_mention,
+    sanitize_for_context,
+    sanitize_text,
+    strip_terminal_escapes,
+)
 
 # Characters the sanitizer must never let through, plus pieces of escape sequences.
 HOSTILE = st.sampled_from(
@@ -70,3 +76,19 @@ def test_sanitize_for_context_is_idempotent_and_leaves_no_comment_or_foreign_url
     assert "<!--" not in once
     assert "https://" not in once
     assert "www." not in once.lower()
+
+
+MENTION_TEXT = st.lists(
+    st.one_of(
+        HOSTILE, st.sampled_from(["@", "@.env", "@@", "\n", "\t", "x@y"]), st.text(max_size=5)
+    ),
+    max_size=40,
+).map("".join)
+
+
+@settings(max_examples=300)
+@given(MENTION_TEXT)
+def test_sanitize_for_context_leaves_no_at_mention(text: str) -> None:
+    once = sanitize_for_context(text, allowed_url_domains=()).text
+    assert not has_mention(once)
+    assert not re.search(r"(?:^|\s)@\S", once)
