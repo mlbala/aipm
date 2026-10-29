@@ -1,0 +1,8 @@
+#!/bin/sh
+# Stub Claude Code for the adapter tests (ARCHITECTURE §20): answers --version like the real CLI.
+if [ "$1" = "--version" ]; then
+  echo "2.1.300 (Claude Code)"
+  exit 0
+fi
+echo "stub claude: unsupported arguments: $*" >&2
+exit 2

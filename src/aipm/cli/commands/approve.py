@@ -10,7 +10,14 @@ from typing import Annotated
 
 import typer
 
-from aipm.cli.output import global_options, handled, is_interactive, print_untrusted, succeed
+from aipm.cli.output import (
+    global_options,
+    handled,
+    is_interactive,
+    print_untrusted,
+    succeed,
+    warn,
+)
 from aipm.domain.errors import HumanInputRequired, PolicyViolation
 
 
@@ -89,8 +96,16 @@ def _design(ctx: typer.Context, *, yes: bool) -> None:
                 "commands into .pm/config.yaml. The execution surface changed: review it with "
                 "`aipm trust --show` before `aipm plan`."
             )
-    succeed(ctx, "approve", {**review.to_data(), "approved": True, "recorded": not review.approved,
-                             "stack_copied": copied})  # fmt: skip
+    succeed(
+        ctx,
+        "approve",
+        {
+            **review.to_data(),
+            "approved": True,
+            "recorded": not review.approved,
+            "stack_copied": copied,
+        },
+    )
 
 
 def _plan(ctx: typer.Context, *, yes: bool) -> None:
@@ -133,8 +148,42 @@ def _plan(ctx: typer.Context, *, yes: bool) -> None:
             )
         else:
             print_untrusted(f"The execution surface cannot be trusted: {review.surface_error}")
-    succeed(ctx, "approve", {**review.to_data(), "approved": True, "recorded": recorded,
-                             "trusted": trusted})  # fmt: skip
+    succeed(
+        ctx,
+        "approve",
+        {**review.to_data(), "approved": True, "recorded": recorded, "trusted": trusted},
+    )
+
+
+def _context(ctx: typer.Context, *, yes: bool) -> None:
+    from aipm.app import sync_context as use_case
+    from aipm.cli.review import show_context
+
+    opts = global_options(ctx)
+    review = use_case.review(opts.project)
+    warn(review.warnings)
+    if not opts.json:
+        show_context(review)
+    if not yes:
+        if not is_interactive(ctx):
+            raise HumanInputRequired(
+                "approving needs an interactive terminal or --yes",
+                hint="Review the diff above, then run `aipm approve context --yes`.",
+            )
+        if not typer.confirm("Approve these managed blocks?", default=False):
+            typer.echo("Not approved.")
+            succeed(ctx, "approve", {**review.to_data(), "recorded": []})
+            return
+    result = use_case.approve(opts.project, expected=review.digest)
+    if not opts.json:
+        typer.echo(
+            "Context approved." if result.recorded else "These blocks were already approved."
+        )
+        if review.changed:
+            typer.echo("Run `aipm sync-context` to write them.")
+    succeed(
+        ctx, "approve", {**review.to_data(), "approved": True, "recorded": list(result.recorded)}
+    )
 
 
 def command(
@@ -150,6 +199,10 @@ def command(
         from aipm.app import approve as use_case
 
         use_case.check_target(artifact.value)
-        handler = {ApproveTarget.PRD: _prd, ApproveTarget.DESIGN: _design,
-                   ApproveTarget.PLAN: _plan}[artifact]  # fmt: skip
+        handler = {
+            ApproveTarget.PRD: _prd,
+            ApproveTarget.DESIGN: _design,
+            ApproveTarget.PLAN: _plan,
+            ApproveTarget.CONTEXT: _context,
+        }[artifact]
         handler(ctx, yes=yes or opts.yes)

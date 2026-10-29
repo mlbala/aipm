@@ -81,3 +81,63 @@ def test_clinic_booking_from_idea_to_an_approved_plan(
         "0001-fastapi-and-postgres-in-one-container.md",
         "0002-one-time-codes-by-whatsapp-for-patients.md",
     ]
+
+
+def aipm_exit(code: int, *args: str) -> Result:
+    result = runner.invoke(app, ["--non-interactive", *args])
+    assert result.exit_code == code, f"aipm {' '.join(args)}\n{result.output}"
+    return result
+
+
+def test_v01_acceptance_from_idea_to_prompt_and_context_files(
+    tmp_repo: Path,
+    fake_llm: Callable[[str], FakeLLM],
+    monkeypatch: pytest.MonkeyPatch,
+    user_dirs: UserDirs,  # noqa: F811 - the imported fixture
+) -> None:
+    """ARCHITECTURE §22, v0.1 criterion 1: init → discover --answers → design → plan → trust
+    --confirm → prompt T-001 → sync-context, with FakeLLM; prompt and sync-context exit 6
+    before trust (SECURITY.md §6 rule 3)."""
+    fake = fake_llm("clinic")
+    monkeypatch.chdir(tmp_repo)
+    aipm("init")
+    for rel in (IDEA, ANSWERS):
+        (tmp_repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(REPO_ROOT / rel, tmp_repo / rel)
+    aipm("--yes", "discover", "--from", IDEA, "--answers", ANSWERS)
+    aipm("--yes", "design")
+    aipm("--yes", "plan")
+
+    # Before trust: no gate argv reaches a prompt or a context file.
+    for args in (("prompt", "T-001"), ("sync-context",), ("approve", "context", "--yes")):
+        refused = aipm_exit(6, *args)
+        assert "aipm trust" in refused.stderr
+    assert not (tmp_repo / "AGENTS.md").exists()
+    assert not (tmp_repo / ".pm" / "prompts").exists()
+
+    surface = json.loads(aipm("--json", "trust", "--show").stdout)["data"]["surface_hash"]
+    aipm("trust", "--confirm", surface[:12])
+
+    prompt = aipm("prompt", "T-001")
+    assert prompt.stdout.startswith("# Task T-001 for `repo`\n")
+    assert "- MUST NOT modify `.pm/**`" in prompt.stdout
+    assert "`uv run --frozen --offline ruff check`" in prompt.stdout
+    assert (tmp_repo / ".pm" / "prompts" / "T-001.claude.md").read_text(encoding="utf-8") == (
+        prompt.stdout
+    )
+
+    aipm_exit(4, "sync-context")
+    aipm("approve", "context", "--yes")
+    aipm("sync-context")
+    aipm("sync-context", "--check")
+    agents = (tmp_repo / "AGENTS.md").read_text(encoding="utf-8")
+    claude = (tmp_repo / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "## How to run checks" in agents
+    assert "\n@AGENTS.md\n" in claude
+
+    status = aipm("status").stdout
+    assert status.startswith("Phase: building\n")
+    assert "Tasks: 7 (todo 6, in progress 1, blocked 0, done 0, skipped 0)" in status
+    roles = [r.role.value for r in fake.requests]
+    assert roles == ["interviewer", "interviewer", "prd_writer", "architect", "threat_modeler",
+                     "planner"]  # fmt: skip

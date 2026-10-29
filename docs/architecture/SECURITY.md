@@ -122,7 +122,7 @@ The **execution surface** is everything aipm will execute or hand to an agent as
 
 1. **Canonical hash.** aipm computes `surface_hash = sha256(canonical_json(surface))`.
 2. **Where trust lives.** Trust is stored in `<user_state_dir>/aipm/trust.json`, keyed by `repo_id` (the hash of the repo's realpath) and `surface_hash`. It holds the time, the aipm version and a human-readable summary. The file is created with mode 0600 and written atomically.
-3. **Commands that need trust.** Any command that executes from the surface, or hands gate argv to an agent, MUST check trust first and exit 6 if the surface is untrusted: `verify`, `scan` (for config-defined scanners), `run`, `build`, `auto`, `prompt` and `sync-context`. `prompt` and `sync-context` write gate argv into task prompts and context files, which the user's own agent follows outside aipm's sandbox in manual mode. They render that argv only through `compile_gate`. `aipm trust` shows every argv and flag in full, without truncation, together with the surface hash. It records trust only after interactive confirmation, or non-interactively with `aipm trust --confirm <first 12 hex characters of the surface hash>`. A script therefore has to name the exact surface it trusts, and a stale hash is rejected (exit 6).
+3. **Commands that need trust.** Any command that executes from the surface, or hands gate argv to an agent, MUST check trust first and exit 6 if the surface is untrusted: `verify`, `scan` (for config-defined scanners), `run`, `build`, `auto`, `prompt` and `sync-context`. `prompt` and `sync-context` write gate argv into task prompts and context files, which the user's own agent follows outside aipm's sandbox in manual mode. They render that argv only through `compile_gate`. `sync-context --check` is the one exception: it writes nothing and reports only file names, never a block or an argv, so it runs without trust (for CI); the argv still passes `compile_gate`, and a policy violation still exits 6 ([ADR-0017](adr/0017-gate-commands-as-agents-see-them.md)). `aipm trust` shows every argv and flag in full, without truncation, together with the surface hash. It records trust only after interactive confirmation, or non-interactively with `aipm trust --confirm <first 12 hex characters of the surface hash>`. A script therefore has to name the exact surface it trusts, and a stale hash is rejected (exit 6).
 4. **`--yes` never grants trust.** `auto --yes`, `approve --yes` and the global `--yes` never record trust.
 5. **Repo config is limited by key class** (ARCHITECTURE §15). Every config key is user-only, tighten-only or repo-ok, and the loader enforces the class.
    - A repo-level `.pm/config.yaml` value for a **user-only** key is ignored, with a warning: `llm.provider`, `llm.base_url`, `llm.api_key_env`, `llm.pricing`, `dispatch.tools.*.pass_env`, `dispatch.tools.*.allow_auto_mode` and `security.extra_allowed_executables`. Otherwise a cloned repo could redirect the user's API key and repo content to its own server, read arbitrary environment variables, or turn off USD budget accounting.
@@ -159,7 +159,7 @@ This layer applies to every T2 input, and to every LLM output written to a file 
 - **Rendering.** Role and task templates render `Untrusted` only through the `|untrusted` Jinja filter. The filter:
   1. applies L1 sanitization;
   2. neutralizes any `</untrusted` sequence inside the content;
-  3. wraps the content as `<untrusted source="…" id="uXXXXXXXX">…</untrusted id="uXXXXXXXX">`, where `id` is a fresh random nonce for each render.
+  3. wraps the content as `<untrusted source="…" id="uXXXXXXXX">…</untrusted id="uXXXXXXXX">`, where `id` is a fresh random nonce for each render. Context files are the exception: they are committed and checked for drift, so their ids derive from the rendered content ([ADR-0017](adr/0017-gate-commands-as-agents-see-them.md)); step 2 is what keeps the boundary.
 - **Fail closed.** The Jinja environment's `finalize` hook raises if an `Untrusted` value is rendered without the filter. A rendering mistake therefore fails loudly.
 - **Approved artifacts are wrapped too.** Every `.pm/` artifact rendered into a role prompt is wrapped as `Untrusted`, with a source label such as `approved:prd` or `unapproved:architecture`. Approval (T1) changes the workflow, never the wrapping (§4).
 - **System prompt.** Every role's system prompt states the following:
@@ -228,7 +228,7 @@ The coding agent and gate processes run in the sandbox (§9), with a scrubbed en
 
 - **Terminal output.** Text from T2, and LLM text, is printed with Rich `Text` objects or `markup=False`, after L1 escape stripping. It is never interpreted as Rich markup.
 - **Clickable links.** URLs are printed as plain text and never as terminal hyperlinks.
-- **Files.** Files written by aipm contain only sanitized text. Context files contain no URLs outside `context.allowed_url_domains`, which prevents Markdown image and link exfiltration from being planted for agents to follow.
+- **Files.** Files written by aipm contain only sanitized text. Context files contain no URLs outside `context.allowed_url_domains`, which prevents Markdown image and link exfiltration from being planted for agents to follow. They also contain no `@path` mention outside code that Claude Code could expand as a file import (only `CLAUDE.md`'s own `@AGENTS.md` line), and model-written text in them sits only inside fenced untrusted blocks. Paths and globs shown to agents (owned and read files, component paths, protected paths, test roots) use only letters, digits and `. _ / * ? + -`; anything else is refused (exit 6). A block that would contain a secret is refused before it is shown. Context files are never read or written through a symbolic link.
 - **JSON.** `--json` output is produced only by `json.dumps`, never by string concatenation.
 
 ## 8. Secrets
@@ -409,7 +409,7 @@ Every invariant has tests. CI fails if any test fails.
 
 - **I-1** No subprocess is launched with an argv that is not derived from the trusted menu or fixed adapter fragments.
 - **I-2** aipm writes only inside `.pm/`, managed blocks, and its own generated `skills`/`agents` directories. Agents write only inside their worktree.
-- **I-3** Generated context files contain no URL outside the allowlist, no HTML comments, and no invisible Unicode.
+- **I-3** Generated context files contain no URL outside the allowlist, no HTML comments, and no invisible Unicode. aipm also checks this at run time on every generated block and task prompt, again on a prompt after redaction, and refuses to write one that fails (exit 6).
 - **I-4** No task becomes `done` without every required gate reporting `pass` on the attempt's diff.
 - **I-5** No registered test secret appears in any LLM request (captured by `FakeLLM`), file, log or run artifact.
 - **I-6** Terminal output contains no ESC or OSC sequences originating from T2 content.

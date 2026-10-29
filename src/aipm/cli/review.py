@@ -1,4 +1,4 @@
-"""G2 and G3 in the terminal (ARCHITECTURE §7.2, SECURITY.md §7.5).
+"""G2, G3 and context approval in the terminal (ARCHITECTURE §7.2, SECURITY.md §7.5).
 
 Everything shown here can hold model or repository text, so every line goes through
 `print_untrusted` (sanitized, no markup, no escapes). The command lines at G3 come from the
@@ -11,6 +11,7 @@ from collections.abc import Sequence
 import typer
 
 from aipm.app.approve import DesignReview, PlanReview
+from aipm.app.sync_context import ContextReview
 from aipm.cli.output import print_untrusted, warn
 
 MAX_CHANGES_SHOWN = 50
@@ -59,6 +60,25 @@ def show_plan(review: PlanReview, changes: Sequence[str] = ()) -> None:
     print_untrusted(f"trusted: {'yes' if review.trusted else 'no'}")
     for problem in review.problems:
         print_untrusted(f"cannot approve: {problem}")
+
+
+_ACTIONS = {
+    "create": "new file",
+    "append": "block added to the end of the file",
+    "replace": "block replaced",
+}
+
+
+def show_context(review: ContextReview) -> None:
+    """Every managed block that would change, as a unified diff of the block."""
+    for f in review.files:
+        if not f.changed:
+            print_untrusted(f"{f.path}: up to date")
+            continue
+        state = "approved" if f.approved else "not approved yet"
+        print_untrusted(f"\n{f.path}: {_ACTIONS[f.action]} ({state})")
+        for line in f.diff():
+            print_untrusted(line)
 
 
 def confirm_risk(role: str, excerpts: Sequence[str]) -> bool:

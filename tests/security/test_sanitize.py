@@ -11,6 +11,7 @@ from aipm.security.sanitize import (
     INVISIBLE_CLASSES,
     cap_text,
     decode_untrusted,
+    has_mention,
     head_tail,
     is_binary,
     sanitize_for_context,
@@ -283,6 +284,48 @@ def test_context_also_applies_l1_hygiene() -> None:
 def test_context_url_without_host_characters_is_removed() -> None:
     result = sanitize_for_context("x https://%65vil.example/ y", allowed_url_domains=("example",))
     assert "%65vil" not in result.text
+
+
+# ---------------------------------------------------------------- @ mentions (build prompt 05)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("see @.env now", "see @ .env now"),
+        ("@~/.ssh/id_rsa", "@ ~/.ssh/id_rsa"),
+        ("(@AGENTS.md)", "(@ AGENTS.md)"),
+        ("@@x", "@ @ x"),
+        ("line\n@README", "line\n@ README"),
+        ("`@x`", "`@ x`"),
+    ],
+)
+def test_context_neutralizes_at_mentions(text: str, expected: str) -> None:
+    # Claude Code reads `@path` in CLAUDE.md and AGENTS.md as a file import (C-027).
+    result = sanitize_for_context(text, allowed_url_domains=())
+    assert result.text == expected
+    assert result.removed["mention"] == expected.count("@ ")
+    assert not has_mention(result.text)
+
+
+@pytest.mark.parametrize(
+    "text", ["mail dev@example.com", "a @ b", "x@y", "ends with @", "first.last@host", "a\t@ b"]
+)
+def test_context_keeps_emails_and_lone_ats(text: str) -> None:
+    assert sanitize_for_context(text, allowed_url_domains=()).text == text
+    assert not has_mention(text)
+
+
+def test_a_mention_of_a_removed_url_is_neutralized_too() -> None:
+    result = sanitize_for_context("@https://evil.example/x", allowed_url_domains=())
+    assert result.text == "@ «URL removed»"
+    assert result.removed["url"] == 1
+    assert result.removed["mention"] == 1
+
+
+def test_an_allowlisted_url_with_userinfo_is_kept_whole() -> None:
+    text = "https://git@docs.python.org/x"
+    assert sanitize_for_context(text, allowed_url_domains=("docs.python.org",)).text == text
 
 
 # ---------------------------------------------------------------- caps and binary detection

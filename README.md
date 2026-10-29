@@ -7,7 +7,7 @@
 
 **An AI product manager for your terminal.** aipm interviews you for requirements, designs the architecture, splits the work into tasks, and writes prompts and `AGENTS.md` for Claude Code, Codex, Copilot and Gemini CLI. It then verifies every task with tests and security gates.
 
-> **Status: pre-alpha.** The commands are being built, step by step, from the prompts in [`docs/prompts/`](docs/prompts/README.md). `aipm`, `aipm init`, `aipm doctor`, `aipm trust`, `aipm discover`, `aipm design`, `aipm plan`, `aipm status` and `aipm approve prd|design|plan` work today. Every other command is registered, and until its build step lands it exits with code 2 and says which step or milestone brings it.
+> **Status: pre-alpha, v0.1 feature-complete.** The commands are built step by step from the prompts in [`docs/prompts/`](docs/prompts/README.md). Every v0.1 command works: `aipm`, `init`, `doctor`, `trust`, `discover`, `design`, `plan`, `approve`, `status`, `prompt` and `sync-context`. The later commands (`verify`, `scan`, `task`, `run`, `build`, `merge`, `auto`) are registered and exit with code 2, naming the milestone that brings them.
 
 ## Install
 
@@ -19,16 +19,19 @@ aipm needs Python 3.13 or later. It is distributed from GitHub only ([ADR-0001](
 
 ## Use
 
+The v0.1 flow, in any git repository:
+
 ```bash
-# in any project folder
-aipm init
-aipm discover          # requirements interview
-aipm design            # architecture, ADRs, threat model
-aipm plan              # task graph + worksheet
-aipm trust             # review and trust the exact commands aipm may run
-aipm prompt T-001      # prompt for your coding agent
-aipm status
+aipm init                       # .pm/, stack detection, repo map
+aipm discover --from idea.md    # requirements interview, then the PRD (approve it: G1)
+aipm design                     # architecture, ADRs, threat model (approve it: G2)
+aipm plan                       # task graph and worksheet (approve it, and trust its commands: G3)
+aipm sync-context               # AGENTS.md and CLAUDE.md for your coding agent
+aipm prompt T-001 --copy        # the first task's prompt; paste it into Claude Code
+aipm status                     # where you are, and what to run next
 ```
+
+`aipm` on its own always prints the phase and the next command. In a terminal each step asks before it records an approval; in a script, use `--yes` for G1–G3, `aipm trust --confirm <hash>` for trust, and `aipm approve context --yes` for the context files.
 
 ## Commands
 
@@ -97,6 +100,14 @@ Every command checks that its input is approved and current. When the PRD or the
 
 `aipm` on its own prints the phase (for example `design_approved`), anything stale with its downstream impact, and the next command; in a terminal it offers to run it. `aipm status` shows task counts and a progress bar, blocked tasks with their reasons and questions, unacknowledged security events, the features and threats no done task covers yet, and the budget. `--all` lists every task, `--task T-007` shows one in full, and `--ack EVENT-ID` acknowledges a security event recorded on this machine. It never calls a model.
 
+### Prompts and context files: `prompt`, `sync-context` and `approve context`
+
+Both commands hand your gate commands to a coding agent that runs outside aipm's sandbox, so both exit 6 until you have trusted the repository's commands with `aipm trust`. Neither calls a model.
+
+`aipm prompt T-001` prints the prompt for one task, saves it to `.pm/prompts/T-001.claude.md`, marks the task `in_progress` and records `HEAD` as its base commit. The prompt holds the rules (each protected path as a "MUST NOT modify" rule, the dependency and network limits), the task's text and acceptance criteria, the files it may change and read, and the exact check commands to run, which come from your trusted config through the command policy. Text a model wrote is shown inside `untrusted` blocks that the agent is told to treat as data. The prompt goes to stdout alone, so `aipm prompt T-001 > prompt.md` works; `--out FILE` writes it to a file inside the repository and `--copy` also copies it with `pbcopy`, `wl-copy` or `xclip`. A task whose dependencies are not done is refused unless you pass `--force`, and a stale plan unless `--accept-stale`. `--fix --report FILE` adds the failing output of a saved gate report, cut to its first and last 4 KiB (from v0.2, `aipm verify` saves the reports). Prompts stay under 24 KiB: aipm drops the read-only file list, then upstream titles, then older check output, and refuses a prompt that still does not fit.
+
+`aipm sync-context` writes a managed block, between `<!-- aipm:begin … -->` and `<!-- aipm:end -->`, into `AGENTS.md` (overview, stack, how to run checks, architecture map, conventions, boundaries and the task protocol) and `CLAUDE.md` (an `@AGENTS.md` import and notes for Claude Code). Everything outside the markers stays exactly as you wrote it, and a file whose markers are broken or repeated is left alone (exit 2). It shows a diff of each block that changes and writes after you confirm; without a terminal it writes only blocks you approved with `aipm approve context --yes`, and otherwise exits 4. `--check` exits 3 when a block is out of date, for CI, and needs no trust because it writes nothing and prints only file names. Fields from the PRD and design are cleaned (no URLs outside `context.allowed_url_domains`, no HTML comments, no invisible characters, no `@path` imports) and shown only inside fenced `untrusted` blocks. Paths shown to an agent (owned and read files, component paths, protected paths, test roots) may use only letters, digits and `. _ / * ? + -`; a plan or config with any other character in a path stops `prompt` and `sync-context` with exit 6. A block that would contain a secret is never shown or written.
+
 ### Models and providers
 
 aipm talks to a model through one gateway, with the official `anthropic` SDK or any OpenAI-compatible server (OpenAI, Azure OpenAI, OpenRouter, Ollama, vLLM, LM Studio). It asks for JSON that matches a strict schema, validates every reply, and gives a model one chance to repair an invalid reply; nothing is written from a reply that fails twice. It never sends `temperature`, `top_p` or `top_k`. Set the provider in your user config:
@@ -114,11 +125,110 @@ llm:
   models: {default: llama3.3}
 ```
 
+**Offline with Ollama (manual check, v0.1 acceptance criterion 3).** With the network off except `localhost`:
+
+1. Install [Ollama](https://ollama.com), run `ollama pull llama3.3`, and start it (`ollama serve`).
+2. Put the `openai-compatible` block above in your user config, and unset `ANTHROPIC_API_KEY`.
+3. Turn off Wi-Fi (or block outbound traffic except `127.0.0.1`).
+4. In a new git repository, run `aipm init`, `aipm discover --from idea.md`, `aipm design`, `aipm plan`, `aipm trust`, `aipm prompt T-001` and `aipm sync-context`.
+5. Expected: every command succeeds and no connection leaves the machine (check with `lsof -i -n -P | grep -v 127.0.0.1` while it runs). A small local model may need a repair attempt more often; `discover`, `design` and `plan` say so when it happens.
+
 `budget.run_tokens` caps the tokens one command may spend (exit 5 when reached); token usage is shown after each run, and cost too when you set prices in `llm.pricing`.
 
 ### Configuration
 
 Settings come in layers, later ones winning: built-in defaults, your user config (`$AIPM_CONFIG`, or `config.yaml` in your platform's user config directory), the repository's `.pm/config.yaml`, `AIPM_*` environment variables (`AIPM_LLM__MODELS__DEFAULT` sets `llm.models.default`), then command-line flags. A repository cannot set user-only keys such as `llm.base_url` or `llm.api_key_env`, and it can only make security settings and budgets stricter; aipm prints a warning for every repository setting it ignores and every relaxation you make ([ARCHITECTURE.md §15](docs/architecture/ARCHITECTURE.md#15-configuration)).
+
+## A recorded session
+
+The clinic-booking example ([`examples/clinic-booking/idea.md`](examples/clinic-booking/idea.md)) through the whole v0.1 flow, non-interactively. It was recorded with aipm's test model (`FakeLLM`, the same fixtures the end-to-end test uses), so a real model's text differs. Long outputs are cut where marked `…`, and paths are shortened; the paths, the commit and the surface hash depend on your machine.
+
+```console
+$ aipm init
+Initialized .pm/ in /tmp/clinic-booking (greenfield)
+Stack template: none
+Wrote: .gitignore, config.yaml, repo-map.md
+…
+Not trusted yet. After reviewing it, run: aipm trust --confirm 1d34dab0a0ee
+$ aipm --yes discover --from idea.md --answers answers.yaml
+Coverage 1.00 (target 0.85) after 1 rounds; 10 answers, 0 assumptions, 0 open questions.
+Wrote: .pm/requirements.yaml, .pm/requirements.md, .pm/prd.md, .pm/approvals.yaml
+G1 (PRD approval): approved
+$ aipm design
+Wrote: .pm/architecture.md, .pm/adr/, .pm/threat-model.md
+Design: python-uv, 4 components, 2 ADRs, 3 threats of medium or higher
+G2 (design approval): pending
+note: review .pm/architecture.md, .pm/threat-model.md and .pm/adr/, then run `aipm approve design`
+$ aipm approve design --yes
+…
+G2 approved.
+Copied the python-uv stack's prepare step, gates and allowed commands into .pm/config.yaml. The execution surface changed: review it with `aipm trust --show` before `aipm plan`.
+$ aipm plan
+Wrote: .pm/tasks.yaml, .pm/worksheet.md
+Plan: 7 tasks, DAG depth 4, widest level 4; 1 change by the plan validator
+G3 (plan approval): pending
+Execution surface trusted: no
+note: review .pm/worksheet.md, then run `aipm approve plan`
+$ aipm approve plan --yes
+…
+  unit (required): uv run --frozen --offline pytest -q --junitxml '{report_file}' '{test_paths}'    [/usr/local/bin/uv]
+…
+G3 approved.
+Trust is not recorded by --yes. Review `aipm trust --show`, then run `aipm trust --confirm de02099206ea`.
+$ aipm prompt T-001
+aipm prompt: aipm prompt hands this repository's gate commands to your coding agent, and you have not trusted them
+hint: Review them with `aipm trust --show`, then run `aipm trust`.
+$ aipm trust --confirm de02099206ea
+…
+This surface is trusted.
+$ aipm prompt T-001
+# Task T-001 for `clinic-booking`
+…
+## Checks to run before you finish
+
+Run these from the repository root, exactly as written:
+
+- `lint` (required): `uv run --frozen --offline ruff check`
+- `unit` (required): `uv run --frozen --offline pytest -q --junitxml /dev/null tests`
+…
+Saved .pm/prompts/T-001.claude.md; T-001 is in progress from 83239b1b007b.
+$ aipm sync-context
+AGENTS.md: new file (not approved yet)
+--- a/AGENTS.md (managed block)
++++ b/AGENTS.md (managed block)
+@@ -0,0 +1,108 @@
++# Instructions for coding agents: `clinic-booking`
+…
+aipm sync-context: the managed blocks changed and need your approval
+hint: Review the diff, then run `aipm approve context --yes` and `aipm sync-context` again, or run it in a terminal.
+$ aipm approve context --yes
+…
+Context approved.
+Run `aipm sync-context` to write them.
+$ aipm sync-context
+…
+Wrote: AGENTS.md, CLAUDE.md
+$ aipm sync-context --check
+Up to date: AGENTS.md, CLAUDE.md
+$ aipm status
+Phase: building
+blocked: no task is ready until T-001 is done (in progress)
+Next: aipm status
+
+Tasks: 7 (todo 6, in progress 1, blocked 0, done 0, skipped 0)
+…
+```
+
+## Tested tool versions
+
+aipm v0.1 renders prompts and context files for Claude Code; it starts no coding agent yet (dispatch arrives in v0.3). These are the versions this release was tested with, on macOS 27 (arm64), on 2026-10-29.
+
+| Tool | Version | What was checked |
+|---|---|---|
+| Python | 3.13.5 (CI: 3.13 and 3.14) | the whole test suite |
+| uv | 0.13.6 | install, `uv run`, the python-uv gate commands |
+| git | 2.55.0 | `init` and the base commit (`rev-parse`, hooks and fsmonitor off) |
+| Claude Code | 1.0.80 installed; formats checked against the Claude Code docs of 2026-10-29 | `claude --version` parsing (`detect`); `CLAUDE.md` with an `@AGENTS.md` import (imports are not read inside code spans or fenced blocks); subagent and skill front matter, for v0.2 |
 
 ## Security model
 

@@ -4,11 +4,24 @@ All notable changes to aipm are recorded here. The format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.1.0] - not yet tagged
+
+v0.1, the PM core. The owner tags it after the v0.1 security red-team pass (build prompt 09) and sets the date here.
+
 ### Changed
 
 - aipm needs Python 3.13 or later (ADR-0015). CI tests Python 3.13 and 3.14 on Linux and macOS.
+- G3 pins the plan without task progress once work has started (ADR-0016): `prompt` can mark a task `in_progress` without voiding the approval, while an unstarted plan is still pinned to its exact bytes.
+- `aipm status` names the task it is waiting for when nothing else is ready.
 
 ### Added
+
+- `aipm prompt <T-ID>`: the Claude Code prompt for one task, compiled without a model from the approved plan and the trusted config. It needs trust (exit 6), prints the prompt (or `--out FILE`, inside the repository), saves `.pm/prompts/<T-ID>.claude.md`, marks the task `in_progress` with `base_sha` set to HEAD, and copies it with `--copy` (`pbcopy`, `wl-copy` or `xclip`). Unfinished dependencies need `--force`; a stale plan needs `--accept-stale`, which is recorded. `--fix --report FILE` adds the failing output of a saved gate report, cut to head and tail. The prompt stays within 24 KiB, trimming read-only files, then upstream titles, then older output, and refuses otherwise.
+- `aipm sync-context`: managed blocks in `AGENTS.md` (overview, stack, how to run checks, architecture map, conventions, boundaries, task protocol) and `CLAUDE.md` (`@AGENTS.md` plus Claude Code notes). It shows a diff, writes after an interactive yes or an `aipm approve context` approval, and records each block's hash; text outside the markers is kept byte for byte, and broken markers exit 2. `--check` exits 3 on drift and needs no trust (ADR-0017). `--tool` is repeatable; only `claude` exists in v0.1.
+- `aipm approve context [--yes]`: approves the reviewed managed blocks without writing them.
+- The prompt compiler (`TaskSpec`), the Claude Code adapter (`render_prompt`, `context_files`, and `detect` with `claude --version`), the adapter registry and the context generator, with package templates. Gate commands appear as agents run them: `{paths}` empty, `{test_paths}` the first test root, `{report_file}` `/dev/null` (ADR-0017).
+- README: the full v0.1 quickstart, a recorded session, the tested tool versions and the manual offline check with Ollama.
+- Tests: managed-block fuzzing with hypothesis, invariant I-3 over every generated file and prompt (fuzzed), corpus cases C-022 to C-027 through PRD and architecture fields and bodies, task fields and gate output, golden snapshots of `AGENTS.md`, `CLAUDE.md` and the task prompt (normal and `--fix`), integration tests for `prompt`, `sync-context` and `approve context`, and the clinic flow end to end through `prompt` and `sync-context`, including exit 6 before trust. The smoke test's stub checks for `prompt` and `sync-context` became "every v0.1 command is built".
 
 - `aipm design`: the architect and threat modeler write `.pm/architecture.md`, `.pm/adr/NNNN-<slug>.md` and `.pm/threat-model.md`, then G2 shows the stack, components, ADR titles and threats of medium or higher. Only built-in stack templates; an LLM app must cover the OWASP Top 10 for LLM Applications. After G2, a greenfield project gets the stack's prepare step, gates and allowed commands in `.pm/config.yaml` (trust is needed again). `--regenerate` rebuilds from the current PRD.
 - `aipm plan`: the planner proposes a task graph and the plan validator (`aipm.domain.dag`) checks all eight rules of ARCHITECTURE §9, merging or ordering tasks that own the same files and listing every change, with one repair attempt for the planner. Writes `.pm/tasks.yaml` and `.pm/worksheet.md`, then G3 shows the task table, DAG depth and width, every command line from the config, every `deps_add` and the tasks that own test or config files. An interactive G3 also records trust.
@@ -35,6 +48,10 @@ All notable changes to aipm are recorded here. The format follows [Keep a Change
 
 ### Security
 
+- Context files and task prompts render model-written text only inside fenced `untrusted` blocks, and every field passes `sanitize_for_context`, which now also neutralizes `@path` mentions that Claude Code would read as file imports (`@.env` becomes `@ .env`). Each generated block and prompt is checked against invariant I-3 before it is written, and protected paths appear only as "MUST NOT modify" rules.
+- Context files and `--out` files are never read or written through a symbolic link, only regular files are accepted, and a write is refused if the file changed after it was shown. Prompts are redacted between untrusted-block tags before they are saved, printed or copied.
+- aipm's one git call (`rev-parse` for the base commit) runs through `run_safe` with the full SECURITY §11 hardening (hooks, fsmonitor and external diff off, no pager) and a constructed environment; a `git` or clipboard tool found on PATH inside the repository is never run.
+- From the step 05 security review: paths and globs shown to agents must be plain (letters, digits and `. _ / * ? + -`) or the command exits 6; a prompt is checked against I-3 again after redaction; a context block that would contain a secret is refused before it is shown; `--out` never follows a link and never keeps execute bits; `--check` names a refused gate without its argv; and a prompt run with `--accept-stale` labels its text `stale` or `unapproved`, not approved.
 - The plan validator, not the prompt, is the control: unknown gate names, unsafe or protected owned paths, cycles, oversized plans and bad package names are rejected deterministically, and terminal escapes and invisible characters are removed from task text (recorded as a security event). Repair notes never carry the model's text. Corpus cases C-015 to C-021 run through `aipm plan`.
 - G3 command lines come from the trusted config through the trust store's surface; a test shows that no task text reaches them. The planner sees gate names only, never argv.
 - Every `.pm/` artifact a role reads is wrapped as `Untrusted` with a source label (`approved:prd`, `unapproved:architecture`, `stale:threat_model`), including approved ones.

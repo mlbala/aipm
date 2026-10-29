@@ -45,6 +45,25 @@ def _git_env(home: Path) -> dict[str, str]:
     }
 
 
+def git_commit_all(repo: Path, message: str) -> None:
+    """Commit every tracked change in a `tmp_repo` (test tooling: no hooks, no signing)."""
+    subprocess.run(
+        [
+            "git",
+            "-c", "core.hooksPath=/dev/null",
+            "-c", "commit.gpgsign=false",
+            "-c", "user.name=aipm test",
+            "-c", "user.email=test@example.invalid",
+            "commit", "-q", "-a", "--allow-empty", "-m", message,
+        ],
+        cwd=repo,
+        env=_git_env(repo.parent / "home"),
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )  # fmt: skip
+
+
 @pytest.fixture
 def tmp_repo(tmp_path: Path) -> Path:
     """A temporary git repository on `main` with one commit."""

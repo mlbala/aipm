@@ -15,7 +15,7 @@ import os
 import re
 import secrets
 import stat
-from collections.abc import Generator, Mapping
+from collections.abc import Generator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,6 +26,7 @@ from pydantic import JsonValue, ValidationError
 from ruamel.yaml import YAML
 
 from aipm.domain.errors import LockHeld, PolicyViolation, SchemaError, UsageError
+from aipm.domain.ids import is_valid_id
 from aipm.domain.models import (
     ADR_DIR,
     SCHEMA_VERSION,
@@ -46,6 +47,7 @@ from aipm.domain.models import (
 )
 from aipm.domain.models.artifacts import is_adr_file_name
 from aipm.observability.redaction import process_redactor
+from aipm.security.agent_text import agent_text_problems
 from aipm.security.redact import Redactor
 from aipm.security.sanitize import sanitize_text
 from aipm.state import frontmatter
@@ -54,6 +56,7 @@ from aipm.state.layout import (
     GITIGNORE_FILE,
     GITIGNORE_TEXT,
     LOCK_FILE,
+    PROMPTS_DIR,
     artifact_name,
     pm_root,
 )
@@ -61,7 +64,9 @@ from aipm.state.yamlio import MAX_YAML_BYTES, dump_yaml, load_yaml
 
 MAX_EVENTS_BYTES = 16 * 1_048_576
 MAX_ADR_FILES = 100
+MAX_PROMPT_BYTES = 1_048_576
 _HOLDER = re.compile(r"(\d{1,10}) (\S{1,40})")
+_TOOL = re.compile(r"[a-z]{1,16}")
 
 _MODELS: Mapping[ArtifactKind, type[YamlArtifact] | type[MarkdownArtifact[Any]]] = {
     ArtifactKind.REQUIREMENTS: RequirementsDoc,
@@ -106,6 +111,20 @@ def normalized_sha256(data: bytes) -> str:
     lines = [line.rstrip(" \t") for line in text.split("\n")]
     normalized = "\n".join(lines).rstrip("\n") + "\n"
     return hashlib.sha256(normalized.encode("utf-8", errors="surrogateescape")).hexdigest()
+
+
+def plan_sha256(doc: TasksDoc, file_sha256: str) -> str:
+    """The hash G3 approves (ADR-0016).
+
+    A plan that no task has started is pinned to its exact file bytes (`file_sha256`), as
+    before. Once work starts, `tasks.yaml` also records progress (`status`, `base_sha`, ...), so
+    the pin becomes the plan without progress in aipm's canonical form, which is the hash of the
+    file aipm wrote for the unstarted plan. Progress never voids G3; a change to the plan does.
+    """
+    view = doc.plan_view()
+    if view == doc:
+        return file_sha256
+    return normalized_sha256(dump_yaml(view.to_document()).encode("utf-8"))
 
 
 def _check_version(raw: Mapping[str, object], source: str) -> None:
@@ -497,6 +516,54 @@ class FileStateStore:
         data = cleaned.encode("utf-8")
         self._atomic_write(name, data)
         return normalized_sha256(data)
+
+    def _real_subdir(self, name: str) -> None:
+        """Make sure `.pm/<name>` is a real directory (created if missing), never a link."""
+        self._check_root(create=True)
+        path = self.root / name
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            path.mkdir(mode=0o755)
+            info = os.lstat(path)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise PolicyViolation(f".pm/{name} must be a real directory, not a link or a file")
+
+    def save_prompt(
+        self, task_id: str, tool: str, text: str, *, allowed_url_domains: Sequence[str] = ()
+    ) -> tuple[str, str]:
+        """Write `.pm/prompts/<T-ID>.<tool>.md`; return the text written and its sha256.
+
+        The prompt holds `untrusted` blocks (gate output, model text), so it is redacted between
+        the block tags, never across one (SECURITY.md §7.2, §8), and refused if a secret is left.
+        Redaction can cut a code span short, so the redacted text is checked against invariant
+        I-3 again and refused (exit 6) if it fails. Callers print or copy the returned text,
+        never their own copy.
+        """
+        if not is_valid_id("task", task_id) or not _TOOL.fullmatch(tool):
+            raise UsageError(f"not a task ID and tool name: {task_id!r}, {tool!r}")
+        # Imported here: the template module loads Jinja, which read-only commands do not need.
+        from aipm.security.untrusted import map_between_tags  # noqa: PLC0415
+
+        name = f"{PROMPTS_DIR}/{task_id}.{tool}.md"
+        source = f".pm/{name}"
+        cleaned = sanitize_text(text, source=source)
+        redacted = map_between_tags(cleaned.text, self.redactor.redact)
+        self._refuse_secrets(redacted, source)
+        problems = agent_text_problems(redacted, allowed_url_domains=allowed_url_domains)
+        if problems:
+            raise PolicyViolation(
+                f"refusing to write {source}: after redaction it fails invariant I-3 "
+                f"({'; '.join(problems)})",
+                hint="A secret-looking value sits in a path or command of this task; remove it.",
+            )
+        data = redacted.encode("utf-8")
+        if len(data) > MAX_PROMPT_BYTES:
+            raise UsageError(f"{source} would be larger than {MAX_PROMPT_BYTES} bytes")
+        self._real_subdir(PROMPTS_DIR)
+        self._atomic_write(name, data)
+        self._signal(source, cleaned.invisible_removed)
+        return redacted, normalized_sha256(data)
 
     def append_event(
         self,

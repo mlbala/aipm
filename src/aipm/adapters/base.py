@@ -1,6 +1,6 @@
 """The ToolAdapter protocol (ARCHITECTURE §5.3, §11)."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from aipm.domain.models import GeneratedFile, ProjectContext, TaskSpec, ToolName, Workspace
@@ -9,12 +9,27 @@ from aipm.execution.process import ProcessResult
 
 @dataclass(frozen=True, slots=True)
 class Capabilities:
-    """Detected tool version and flags (placeholder, prompt 05)."""
+    """What `<tool> --version` showed. Flag checks from `--help` arrive with dispatch (v0.3)."""
+
+    tool: ToolName
+    found: bool
+    path: str | None = None
+    version: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class RenderedTaskPrompt:
-    """A tool-specific task prompt (placeholder, prompt 05)."""
+    """A tool-specific task prompt, within the size budget (ARCHITECTURE §10.1)."""
+
+    tool: ToolName
+    task_id: str
+    text: str
+    omitted: tuple[str, ...] = field(default_factory=tuple[str, ...])
+
+    @property
+    def size(self) -> int:
+        """The prompt's size in UTF-8 bytes."""
+        return len(self.text.encode("utf-8"))
 
 
 @dataclass(frozen=True, slots=True)

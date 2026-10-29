@@ -79,8 +79,26 @@ from aipm.domain.models.events import (
     SecurityEvent,
     SecurityEventKind,
 )
-from aipm.domain.models.gates import BuiltinGate, GateDef, NetworkProfile, PrepareDef
+from aipm.domain.models.gates import (
+    BuiltinGate,
+    GateDef,
+    GateReport,
+    GateResult,
+    GateStatus,
+    NetworkProfile,
+    PrepareDef,
+)
 from aipm.domain.models.plan import ProposedDependency, ProposedTask
+from aipm.domain.models.prompts import (
+    ComponentInfo,
+    FeatureInfo,
+    GateCommand,
+    GateFailure,
+    GeneratedFile,
+    ProjectContext,
+    TaskSpec,
+    UpstreamTask,
+)
 from aipm.domain.models.snapshot import StateSnapshot
 
 type Artifact = YamlArtifact | MarkdownArtifact[Any]
@@ -110,15 +128,21 @@ __all__ = [
     "BuiltinGate",
     "ChangeSet",
     "Component",
+    "ComponentInfo",
     "Coverage",
     "DependencyAdd",
     "Dimension",
     "Done",
     "Ecosystem",
     "Feature",
+    "FeatureInfo",
     "FrontMatter",
+    "GateCommand",
     "GateDef",
+    "GateFailure",
     "GateReport",
+    "GateResult",
+    "GateStatus",
     "GeneratedFile",
     "JournalEvent",
     "JournalEventType",
@@ -165,19 +189,10 @@ __all__ = [
     "ThreatModelDoc",
     "ThreatModelFrontMatter",
     "ToolName",
+    "UpstreamTask",
     "Workspace",
     "YamlArtifact",
 ]
-
-
-@dataclass(frozen=True, slots=True)
-class TaskSpec:
-    """Placeholder for the canonical task spec given to adapters (ARCHITECTURE §10.1)."""
-
-
-@dataclass(frozen=True, slots=True)
-class GateReport:
-    """Placeholder for the result of a gate run (ARCHITECTURE §13.2)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,13 +203,3 @@ class Workspace:
 @dataclass(frozen=True, slots=True)
 class ChangeSet:
     """Placeholder for the diff facts that post-change checks inspect (prompt 06)."""
-
-
-@dataclass(frozen=True, slots=True)
-class ProjectContext:
-    """Placeholder for the approved facts that context files are rendered from."""
-
-
-@dataclass(frozen=True, slots=True)
-class GeneratedFile:
-    """Placeholder for a context file aipm will write (ARCHITECTURE §10.2)."""
