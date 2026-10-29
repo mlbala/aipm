@@ -21,6 +21,7 @@ from typing import Literal
 from aipm.domain.errors import PolicyViolation
 from aipm.domain.models import GateDef, PrepareDef, ToolName
 from aipm.security.paths import SafeRelPath, is_protected, normalize_relpath, protected_patterns
+from aipm.security.sanitize import is_ignorable
 
 type Argv = tuple[str, ...]
 type Stage = Literal["gate", "prepare"]
@@ -43,7 +44,9 @@ HARD_DENIED: frozenset[str] = frozenset(
         "git",
     }
 )  # fmt: skip
-"""SECURITY.md §10 rule 3: never allowed, as `argv[0]` or anywhere after a runner."""
+"""SECURITY.md §10 rule 3: never allowed, at any argv position. A wrapper such as `time`, `nice`,
+`timeout`, `caffeinate` or `find -exec` starts the program named after it, so checking only
+`argv[0]` and the elements after a runner is not enough (red-team v0.1, RT01-1)."""
 
 RUNNERS: tuple[Argv, ...] = (
     ("uv", "run"),
@@ -97,6 +100,12 @@ _INTERPRETERS: dict[str, tuple[frozenset[str], tuple[str, ...], frozenset[str]]]
     "ruby": (frozenset("e"), (), frozenset()),
     "perl": (frozenset("eE"), (), frozenset()),
     "deno": (frozenset(), (), frozenset({"eval"})),
+    # macOS ships osascript, whose AppleScript can `do shell script` (red-team v0.1, RT01-1).
+    "osascript": (frozenset("e"), (), frozenset()),
+    "php": (frozenset("rBRE"), (), frozenset()),
+    "lua": (frozenset("e"), (), frozenset()),
+    "rscript": (frozenset("e"), (), frozenset()),
+    "julia": (frozenset("eE"), (), frozenset()),
 }
 
 _NPM_INSTALL = frozenset(
@@ -152,7 +161,9 @@ _program = program_name
 
 def _invisible(ch: str) -> bool:
     category = unicodedata.category(ch)
-    return category[0] == "C" or category in ("Zl", "Zp") or (category == "Zs" and ch != " ")
+    if category[0] == "C" or category in ("Zl", "Zp") or is_ignorable(ch):
+        return True
+    return category == "Zs" and ch != " "
 
 
 def _check_element(arg: object) -> str:
@@ -259,6 +270,13 @@ def _check_runner(argv: Argv) -> None:
             raise _deny(f"inline-code flag {arg!r} after a runner")
 
 
+def _check_denied_anywhere(argv: Argv) -> None:
+    """No hard-denied program at any position: a wrapper (`time bash -c …`) would start it."""
+    for arg in argv[1:]:
+        if _program(arg) in HARD_DENIED:
+            raise _deny(f"{arg!r} is hard-denied at any argv position; a wrapper could start it")
+
+
 def _check_interpreters(argv: Argv) -> None:
     for index, arg in enumerate(argv):
         spec = _INTERPRETERS.get(_program(arg))
@@ -304,6 +322,7 @@ def check_argv(
     if _runner_present(checked):
         _check_runner(checked)
     _check_interpreters(checked)
+    _check_denied_anywhere(checked)
     if stage == "gate":
         _check_install(checked)
     return checked

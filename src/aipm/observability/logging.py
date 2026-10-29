@@ -1,9 +1,10 @@
 """Structured logging; every record passes through the redactor (ARCHITECTURE §17).
 
 Human-readable lines go to stderr, JSON lines to a file in `<user_state_dir>/aipm/logs/`. Each
-handler carries the redaction filter (built from the full environment) and then a filter that
-strips terminal escape sequences, so a log line can neither leak a secret nor drive the
-terminal. A log directory that cannot be created only disables the file.
+handler first strips terminal escape sequences and control characters, then redacts (with a
+redactor built from the full environment), so a log line can neither leak a secret, even one
+split by an escape sequence, nor drive the terminal. A log directory that cannot be created only
+disables the file.
 """
 
 import json
@@ -34,10 +35,20 @@ def log_dir() -> Path:
 
 
 class _EscapeFilter(logging.Filter):
-    """Runs after redaction, which has already folded arguments into `record.msg`."""
+    """Runs before redaction: folds the arguments into the message and formats the traceback,
+    then strips escapes and control characters. A secret split by an escape sequence, as colored
+    tool output produces, is therefore whole when the redactor sees it (red-team v0.1, RT01-4).
+    """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        record.msg = strip_terminal_escapes(str(record.msg))
+        try:
+            message = record.getMessage()
+        except (TypeError, ValueError):
+            message = str(record.msg)
+        record.msg = strip_terminal_escapes(message)
+        record.args = None
+        if record.exc_info and not record.exc_text:
+            record.exc_text = logging.Formatter().formatException(record.exc_info)
         if record.exc_text:
             record.exc_text = strip_terminal_escapes(record.exc_text)
         return True
@@ -95,8 +106,8 @@ def configure_logging(
     terminal.setFormatter(
         _JsonFormatter() if json_lines else logging.Formatter("aipm: %(levelname)s: %(message)s")
     )
-    terminal.addFilter(redacting)
     terminal.addFilter(escapes)
+    terminal.addFilter(redacting)
     logger.addHandler(terminal)
 
     try:
@@ -106,7 +117,7 @@ def configure_logging(
     file_handler = logging.FileHandler(path, encoding="utf-8")
     file_handler.setLevel(_level(level))
     file_handler.setFormatter(_JsonFormatter())
-    file_handler.addFilter(redacting)
     file_handler.addFilter(escapes)
+    file_handler.addFilter(redacting)
     logger.addHandler(file_handler)
     return path

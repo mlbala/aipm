@@ -1,10 +1,13 @@
 """Layered config: defaults < user < repo < env < flags, with key classes enforced (§15).
 
-The user layer, `AIPM_*` variables and CLI flags are the user's own (T0) and may set anything.
-The repo layer (`.pm/config.yaml`) is limited by key class: a user-only key is ignored, and a
-tighten-only key can only make the value stricter than the layers below it. Each ignored key,
-and each tighten-only value that ends up looser than the built-in default, becomes a warning
-that the CLI prints on every run.
+The user layer and CLI flags are the user's own (T0) and may set anything. The repo layer
+(`.pm/config.yaml`) is limited by key class: a user-only key is ignored, and a tighten-only key
+can only make the value stricter than the layers below it. `AIPM_*` variables may relax
+tighten-only keys, but never set a user-only key (SECURITY.md §6 rule 5): tools such as pipenv
+load a repository's `.env` into the environment, which would let the repository redirect the
+user's API key (ADR-0018). For the same reason `AIPM_CONFIG` must be an absolute path outside
+the repository. Each ignored key, and each tighten-only value that ends up looser than the
+built-in default, becomes a warning that the CLI prints on every run.
 """
 
 import os
@@ -18,7 +21,7 @@ import platformdirs
 from pydantic import BaseModel, ValidationError
 
 from aipm.config.schema import Config, KeyClass, Tighten, key_class, stricter
-from aipm.domain.errors import SchemaError
+from aipm.domain.errors import PolicyViolation, SchemaError
 from aipm.domain.models import SCHEMA_VERSION, ArtifactKind
 from aipm.state.store import open_store
 from aipm.state.yamlio import MAX_YAML_BYTES, load_yaml
@@ -26,6 +29,26 @@ from aipm.state.yamlio import MAX_YAML_BYTES, load_yaml
 USER_CONFIG_ENV = "AIPM_CONFIG"
 _ENV_ALIASES: Mapping[str, tuple[str, ...]] = {"AIPM_LOG_LEVEL": ("logging", "level")}
 REPO_SOURCE = ".pm/config.yaml"
+ENV_SOURCE = "AIPM_* environment variables"
+
+
+@dataclass(frozen=True, slots=True)
+class _Limits:
+    """How key classes limit one layer: user-only keys ignored, tighten-only keys tightened."""
+
+    source: str = ""
+    user_only_ignored: bool = False
+    tighten_only: bool = False
+    hint: str = ""
+
+
+_OWN = _Limits()
+_REPO = _Limits(REPO_SOURCE, user_only_ignored=True, tighten_only=True)
+_ENV = _Limits(
+    ENV_SOURCE,
+    user_only_ignored=True,
+    hint="; set it in your user config or with a command-line flag",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,7 +134,7 @@ def _show(value: object) -> str:
 
 
 def _merge[M: BaseModel](
-    current: M, layer: BaseModel, *, path: str, repo: bool, warnings: list[str]
+    current: M, layer: BaseModel, *, path: str, limits: _Limits, warnings: list[str]
 ) -> M:
     """Apply the explicitly set fields of `layer` on top of `current`."""
     updates: dict[str, Any] = {}
@@ -121,7 +144,7 @@ def _merge[M: BaseModel](
         key = f"{path}{field.alias or name}"
         new, old = getattr(layer, name), getattr(current, name)
         if _model_type(field.annotation) is not None:
-            updates[name] = _merge(old, new, path=f"{key}.", repo=repo, warnings=warnings)
+            updates[name] = _merge(old, new, path=f"{key}.", limits=limits, warnings=warnings)
             continue
         item_model = _dict_of_models(field.annotation)
         if item_model is not None:
@@ -129,14 +152,14 @@ def _merge[M: BaseModel](
             for item_key, item in new.items():
                 base = merged.get(item_key, item_model())
                 label = f"{key}.{getattr(item_key, 'value', item_key)}."
-                merged[item_key] = _merge(base, item, path=label, repo=repo, warnings=warnings)
+                merged[item_key] = _merge(base, item, path=label, limits=limits, warnings=warnings)
             updates[name] = merged
             continue
         rule = key_class(field.metadata)
-        if repo and rule is KeyClass.USER_ONLY:
-            warnings.append(f"{REPO_SOURCE}: ignored {key}: it is a user-only key")
+        if limits.user_only_ignored and rule is KeyClass.USER_ONLY:
+            warnings.append(f"{limits.source}: ignored {key}: it is a user-only key{limits.hint}")
             continue
-        if repo and isinstance(rule, Tighten):
+        if limits.tighten_only and isinstance(rule, Tighten):
             tightened = stricter(rule, old, new)
             if tightened != new:
                 warnings.append(
@@ -212,6 +235,34 @@ def _env_layer(env: Mapping[str, str]) -> dict[str, Any]:
     return _nested(items, "environment")
 
 
+def _inside(path: Path, root: Path) -> bool:
+    real, base = os.path.realpath(path), os.path.realpath(root)
+    return real == base or real.startswith(base.rstrip(os.sep) + os.sep)
+
+
+def _check_user_path(path: Path, environ: Mapping[str, str], project: Path | None) -> None:
+    """`AIPM_CONFIG` must be absolute and outside the repository (ADR-0018).
+
+    A relative path is read from the current directory, which may be a repository, and a file
+    inside the repository is repository content: neither may become the user config, which can
+    set user-only keys such as `llm.base_url` and `llm.api_key_env`.
+    """
+    if not environ.get(USER_CONFIG_ENV):
+        return
+    if not path.is_absolute():
+        raise PolicyViolation(
+            f"{USER_CONFIG_ENV} must be an absolute path, not {str(path)[:200]!r}",
+            hint="A relative path is read from the current directory, which may be a "
+            "repository. Point AIPM_CONFIG at an absolute path, or `~/...`.",
+        )
+    if project is not None and _inside(path, project):
+        raise PolicyViolation(
+            f"{USER_CONFIG_ENV} names a file inside the repository ({str(path)[:200]}); a "
+            "repository can never be your user config",
+            hint="Keep your user config outside the repository and point AIPM_CONFIG at it.",
+        )
+
+
 def _read_user_layer(path: Path) -> object:
     try:
         with path.open("rb") as handle:
@@ -233,7 +284,8 @@ def load_config(
     env: Mapping[str, str] | None = None,
     flags: Mapping[str, object] | None = None,
 ) -> LoadedConfig:
-    """Merge every layer; ignore user-only repo keys and repo relaxations, with warnings.
+    """Merge every layer; ignore repo relaxations and user-only keys from the repo or the
+    environment, with warnings. Exit 6 for an `AIPM_CONFIG` that is relative or in the repo.
 
     `project` is the repository root (None outside a repository). `flags` maps dotted keys,
     such as `dispatch.default_tool`, to values given on the command line.
@@ -244,27 +296,24 @@ def load_config(
     config = defaults()
 
     user_path = user_config_path(environ)
+    _check_user_path(user_path, environ, project)
     user_raw = _read_user_layer(user_path)
     if user_raw != {}:
         sources.append(str(user_path))
-    config = _merge(config, _validate(user_raw, str(user_path)), path="", repo=False, warnings=[])
+    config = _merge(config, _validate(user_raw, str(user_path)), path="", limits=_OWN, warnings=[])
 
     if project is not None:
         repo_text = open_store(project).read_text(ArtifactKind.CONFIG)
         if repo_text is not None:
             sources.append(REPO_SOURCE)
             repo_layer = _validate(load_yaml(repo_text, source=REPO_SOURCE), REPO_SOURCE)
-            config = _merge(config, repo_layer, path="", repo=True, warnings=warnings)
+            config = _merge(config, repo_layer, path="", limits=_REPO, warnings=warnings)
 
     env_layer = _env_layer(environ)
     if env_layer:
         sources.append("environment")
         config = _merge(
-            config,
-            _validate(env_layer, "AIPM_* environment variables"),
-            path="",
-            repo=False,
-            warnings=[],
+            config, _validate(env_layer, ENV_SOURCE), path="", limits=_ENV, warnings=warnings
         )
 
     if flags:
@@ -272,7 +321,7 @@ def load_config(
             {tuple(key.split(".")): value for key, value in flags.items()}, "flags"
         )
         config = _merge(
-            config, _validate(flag_layer, "command-line flags"), path="", repo=False, warnings=[]
+            config, _validate(flag_layer, "command-line flags"), path="", limits=_OWN, warnings=[]
         )
 
     final = _validate(config.model_dump(mode="json", by_alias=True), "the merged configuration")

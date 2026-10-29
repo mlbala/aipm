@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import NewType
 
 from aipm.domain.errors import PolicyViolation
+from aipm.security.sanitize import is_ignorable
 
 SafeRelPath = NewType("SafeRelPath", str)
 """A relative path inside the workspace: no `..`, no leading `-`, no NUL, no escaping link."""
@@ -55,7 +56,7 @@ def _reject(value: str, reason: str) -> PolicyViolation:
 
 def _bad_char(ch: str) -> bool:
     category = unicodedata.category(ch)
-    if category[0] == "C" or category in ("Zl", "Zp"):
+    if category[0] == "C" or category in ("Zl", "Zp") or is_ignorable(ch):
         return True
     return category == "Zs" and ch != " "
 

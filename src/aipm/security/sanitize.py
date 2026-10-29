@@ -29,16 +29,29 @@ _ESCAPE_SEQUENCE = re.compile(
 )
 
 _ZERO_WIDTH = frozenset({*range(0x200B, 0x2010), *range(0x2060, 0x2065), 0xFEFF})
+# Unicode default-ignorable code points that are not format characters: letters and marks that
+# render as nothing (Hangul fillers, Khmer inherent vowels, Mongolian free variation selectors,
+# the combining grapheme joiner), and unassigned code points reserved as default-ignorable
+# (red-team v0.1, RT01-5). They are counted as zero-width.
+_IGNORABLE_LETTERS = frozenset(
+    {0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x180B, 0x180C, 0x180D, 0x180F, 0x3164, 0xFFA0}
+)
+_IGNORABLE = frozenset(
+    {*_IGNORABLE_LETTERS, 0x2065, *range(0xFFF0, 0xFFF9), *range(0xE0080, 0xE0100),
+     *range(0xE01F0, 0xE1000)}
+)  # fmt: skip
 _BIDI = frozenset({*range(0x202A, 0x202F), *range(0x2066, 0x206A), 0x061C})
 _KEYCAP_BASES = frozenset("#*0123456789")
 
 _HTML_COMMENT = re.compile(r"<!--(?:.*?-->|.*)", re.DOTALL)
 _URL_STOP = r"[^\s<>\"'`()\[\]{}]"
 # No word boundaries: "0https://…" and "xwww.…" are caught too. Over-matching is safe, because
-# any scheme other than http(s) is always removed.
+# any scheme other than http(s) is always removed. Browsers and Markdown viewers read
+# "https:host" without slashes as "https://host", so that form is always removed as well
+# (red-team v0.1, RT01-3).
 _URL = re.compile(
     rf"(?P<scheme>[a-z][a-z0-9+.\-]{{1,31}}):(?P<slashes>[/\\]+){_URL_STOP}*"
-    rf"|(?:javascript|data|vbscript|file|mailto):{_URL_STOP}*"
+    rf"|(?:javascript|data|vbscript|file|mailto|https?):{_URL_STOP}*"
     rf"|www\.{_URL_STOP}*"
     rf"|(?<![\w:/\\])//[a-z0-9\-]+(?:\.[a-z0-9\-]+)+{_URL_STOP}*",
     re.IGNORECASE,
@@ -65,6 +78,14 @@ class SanitizeResult:
         return sum(self.removed[name] for name in INVISIBLE_CLASSES)
 
 
+def is_ignorable(ch: str) -> bool:
+    """Whether `ch` is a default-ignorable code point that is not a format character.
+
+    Paths and argv refuse these as they refuse format characters: they render as nothing.
+    """
+    return ord(ch) in _IGNORABLE
+
+
 def _is_emoji_base(ch: str) -> bool:
     cp = ord(ch)
     if ch in _KEYCAP_BASES or cp in (0xA9, 0xAE) or 0x1F000 <= cp <= 0x1FAFF:
@@ -81,7 +102,7 @@ def _char_class(ch: str, previous: str | None) -> str | None:
         kind = None if ch in "\n\t" else "control"
     elif 0xE0000 <= cp <= 0xE007F:
         kind = "tag"
-    elif cp in _ZERO_WIDTH:
+    elif cp in _ZERO_WIDTH or cp in _IGNORABLE:
         kind = "zero_width"
     elif cp in _BIDI:
         kind = "bidi"
