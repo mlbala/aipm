@@ -22,7 +22,7 @@ from aipm.domain.errors import PolicyViolation
 from aipm.domain.models import ComponentInfo, GateCommand, Task
 from aipm.execution import git
 from aipm.llm.fake import FakeLLM
-from aipm.security.agent_text import is_plain_path
+from aipm.security.agent_text import agent_text_problems, is_plain_path
 from aipm.state.store import open_store
 from tests.conftest import FakeSecrets
 from tests.fakes.project import clinic_config, clinic_context, clinic_task
@@ -188,3 +188,25 @@ def test_check_is_the_one_exception_and_writes_nothing(untrusted_repo: Path) -> 
     assert result.exit_code == 3
     assert "uv run" not in result.output
     assert not (untrusted_repo / "AGENTS.md").exists()
+
+
+# ---------------------------------------------------------------- the I-3 checker itself
+
+
+@pytest.mark.parametrize(
+    ("text", "problem"),
+    [
+        ("a <!-- b --> c", "an HTML comment"),
+        ("zero\u200bwidth", "invisible or control characters: zero_width"),
+        ("see https://evil.example/x", "a URL outside context.allowed_url_domains"),
+        ("read @.env first", "an @ mention that Claude Code could read as a file import"),
+    ],
+)
+def test_the_i3_checker_reports_each_problem(text: str, problem: str) -> None:
+    assert agent_text_problems(text, allowed_url_domains=()) == [problem]
+
+
+def test_the_i3_checker_allows_imports_and_code() -> None:
+    text = "@AGENTS.md\n\n`src/@types/**`\n\n```text\n@x\n```\nhttps://docs.python.org/3/\n"
+    assert agent_text_problems(text, allowed_url_domains=("docs.python.org",),
+                               imports=("@AGENTS.md",)) == []  # fmt: skip

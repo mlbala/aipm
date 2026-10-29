@@ -170,7 +170,7 @@ def _overview(ctx: ProjectContext, *, features: bool) -> Untrusted | None:
     if features and ctx.features:
         lines.append("Features:")
         lines.extend(f"- {f.id} ({f.priority}): {clean(f.title, allowed)}" for f in ctx.features)
-    return Untrusted("\n".join(lines), source="approved:prd") if lines else None
+    return Untrusted(clean("\n".join(lines), allowed), source="approved:prd") if lines else None
 
 
 def _components(ctx: ProjectContext) -> Untrusted | None:
@@ -180,7 +180,10 @@ def _components(ctx: ProjectContext) -> Untrusted | None:
         + (f": {clean(c.responsibility, allowed)}" if c.responsibility.strip() else "")
         for c in ctx.components
     ]
-    return Untrusted("\n".join(lines), source="approved:architecture") if lines else None
+    if not lines:
+        return None
+    # Joined fields can form a new URL ("<name>: " can read as "data: "), so clean the whole.
+    return Untrusted(clean("\n".join(lines), allowed), source="approved:architecture")
 
 
 def _agents_data(ctx: ProjectContext, *, features: bool, descriptions: bool) -> dict[str, object]:

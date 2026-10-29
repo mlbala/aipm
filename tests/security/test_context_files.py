@@ -177,6 +177,19 @@ def test_every_task_prompt_keeps_invariant_i3(text: str) -> None:
     check_blocks(prompt)
 
 
+@pytest.mark.parametrize(
+    "text", ["-->000000000000000000000000000000000data:text/html,x", "x//evil.example/a data"]
+)
+def test_joined_fields_cannot_form_a_url(text: str) -> None:
+    # Found by the fuzz test: a 40-character component name ending in "data", joined with
+    # ": " to its responsibility, read as a `data:` URL. Composed blocks are cleaned again.
+    for generated in generate(hostile_context(text)):
+        imports = (CLAUDE_IMPORT,) if generated.path == "CLAUDE.md" else ()
+        assert agent_text_problems(generated.block, allowed_url_domains=(),
+                                   imports=imports) == []  # fmt: skip
+    assert agent_text_problems(task_prompt(text), allowed_url_domains=()) == []
+
+
 def test_an_allowlisted_domain_survives_in_context_files() -> None:
     ctx = replace(hostile_context("see https://docs.python.org/3/ ok"),
                   allowed_url_domains=("docs.python.org",))  # fmt: skip

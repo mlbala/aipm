@@ -86,7 +86,10 @@ def _view(spec: TaskSpec, ctx: ProjectContext) -> dict[str, object]:
     titles = [u for u in spec.upstream if u.title is not None]
     upstream_text = (
         Untrusted(
-            "\n".join(f"- {u.id}: {u.title.text}" for u in titles if u.title is not None),
+            generator.clean(
+                "\n".join(f"- {u.id}: {u.title.text}" for u in titles if u.title is not None),
+                allowed,
+            ),
             source=f"{spec.approval}:tasks.yaml#upstream",
         )
         if titles

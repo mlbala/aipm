@@ -54,7 +54,9 @@ def task_text(
         lines += ["", "Description:", clean(task.description, allowed_url_domains)]
     lines += ["", "Acceptance criteria:"]
     lines += [f"- {c.id}: {clean(c.text, allowed_url_domains)}" for c in task.acceptance]
-    return Untrusted("\n".join(lines), source=f"{approval}:tasks.yaml#{task.id}")
+    # Fields joined with aipm's labels can form a new URL or mention, so clean the whole too.
+    text = clean("\n".join(lines), allowed_url_domains)
+    return Untrusted(text, source=f"{approval}:tasks.yaml#{task.id}")
 
 
 def _gates(task: Task, ctx: ProjectContext) -> tuple[list[GateCommand], list[GateCommand]]:
@@ -93,7 +95,9 @@ def _upstream(task: Task, ctx: ProjectContext, approval: str) -> tuple[UpstreamT
 
 def _failure_text(result: GateResult, allowed_url_domains: Sequence[str], size: int) -> str:
     raw = "\n\n".join(p.strip("\n") for p in (result.summary, result.output) if p.strip())
-    return head_tail(clean(raw, allowed_url_domains), size, size) or "(no output)"
+    # Cutting can expose a URL or mention at the start of the tail ("x//host" → "//host").
+    cut = head_tail(clean(raw, allowed_url_domains), size, size)
+    return clean(cut, allowed_url_domains) or "(no output)"
 
 
 def previous_attempt(
@@ -149,7 +153,7 @@ def compile_task_spec(
     )
 
 
-def _trimmed(spec: TaskSpec) -> list[TaskSpec]:
+def _trimmed(spec: TaskSpec, allowed_url_domains: Sequence[str]) -> list[TaskSpec]:
     """`spec`, then each smaller version, in the order ARCHITECTURE §10.1 trims."""
     steps = [spec]
     current = spec
@@ -171,7 +175,10 @@ def _trimmed(spec: TaskSpec) -> list[TaskSpec]:
             shrunk = tuple(
                 replace(
                     f,
-                    output=Untrusted(head_tail(f.output.text, size, size), source=f.output.source),
+                    output=Untrusted(
+                        clean(head_tail(f.output.text, size, size), allowed_url_domains),
+                        source=f.output.source,
+                    ),
                 )
                 for f in spec.previous_attempt
             )
@@ -190,7 +197,7 @@ def render_within_budget(
 ) -> RenderedTaskPrompt:
     """Render the smallest needed version of `spec` that fits `budget` bytes; exit 2 if none."""
     smallest = 0
-    for candidate in _trimmed(spec):
+    for candidate in _trimmed(spec, ctx.allowed_url_domains):
         rendered = adapter.render_prompt(candidate, ctx)
         if rendered.size <= budget:
             return rendered
