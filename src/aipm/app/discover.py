@@ -450,14 +450,19 @@ class _Discovery:
     # ------------------------------------------------------------ answers from the file
 
     def _lookup(self, qid: str, dimension: Dimension | None) -> str | None:
+        """An answer by question ID, else by dimension. A yes or no answers only by ID."""
         if self.answers is None:
             return None
         values = self.answers[0].answers
-        for key in (qid, dimension.value if dimension is not None else None):
-            if key is not None and key in values:
-                self.used_keys.add(key)
-                text = answer_text(values[key])
-                return text or None
+        if qid in values:
+            self.used_keys.add(qid)
+            return answer_text(values[qid]) or None
+        if dimension is not None and dimension.value in values:
+            value = values[dimension.value]
+            if isinstance(value, bool):
+                return None
+            self.used_keys.add(dimension.value)
+            return answer_text(value) or None
         return None
 
     def _report_unused_answers(self) -> None:
@@ -725,7 +730,10 @@ class _Discovery:
     def _round_from_file(self, doc: RequirementsDoc, questions: Sequence[ProposedQuestion]) -> None:
         pending: list[ProposedQuestion] = []
         for q in questions:
-            text = self._lookup(q.id, q.dimension)
+            # A confirm question is answered by its ID only: a dimension-wide answer must never
+            # say "yes" to a question the model wrote (security review, step 03).
+            by_dimension = None if q.kind is QuestionKind.CONFIRM else q.dimension
+            text = self._lookup(q.id, by_dimension)
             if text is not None:
                 self._answer(doc, q, text)
                 self._answered_from_file(doc)

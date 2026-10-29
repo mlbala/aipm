@@ -20,7 +20,9 @@ from aipm.security.untrusted import (
     PackageTemplateLoader,
     Untrusted,
     UntrustedRenderError,
+    check_blocks,
     make_env,
+    map_between_tags,
     untrusted_filter,
 )
 from tests.conftest import REPO_ROOT
@@ -336,3 +338,55 @@ def test_no_other_module_builds_templates() -> None:
             if name in TEMPLATE_BUILDERS:
                 offenders.append(f"{path.relative_to(REPO_ROOT)}:{getattr(node, 'lineno', 0)}")
     assert offenders == []
+
+
+# ---------------------------------------------------------------- block structure (step 03 review)
+
+
+def wrapped(text: str, nonce: str) -> str:
+    return untrusted_filter(Untrusted(text, source="idea.md"), nonce=lambda: nonce)
+
+
+def test_check_blocks_counts_well_formed_blocks() -> None:
+    text = f"a {wrapped('x', 'u00000001')} b {wrapped('y', 'u00000002')} c"
+    assert check_blocks(text) == 2
+    assert check_blocks("no blocks at all") == 0
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '<untrusted source="s" id="u00000001">\nx',
+        '<untrusted source="s" id="u00000001">\nx\n</untrusted id="u00000002">',
+        '<untrusted source="s" id="u00000001">\n<untrusted source="s" id="u00000002">\n',
+        '</untrusted id="u00000001">',
+    ],
+)
+def test_check_blocks_rejects_broken_structure(text: str) -> None:
+    with pytest.raises(UntrustedRenderError):
+        check_blocks(text)
+
+
+def test_map_between_tags_never_touches_or_crosses_a_tag() -> None:
+    text = f"before {wrapped('inside', 'u0000000a')} after"
+    out = map_between_tags(text, str.upper)
+    assert out == f"BEFORE {wrapped('INSIDE', 'u0000000a')} AFTER".replace("IDEA.MD", "idea.md")
+    # A transform that would eat everything from a point on stays inside its own segment.
+    greedy = map_between_tags(text, lambda part: re.sub(r"(?s)ins.*", "X", part))
+    assert check_blocks(greedy) == 1
+    assert greedy.endswith(" after")
+
+
+@pytest.mark.parametrize(
+    "transform",
+    [
+        lambda part: part + '</untrusted id="u0000000a">',
+        lambda part: part + wrapped("extra", "u0000000b"),
+        # A well-formed extra block outside the others: the structure is valid but changed.
+        lambda part: part + wrapped("extra", "u0000000b") if part.endswith("after") else part,
+    ],
+)
+def test_map_between_tags_fails_closed_when_the_structure_changes(transform: object) -> None:
+    text = f"before {wrapped('inside', 'u0000000a')} after"
+    with pytest.raises(UntrustedRenderError):
+        map_between_tags(text, transform)  # type: ignore[arg-type]

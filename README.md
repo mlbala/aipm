@@ -75,7 +75,7 @@ Without a terminal (`--non-interactive`, `--json`, or piped stdin), answers come
 # answers.yaml: keys are question IDs, assumption IDs or checklist dimensions
 schema_version: 1
 description: "A booking app for a small clinic, with WhatsApp reminders."   # when there is no --from
-confirm_extracted: true          # confirm every answer found in the --from file
+confirm_extracted: true          # confirm every answer found in the --from file, unreviewed
 answers:
   Q-004: "India only, no payments yet"
   integrations: "none"
@@ -83,7 +83,7 @@ answers:
   A-002: true                    # confirm an assumption (or give text to replace it)
 ```
 
-`--from` and `--answers` files must be inside the repository. If a model reports instructions hidden in its input (`injection_suspected`), aipm shows them and asks before it continues; a non-interactive run exits 4 unless you pass `--accept-risk`.
+A dimension key answers that dimension's text and choice questions; a yes/no question is answered only by its ID, so a file never says "yes" to a question it has not seen. `--from` and `--answers` files must be inside the repository, and aipm refuses files it never reads for model context: anything in `.gitignore` or `.aipmignore`, and secret-looking names such as `.env*`, `*.key`, `*.pem`, `id_*`, `*secret*`, `*credentials*` and `.netrc`. If a model reports instructions hidden in its input (`injection_suspected`), aipm shows them and asks before it continues; a non-interactive run exits 4 unless you pass `--accept-risk`.
 
 ### Models and providers
 

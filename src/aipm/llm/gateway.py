@@ -50,6 +50,7 @@ from aipm.llm.structured import (
     wire_schema,
 )
 from aipm.security.redact import Redactor
+from aipm.security.untrusted import map_between_tags
 
 log = logging.getLogger("aipm.llm")
 
@@ -150,7 +151,13 @@ class Gateway:
         return model
 
     def _redact(self, text: str, part: str) -> str:
-        clean = self.redactor.redact(text)
+        """Redact between the untrusted block tags, never across them (SECURITY.md §7.2, §8).
+
+        Redacting the prompt as one string would let a pattern such as a lone PEM header, or
+        `token:` at the end of a block, swallow the closing tag and aipm's own instructions
+        after it. A prompt whose block structure is broken is never sent.
+        """
+        clean = map_between_tags(text, self.redactor.redact)
         if self.redactor.contains_secret(clean):
             raise PolicyViolation(
                 f"refusing to send the {part} prompt: it still contains a secret after redaction",
@@ -285,21 +292,29 @@ class Gateway:
             )
 
     def _charge(self, request: ProviderRequest, response: ProviderResponse, meter: _Meter) -> None:
+        # A server that reports no usage (zero or negative) is charged an estimate, so it
+        # cannot switch the budget off.
+        input_tokens = response.input_tokens
+        if input_tokens <= 0:
+            input_tokens = estimate_tokens(request.system + request.user)
+        output_tokens = response.output_tokens
+        if output_tokens <= 0:
+            output_tokens = estimate_tokens(response.text)
         cost = usd_cost(
             request.model,
-            input_tokens=response.input_tokens,
-            output_tokens=response.output_tokens,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
             pricing=self._pricing,
         )
-        meter.input_tokens += response.input_tokens
-        meter.output_tokens += response.output_tokens
+        meter.input_tokens += input_tokens
+        meter.output_tokens += output_tokens
         if cost is not None:
             meter.cost_usd = round((meter.cost_usd or 0.0) + cost, 6)
         self.ledger.record(
             request.role.value,
             request.model,
-            input_tokens=response.input_tokens,
-            output_tokens=response.output_tokens,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
             cost_usd=cost,
         )
         if meter.spent > meter.limit:

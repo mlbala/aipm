@@ -2,8 +2,10 @@
 
 A path given on the command line is a user path (AGENTS.md rule 6): it must resolve inside the
 repository and pass `safe_relpath`, so a symlink cannot smuggle in `.env` or a file outside the
-repo, and the recorded `sources[].path` is a clean repo-relative path. The file is read without
-following a final symlink, must be a regular file, and is size-capped before it is decoded.
+repo, and the recorded `sources[].path` is a clean repo-relative path. Files that are never read
+for LLM context (SECURITY.md §7.1: `.gitignore`, `.aipmignore` and the deny list) are refused.
+The file is opened without following a final symlink, must be the same inode that was checked,
+must be a regular file, and is size-capped before it is decoded.
 """
 
 import os
@@ -14,7 +16,8 @@ from typing import Annotated, Literal, Self
 
 from pydantic import Field, StringConstraints, ValidationError, field_validator, model_validator
 
-from aipm.domain.errors import InputRejected, SchemaError, UsageError
+from aipm.app.repo_map import ignore_spec
+from aipm.domain.errors import InputRejected, PolicyViolation, SchemaError, UsageError
 from aipm.domain.ids import is_valid_id
 from aipm.domain.models import Dimension, Source, SourceKind, StrictModel
 from aipm.security.paths import safe_relpath
@@ -42,15 +45,26 @@ def read_repo_file(root: Path, given: Path, *, max_bytes: int, what: str) -> Rep
             hint="Copy the file into the repository and pass its path.",
         ) from None
     relpath = safe_relpath(root, rel.as_posix())
+    if ignore_spec(root).match_file(relpath):
+        raise PolicyViolation(
+            f"{what} {relpath} is a file aipm never reads for LLM context "
+            "(.gitignore, .aipmignore, or a secrets name such as .env, *.key or .netrc)",
+            hint="Copy the text you want to use into a plain file inside the repository.",
+        )
     try:
+        checked = absolute.stat()
         fd = os.open(root / relpath, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
         raise UsageError(f"{what} {given} does not exist") from None
     except OSError as exc:
         raise UsageError(f"{what} {given} cannot be read ({exc.strerror})") from None
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
+    opened = os.fstat(fd)
+    if not stat.S_ISREG(opened.st_mode):
         os.close(fd)
         raise UsageError(f"{what} {given} is not a regular file")
+    if (opened.st_dev, opened.st_ino) != (checked.st_dev, checked.st_ino):
+        os.close(fd)
+        raise PolicyViolation(f"{what} {relpath} changed while it was being opened")
     with os.fdopen(fd, "rb") as handle:
         data = handle.read(max_bytes + 1)
     if len(data) > max_bytes:

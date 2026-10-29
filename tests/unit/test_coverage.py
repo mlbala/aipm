@@ -15,6 +15,7 @@ from aipm.domain.coverage import (
     score_dimensions,
     stop_reason,
 )
+from aipm.domain.errors import SchemaError
 from aipm.domain.ids import next_id
 from aipm.domain.models import (
     Answer,
@@ -134,7 +135,7 @@ def test_next_id() -> None:
     assert next_id("question", []) == "Q-001"
     assert next_id("question", ["Q-002", "Q-010", "A-050", "junk"]) == "Q-011"
     assert next_id("assumption", ["A-009"]) == "A-010"
-    with pytest.raises(ValueError, match="no question IDs left"):
+    with pytest.raises(SchemaError, match="no question IDs left after Q-999"):
         next_id("question", ["Q-999"])
     with pytest.raises(ValueError, match="no sequential IDs"):
         next_id("task", [])

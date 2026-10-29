@@ -84,11 +84,11 @@ class QuestionaryPrompter:
         choice = self._select(
             "Use these answers?",
             [
-                ("Confirm all", "all"),
                 ("Review them one by one", "each"),
+                ("Confirm all", "all"),
                 ("Leave them unconfirmed (they will not count)", "none"),
             ],
-            "all",
+            "each",
         )
         if choice == "all":
             return [ExtractedDecision(ExtractedAction.CONFIRM)] * len(items)
