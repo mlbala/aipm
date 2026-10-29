@@ -130,11 +130,12 @@ def test_a_prd_changed_after_review_is_not_approved(
     assert "changed after it was shown" in result.stderr
 
 
-@pytest.mark.parametrize(("artifact", "prompt"), [("context", "05")])
-def test_later_artifacts_are_not_implemented_yet(repo: Path, artifact: str, prompt: str) -> None:
-    result = aipm(repo, "approve", artifact, "--yes")
-    assert result.exit_code == 2
-    assert f"not implemented yet (build prompt {prompt})" in result.stderr
+def test_approve_context_is_no_longer_a_stub(repo: Path) -> None:
+    """Built in prompt 05: it now asks for trust first, since the blocks carry gate argv."""
+    result = aipm(repo, "approve", "context", "--yes")
+    assert result.exit_code == 6
+    assert "not implemented yet" not in result.stderr
+    assert "aipm trust" in result.stderr
 
 
 def test_approve_without_a_prd(tmp_repo: Path) -> None:

@@ -4,6 +4,7 @@ The caller routes the gateway to FakeLLM first (`fake_llm("clinic")`, or `use_re
 """
 
 import copy
+import json
 import shutil
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -99,3 +100,19 @@ def architecture(repo: Path) -> ArchitectureDoc:
 
 def threat_model(repo: Path) -> ThreatModelDoc:
     return load(repo, ArtifactKind.THREAT_MODEL, ThreatModelDoc)
+
+
+def trust(repo: Path) -> str:
+    """Trust the repository's current execution surface, as the user would; returns the hash."""
+    shown = json.loads(ok(aipm(repo, "trust", "--show", flags=["--json"])).stdout)
+    surface = str(shown["data"]["surface_hash"])
+    ok(aipm(repo, "trust", "--confirm", surface[:12]))
+    return surface
+
+
+def planned(repo: Path, *, trusted: bool = True) -> None:
+    """Designed, then `plan --yes` (G3 recorded), then trusted unless `trusted=False`."""
+    designed(repo)
+    ok(aipm(repo, "plan", flags=["--yes"]))
+    if trusted:
+        trust(repo)

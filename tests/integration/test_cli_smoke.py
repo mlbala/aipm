@@ -28,7 +28,7 @@ COMMAND_FLAGS: dict[str, list[str]] = {
     "design": ["--regenerate", "--accept-risk", "--accept-stale"],
     "plan": ["--max-tasks", "--accept-risk", "--accept-stale"],
     "status": ["--all", "--task", "--ack"],
-    "prompt": ["--tool", "--copy", "--out", "--fix", "--accept-stale"],
+    "prompt": ["--tool", "--copy", "--out", "--fix", "--report", "--force", "--accept-stale"],
     "sync-context": ["--tool", "--check"],
     "verify": [
         "--commit", "--base", "--gate", "--override-ac", "--reason", "--accept-risk",
@@ -115,18 +115,15 @@ def test_later_milestone_commands_say_when(command: str, case: tuple[list[str], 
 
 
 # v0.1 commands whose build prompt has run (02: init, doctor, trust; 03: discover, approve;
-# 04: design, plan, status). They have their own integration tests and no longer answer
-# "not implemented yet".
-BUILT = {"init", "doctor", "trust", "discover", "approve", "design", "plan", "status"}
+# 04: design, plan, status; 05: prompt, sync-context). They have their own integration tests and
+# no longer answer "not implemented yet".
+BUILT = {"init", "doctor", "trust", "discover", "approve", "design", "plan", "status", "prompt",
+         "sync-context"}  # fmt: skip
 
 
-@pytest.mark.parametrize(
-    ("command", "argv"), sorted((c, a) for c, a in V01_COMMANDS.items() if c not in BUILT)
-)
-def test_v01_commands_exit_2_until_built(command: str, argv: list[str]) -> None:
-    result = runner.invoke(app, argv)
-    assert result.exit_code == 2
-    assert f"aipm {command}: not implemented yet (build prompt" in result.stderr
+def test_every_v01_command_is_built() -> None:
+    """Build prompt 05 built the last v0.1 stubs; no v0.1 command answers "not implemented"."""
+    assert set(V01_COMMANDS) == BUILT
 
 
 @pytest.mark.parametrize("command", sorted(BUILT - {"doctor"}))

@@ -2,8 +2,8 @@
 
 `approvals.yaml` is a team record of what was approved, pinned to sha256, never a security
 control (SECURITY.md §6). `--yes` only skips the review prompt and never touches the trust store.
-G1 (the PRD) arrived with build prompt 03, G2 (design) and G3 (plan) with prompt 04; context
-files follow in prompt 05.
+G1 (the PRD) arrived with build prompt 03, G2 (design) and G3 (plan) with prompt 04, and the
+context files' managed blocks with prompt 05 (`aipm.app.sync_context.approve`).
 
 An approval pins the exact bytes the user reviewed: the CLI passes the hashes it showed, and the
 approval is refused if a file changed in between, or if the artifact is stale or its upstream is
@@ -20,6 +20,7 @@ import getpass
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from aipm.app import runtime
 from aipm.app import trust as trust_use_case
@@ -29,7 +30,7 @@ from aipm.config.loader import load_config
 from aipm.config.schema import Config
 from aipm.config.stacks import load_stack
 from aipm.domain.dag import MAX_TASKS, PlanRules, recheck_plan
-from aipm.domain.errors import NotImplementedYet, PolicyViolation, UsageError
+from aipm.domain.errors import PolicyViolation, UsageError
 from aipm.domain.models import (
     APPROVED_NAMES,
     AdrDoc,
@@ -54,8 +55,7 @@ from aipm.state.store import FileStateStore, open_store
 from aipm.state.yamlio import load_yaml
 
 PRD_FILE = artifact_name(ArtifactKind.PRD)
-_LATER = {"context": "05"}
-_TARGETS = ("prd", "design", "plan")
+_TARGETS = ("prd", "design", "plan", "context")
 _MEDIUM_UP = frozenset({Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL})
 
 
@@ -163,12 +163,7 @@ def _review(store: FileStateStore) -> PrdReview:
 
 
 def check_target(artifact: str) -> None:
-    """The PRD, design and plan can be approved; context files arrive with build prompt 05."""
-    if artifact in _LATER:
-        raise NotImplementedYet(
-            f"approving {artifact} is not implemented yet (build prompt {_LATER[artifact]})",
-            hint="See docs/prompts/README.md for the build plan.",
-        )
+    """The PRD, the design, the plan and the context files' managed blocks can be approved."""
     if artifact not in _TARGETS:
         raise UsageError(f"cannot approve {artifact!r}", hint="Use prd, design, plan or context.")
 
@@ -210,6 +205,13 @@ _REASONS = {
 }
 
 
+_OVERRIDE_COMMANDS: dict[str, Literal["design", "plan", "prompt"]] = {
+    "design": "design",
+    "plan": "plan",
+    "prompt": "prompt",
+}
+
+
 def record_overrides(
     store: FileStateStore, command: str, checks: tuple[InputCheck, ...]
 ) -> list[str]:
@@ -221,7 +223,7 @@ def record_overrides(
             continue
         entries.append(
             StaleOverride(
-                command="design" if command == "design" else "plan",
+                command=_OVERRIDE_COMMANDS[command],
                 artifact=check.artifact,
                 sha256=check.sha256,
                 reason=reason,
