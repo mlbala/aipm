@@ -39,7 +39,14 @@ from aipm.domain.models import (
     ThreatModelDoc,
     ThreatModelFrontMatter,
 )
-from aipm.domain.phase import InputState, derive_phase, design_inputs, plan_inputs, ready_tasks
+from aipm.domain.phase import (
+    InputState,
+    derive_phase,
+    design_inputs,
+    plan_inputs,
+    prompt_inputs,
+    ready_tasks,
+)
 
 H = {
     ArtifactKind.REQUIREMENTS: "1" * 64,
@@ -274,6 +281,27 @@ def test_plan_inputs() -> None:
     ]  # fmt: skip
     checks = plan_inputs(full(threat_model=None))
     assert checks[2].state is InputState.MISSING
+
+
+def test_a_task_in_progress_is_named_when_nothing_else_is_ready() -> None:
+    """Build prompt 05: after `aipm prompt T-001`, the report says what it is waiting for."""
+    report = derive_phase(with_tasks(full(), task(1, TaskStatus.IN_PROGRESS), task(2, deps=(1,))))
+    assert report.phase is Phase.BUILDING
+    assert report.next_command == "aipm status"
+    assert report.blockers == ("no task is ready until T-001 is done (in progress)",)
+
+
+def test_prompt_inputs() -> None:
+    """Build prompt 05: `aipm prompt` reads what `plan` reads, plus the approved plan."""
+    checks = prompt_inputs(full())
+    assert [c.label for c in checks][4] == "approved:tasks"
+    assert [c.state for c in checks] == [InputState.OK] * 5
+    assert prompt_inputs(without(full(), ArtifactKind.TASKS))[4].state is InputState.UNAPPROVED
+    stale = prompt_inputs(rehash(full(), ArtifactKind.THREAT_MODEL, "9" * 64))
+    assert stale[4].state is InputState.STALE
+    missing = prompt_inputs(full(tasks=None))[4]
+    assert missing.state is InputState.MISSING
+    assert "aipm plan" in missing.reason
 
 
 def test_report_data() -> None:

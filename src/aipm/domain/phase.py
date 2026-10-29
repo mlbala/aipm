@@ -216,6 +216,11 @@ def plan_inputs(s: StateSnapshot) -> tuple[InputCheck, ...]:
     )
 
 
+def prompt_inputs(s: StateSnapshot) -> tuple[InputCheck, ...]:
+    """What `aipm prompt` reads: everything `plan` reads, plus the plan itself (G3)."""
+    return (*plan_inputs(s), _check(s, ArtifactKind.TASKS, _staleness(s), run="`aipm plan`"))
+
+
 # ---------------------------------------------------------------- tasks
 
 
@@ -240,7 +245,11 @@ def _tasks_phase(s: StateSnapshot, stale: _Staleness) -> PhaseReport:
         return PhaseReport(phase, stale.stale, f"aipm prompt {first}", impacts=stale.impacts,
                            ready_task=first)  # fmt: skip
     blocked = [t.id for t in tasks if t.status is TaskStatus.BLOCKED]
-    blockers = (f"no task is ready; blocked: {', '.join(blocked) or 'none'}",)
+    working = [t.id for t in tasks if t.status is TaskStatus.IN_PROGRESS]
+    if working and not blocked:
+        blockers = (f"no task is ready until {', '.join(working)} is done (in progress)",)
+    else:
+        blockers = (f"no task is ready; blocked: {', '.join(blocked) or 'none'}",)
     return PhaseReport(phase, stale.stale, "aipm status", blockers, stale.impacts)
 
 

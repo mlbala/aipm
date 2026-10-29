@@ -4,6 +4,9 @@ Every artifact is parsed from the same bytes that are hashed. Read-only commands
 bare `aipm`) do not take the lock: they read everything once, then check every hash again and
 read once more if any file changed in between. Trust comes from the user's trust store; a
 surface that fails the command policy counts as untrusted.
+
+The snapshot's hash for `tasks.yaml` is the plan hash (`plan_sha256`, ADR-0016): the file's own
+hash until a task starts, then the hash of the plan without task progress. G3 approves it.
 """
 
 from dataclasses import dataclass, field
@@ -25,7 +28,7 @@ from aipm.domain.models import (
     ThreatModelDoc,
 )
 from aipm.state.layout import pm_root
-from aipm.state.store import FileStateStore
+from aipm.state.store import FileStateStore, plan_sha256
 
 _KINDS = (
     ArtifactKind.REQUIREMENTS,
@@ -52,7 +55,16 @@ class ProjectState:
 class _Read:
     docs: dict[ArtifactKind, Artifact]
     hashes: dict[ArtifactKind, str]
+    """File hashes, for the consistent-read check."""
     adrs: list[AdrDoc]
+
+    def snapshot_hashes(self) -> dict[ArtifactKind, str]:
+        """The file hashes, with the plan hash (ADR-0016) in place of the `tasks.yaml` one."""
+        hashes = dict(self.hashes)
+        doc = self.docs.get(ArtifactKind.TASKS)
+        if isinstance(doc, TasksDoc):
+            hashes[ArtifactKind.TASKS] = plan_sha256(doc, self.hashes[ArtifactKind.TASKS])
+        return hashes
 
 
 def _read_all(store: FileStateStore) -> _Read:
@@ -92,7 +104,7 @@ def read_snapshot(
     approvals = _typed(read.docs, ArtifactKind.APPROVALS, ApprovalsDoc) or ApprovalsDoc()
     snapshot = StateSnapshot(
         initialized=True,
-        hashes=dict(read.hashes),
+        hashes=read.snapshot_hashes(),
         requirements=_typed(read.docs, ArtifactKind.REQUIREMENTS, RequirementsDoc),
         prd=_typed(read.docs, ArtifactKind.PRD, PrdDoc),
         architecture=_typed(read.docs, ArtifactKind.ARCHITECTURE, ArchitectureDoc),

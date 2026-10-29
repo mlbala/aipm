@@ -522,6 +522,17 @@ class TasksDoc(YamlArtifact):
     derived_from: TasksDerivedFrom
     tasks: list[Task] = Field(default_factory=list[Task], max_length=200)
 
+    def plan_view(self) -> "TasksDoc":
+        """The plan without task progress: what G3 approves (ADR-0016).
+
+        `status`, `attempts`, `base_sha`, `blocked` and `done` are reset to their defaults, so
+        `prompt`, `verify` and `build` can record progress without voiding the approval, while
+        any change to a title, criterion, path, gate or dependency still does.
+        """
+        reset = {"status": TaskStatus.TODO, "attempts": 0, "base_sha": None, "blocked": None,
+                 "done": None}  # fmt: skip
+        return self.model_copy(update={"tasks": [t.model_copy(update=reset) for t in self.tasks]})
+
     @model_validator(mode="after")
     def _unique_ids(self) -> Self:
         _unique([t.id for t in self.tasks], "task")
@@ -569,7 +580,7 @@ class OverrideReason(StrEnum):
 class StaleOverride(StrictModel):
     """A recorded `--accept-stale` run (ARCHITECTURE §7.1). Never counts as an approval."""
 
-    command: Literal["design", "plan"]
+    command: Literal["design", "plan", "prompt"]
     artifact: RelPath
     sha256: Sha256
     reason: OverrideReason

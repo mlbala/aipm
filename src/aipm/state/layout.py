@@ -9,6 +9,7 @@ from aipm.domain.models import ArtifactKind, RepoId
 from aipm.domain.models.base import ADR_DIR, ARTIFACT_FILES
 
 PM_DIR = ".pm"
+PROMPTS_DIR = "prompts"
 EVENTS_FILE = "events.jsonl"
 LOCK_FILE = ".lock"
 GITIGNORE_FILE = ".gitignore"
@@ -29,6 +30,7 @@ __all__ = [
     "GITIGNORE_TEXT",
     "LOCK_FILE",
     "PM_DIR",
+    "PROMPTS_DIR",
     "artifact_name",
     "artifact_path",
     "pm_root",

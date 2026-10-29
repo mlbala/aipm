@@ -8,7 +8,8 @@ from typing import Annotated, Literal, Self
 
 from pydantic import Field, StringConstraints, model_validator
 
-from aipm.domain.models.base import Severity, StrictModel
+from aipm.domain.models.artifacts import GateName
+from aipm.domain.models.base import Severity, Str1000, StrictModel, TaskId
 
 MAX_ARGV = 32
 MAX_ARG_LENGTH = 512
@@ -63,3 +64,40 @@ class PrepareDef(StrictModel):
 
     run: ArgvList
     network: NetworkProfile = NetworkProfile.REGISTRIES
+
+
+class GateStatus(StrEnum):
+    """The outcome of one gate (ARCHITECTURE §13.2)."""
+
+    PASS = "pass"  # noqa: S105 - a gate status, not a password
+    FAIL = "fail"
+    ERROR = "error"
+    SKIPPED = "skipped"
+
+
+MAX_GATE_OUTPUT = 1_048_576
+GateOutput = Annotated[str, StringConstraints(max_length=MAX_GATE_OUTPUT, strip_whitespace=False)]
+"""A gate's output, kept as written (T2: it comes from programs that ran agent code)."""
+
+
+class GateResult(StrictModel):
+    """One gate's result. `output` is the captured output, cut to head and tail in prompts."""
+
+    name: GateName
+    status: GateStatus
+    duration_ms: Annotated[int, Field(ge=0, le=86_400_000)] = 0
+    summary: Str1000 = ""
+    output: GateOutput = ""
+
+
+class GateReport(StrictModel):
+    """The gate results of one `verify` of one task (§13.2). `aipm prompt --fix` reads a saved
+    one; `verify` writes them from v0.2 on. Every string in it is T2."""
+
+    schema_version: Literal[1] = 1
+    task: TaskId
+    gates: list[GateResult] = Field(default_factory=list[GateResult], max_length=32)
+
+    def failures(self) -> list[GateResult]:
+        """The gates that failed or errored, in report order."""
+        return [g for g in self.gates if g.status in (GateStatus.FAIL, GateStatus.ERROR)]
