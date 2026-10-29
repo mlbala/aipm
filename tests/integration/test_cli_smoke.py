@@ -5,6 +5,7 @@ later-milestone commands exit 2 with "available in vX.Y".
 """
 
 import json
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -113,11 +114,26 @@ def test_later_milestone_commands_say_when(command: str, case: tuple[list[str], 
     assert result.stdout == ""
 
 
-@pytest.mark.parametrize(("command", "argv"), sorted(V01_COMMANDS.items()))
+# v0.1 commands whose build prompt has run (02: init, doctor, trust). They have their own
+# integration tests and no longer answer "not implemented yet".
+BUILT = {"init", "doctor", "trust"}
+
+
+@pytest.mark.parametrize(
+    ("command", "argv"), sorted((c, a) for c, a in V01_COMMANDS.items() if c not in BUILT)
+)
 def test_v01_commands_exit_2_until_built(command: str, argv: list[str]) -> None:
     result = runner.invoke(app, argv)
     assert result.exit_code == 2
     assert f"aipm {command}: not implemented yet (build prompt" in result.stderr
+
+
+@pytest.mark.parametrize("command", sorted(BUILT - {"doctor"}))
+def test_built_commands_are_no_longer_stubs(command: str, tmp_path: Path) -> None:
+    result = runner.invoke(app, ["-C", str(tmp_path), command])
+    assert result.exit_code == 2
+    assert "not implemented yet" not in result.stderr
+    assert "is not inside a git repository" in result.stderr
 
 
 def test_bare_aipm_exits_2_until_the_phase_engine_exists() -> None:

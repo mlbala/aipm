@@ -1,9 +1,10 @@
 """Deterministic YAML with ruamel.yaml; aliases, anchors, tags and files over 1 MiB rejected.
 
 Loading scans the event stream before constructing anything, so an alias bomb is refused
-before it can expand. Dumping keeps keys in the order given (schema order), folds long strings
-near 100 columns where they have single spaces to break at, writes multi-line strings as literal
-blocks and `None` as `null`, and ends with a newline. Error messages carry the position and the
+before it can expand. Dumping keeps keys in the order given (schema order), writes scalar-only
+lists and mappings in flow style (`run: [uv, sync, --frozen]`), folds long strings near 100
+columns where they have single spaces to break at, writes multi-line strings as literal blocks
+and `None` as `null`, and ends with a newline. Error messages carry the position and the
 parser's problem, never the input text.
 """
 
@@ -12,6 +13,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedMap
 from ruamel.yaml.error import MarkedYAMLError, YAMLError
 from ruamel.yaml.events import (
     AliasEvent,
@@ -92,6 +94,11 @@ def dump_yaml(data: object) -> str:
     yaml.width = LINE_WIDTH
     yaml.indent(mapping=2, sequence=4, offset=2)
     yaml.allow_unicode = True
+    yaml.default_flow_style = None  # scalar-only lists and maps in flow style: [uv, run, ...]
+    if isinstance(data, dict):
+        root: Any = CommentedMap(data)  # pyright: ignore[reportUnknownArgumentType]
+        root.fa.set_block_style()  # the document itself is always block style
+        data = root
     out = io.StringIO()
     yaml.dump(data, out)
     return out.getvalue()

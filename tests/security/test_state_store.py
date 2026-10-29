@@ -76,7 +76,7 @@ def test_yaml_artifact_round_trip(store: FileStateStore) -> None:
     assert store.exists(ArtifactKind.REQUIREMENTS)
     raw = (store.root / "requirements.yaml").read_bytes()
     assert digest == normalized_sha256(raw) == store.sha256(ArtifactKind.REQUIREMENTS)
-    assert raw.decode().startswith("schema_version: 1\nproject:\n")
+    assert raw.decode().startswith("schema_version: 1\nproject: {name: clinic-booking")
 
 
 def test_markdown_artifact_round_trip(store: FileStateStore) -> None:
@@ -155,7 +155,7 @@ def test_front_matter_errors_point_into_the_front_matter(store: FileStateStore) 
     store.save(prd())
     path = store.root / "prd.md"
     path.write_text(path.read_text().replace("priority: must", "priority: maybe"))
-    with pytest.raises(SchemaError, match=r"meta\.features\.0\.priority \(line 9\)"):
+    with pytest.raises(SchemaError, match=r"meta\.features\.0\.priority \(line 6\)"):
         store.load(ArtifactKind.PRD)
 
 
