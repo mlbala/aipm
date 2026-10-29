@@ -165,3 +165,21 @@ def test_repo_id_hashes_the_real_path(tmp_path: Path) -> None:
     assert len(repo_id(real)) == 16
     assert repo_id(real) != repo_id(tmp_path)
     assert all(ch in "0123456789abcdef" for ch in repo_id(Path(os.sep)))
+
+
+def test_duplicate_key_errors_never_echo_the_values() -> None:
+    secret = FAKE_SECRETS["ANTHROPIC_API_KEY"]
+    with pytest.raises(SchemaError) as info:
+        load_yaml(f'a: 1\na: "\\x1b]52;c;x [bold]X[/] {secret}"\n', source="t.yaml")
+    message = info.value.message
+    assert "duplicate key" in message
+    assert secret not in message
+    assert "bold" not in message
+    assert "line 2" in message
+
+
+def test_long_quoted_tokens_in_parser_errors_are_masked() -> None:
+    secret = FAKE_SECRETS["GITHUB_TOKEN"]
+    with pytest.raises(SchemaError) as info:
+        load_yaml(f"a: !{secret} x\n", source="t.yaml")
+    assert secret not in info.value.message

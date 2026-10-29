@@ -55,7 +55,7 @@ def command(
             pass
         elif is_interactive(ctx):
             if typer.confirm("Trust this exact surface for this repository?", default=False):
-                report = use_case.confirm(opts.project, hash12)
+                report = use_case.confirm(opts.project, report.surface_hash)
         else:
             raise HumanInputRequired(
                 "recording trust needs interactive confirmation or --confirm",

@@ -39,7 +39,8 @@ def command(
         trusted = False
         if result.trust is not None:
             trusted = result.trust.trusted
-            hash12 = result.trust.surface_hash[:12]
+            full_hash = result.trust.surface_hash
+            hash12 = full_hash[:12]
             if not opts.json:
                 typer.echo("")
                 for line in result.trust.lines:
@@ -48,7 +49,7 @@ def command(
                 if typer.confirm(
                     "Trust this execution surface for this repository?", default=False
                 ):
-                    trusted = trust_use_case.confirm(Path(result.repo_root), hash12).trusted
+                    trusted = trust_use_case.confirm(Path(result.repo_root), full_hash).trusted
                     typer.echo("Trusted.")
                 else:
                     typer.echo("Not trusted. Run `aipm trust` when you are ready.")

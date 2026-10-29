@@ -9,6 +9,7 @@ counted. The result is untrusted text (T2) whenever a role reads it back.
 
 import os
 import re
+import stat
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,11 +50,15 @@ class RepoScan:
 
 
 def _read_ignore(path: Path) -> list[str]:
+    """Read an ignore file: never through a link, never from a FIFO or device."""
     try:
-        with path.open("rb") as handle:
-            data = handle.read(MAX_IGNORE_BYTES)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         return []
+    with os.fdopen(fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            return []
+        data = handle.read(MAX_IGNORE_BYTES)
     return data.decode("utf-8", errors="replace").splitlines()[:MAX_IGNORE_LINES]
 
 

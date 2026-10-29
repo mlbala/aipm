@@ -9,6 +9,7 @@ parser's problem, never the input text.
 """
 
 import io
+import re
 from collections.abc import Iterable
 from typing import Any
 
@@ -31,11 +32,22 @@ MAX_DEPTH = 64
 LINE_WIDTH = 100
 
 
+_QUOTED = re.compile(r"\"[^\"\n]*\"|'[^'\n]*'")
+
+
+def _problem(text: object) -> str:
+    """The parser's problem, with quoted input (keys, values, tokens) masked out."""
+    problem = str(text or "")
+    if "duplicate key" in problem:
+        return "found a duplicate key"
+    return _QUOTED.sub(lambda m: m.group(0) if len(m.group(0)) <= 6 else "'…'", problem)[:200]
+
+
 def _where(exc: YAMLError) -> str:
     marked: Any = exc  # ruamel.yaml has no type hints
     if isinstance(exc, MarkedYAMLError) and marked.problem_mark is not None:
         mark = marked.problem_mark
-        return f"line {mark.line + 1}, column {mark.column + 1}: {marked.problem}"
+        return f"line {mark.line + 1}, column {mark.column + 1}: {_problem(marked.problem)}"
     return type(exc).__name__
 
 

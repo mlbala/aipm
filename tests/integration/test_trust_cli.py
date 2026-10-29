@@ -15,6 +15,7 @@ from click.testing import Result
 from ruamel.yaml import YAML
 from typer.testing import CliRunner
 
+from aipm.app import trust as trust_use_case
 from aipm.cli import output
 from aipm.cli.main import app
 from aipm.state.yamlio import dump_yaml, load_yaml
@@ -189,3 +190,55 @@ def test_a_damaged_trust_store_fails_closed(repo: Path, user_dirs: UserDirs) -> 
     result = aipm(repo, "trust", "--show")
     assert result.exit_code == 6
     assert "not a private file" in result.stderr
+
+
+def test_confirm_accepts_more_of_the_hash_and_checks_all_of_it(
+    repo: Path, user_dirs: UserDirs
+) -> None:
+    digest = surface_hash(repo)
+    wrong_tail = digest[:12] + ("0" if digest[12] != "0" else "1") + digest[13:]
+    assert aipm(repo, "trust", "--confirm", wrong_tail).exit_code == 6
+    assert not user_dirs.trust_file.exists()
+    assert aipm(repo, "trust", "--confirm", digest).exit_code == 0
+    assert user_dirs.trust_file.exists()
+
+
+def test_interactive_yes_confirms_the_full_hash_it_showed(
+    repo: Path, user_dirs: UserDirs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[str] = []
+    real_confirm = trust_use_case.confirm
+
+    def spy(project: Path | None, value: str, **kwargs: Any) -> Any:
+        seen.append(value)
+        return real_confirm(project, value, **kwargs)
+
+    monkeypatch.setattr(output, "stdin_is_terminal", lambda: True)
+    monkeypatch.setattr(trust_use_case, "confirm", spy)
+    assert aipm(repo, "trust", stdin="y\n").exit_code == 0
+    assert seen == [surface_hash(repo)]
+    assert len(seen[0]) == 64
+
+
+def test_a_path_link_to_a_hard_denied_program_is_refused(
+    repo: Path, user_dirs: UserDirs, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "evil-bin"
+    bin_dir.mkdir()
+    (bin_dir / "bash").write_text("#!/bin/sh\n", encoding="utf-8")
+    (bin_dir / "bash").chmod(0o755)
+    (bin_dir / "uv").symlink_to(bin_dir / "bash")
+    monkeypatch.setenv("PATH", str(bin_dir))
+    result = aipm(repo, "trust", "--show")
+    assert result.exit_code == 6
+    assert "resolves to the hard-denied program" in result.stderr
+
+
+def test_test_roots_are_part_of_the_surface(repo: Path) -> None:
+    before = surface_hash(repo)
+    path = repo / ".pm" / "config.yaml"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("test_roots: [tests]", "test_roots: [spec]"),
+        encoding="utf-8",
+    )
+    assert surface_hash(repo) != before

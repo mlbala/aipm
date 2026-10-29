@@ -11,6 +11,7 @@ runner, a short-option cluster that contains an inline-code letter counts as tha
 """
 
 import re
+import unicodedata
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
@@ -47,25 +48,52 @@ HARD_DENIED: frozenset[str] = frozenset(
 RUNNERS: tuple[Argv, ...] = (
     ("uv", "run"),
     ("uv", "tool", "run"),
+    ("uv", "tool", "uvx"),
     ("npm", "exec"),
+    ("npm", "x"),
     ("pnpm", "dlx"),
+    ("pnpm", "exec"),
     ("yarn", "dlx"),
+    ("yarn", "exec"),
+    ("bun", "x"),
+    ("bun", "run"),
     ("python", "-m"),
 )
 """SECURITY.md §10 rule 4: argv prefixes that start another program."""
 
-_PYTHON = re.compile(r"(?:python|pypy)(?:\d+(?:\.\d+)*)?")
+FETCH_AND_RUN: tuple[Argv, ...] = (
+    ("uv", "tool", "run"),
+    ("uv", "tool", "uvx"),
+    ("npm", "exec"),
+    ("npm", "x"),
+    ("pnpm", "dlx"),
+    ("yarn", "dlx"),
+    ("bun", "x"),
+)
+"""Spellings of the hard-denied `uvx`, `npx`, `pnpx` and `bunx`: refused in every stage."""
+
+_NEEDS_PROGRAM = frozenset(
+    {"uv", "npm", "pnpm", "yarn", "bun", "pip", "python", "node", "nodejs", "deno", "ruby", "perl"}
+)
+"""Package managers and interpreters: an allowed prefix starting with one must also name the
+program or subcommand it runs, so `[uv]` or `[uv, run]` can never allow everything."""
+_RUNNER_WORDS = frozenset({"run", "tool", "exec", "dlx", "x", "uvx"})
+
+_PYTHON = re.compile(r"(?:python|pypy)(?:\d+(?:\.\d+)*t?)?")
+_PERL = re.compile(r"perl\d+(?:\.\d+)*")
+_PIP = re.compile(r"pip\d*(?:\.\d+)*")
+_ATTACHED_MODULE = re.compile(r"-[bBdEiIOqsSuvx]*m(.+)")
 _RUNNER_LETTERS = frozenset("ce")
 _RUNNER_LONG = ("--eval",)
-_NODE_LETTERS = frozenset("p")
-_NODE_LONG = ("--print",)
+_NODE_LETTERS = frozenset("pr")
+_NODE_LONG = ("--print", "--import", "--require", "--loader", "--experimental-loader")
 
 # Interpreter -> (inline-code short letters, long flags, subcommands).
 _INTERPRETERS: dict[str, tuple[frozenset[str], tuple[str, ...], frozenset[str]]] = {
     "python": (frozenset("c"), (), frozenset()),
-    "node": (frozenset("ep"), ("--eval", "--print"), frozenset()),
-    "nodejs": (frozenset("ep"), ("--eval", "--print"), frozenset()),
-    "bun": (frozenset("e"), ("--eval",), frozenset()),
+    "node": (frozenset("epr"), ("--eval", *_NODE_LONG), frozenset()),
+    "nodejs": (frozenset("epr"), ("--eval", *_NODE_LONG), frozenset()),
+    "bun": (frozenset("ep"), ("--eval", "--print"), frozenset()),
     "ruby": (frozenset("e"), (), frozenset()),
     "perl": (frozenset("eE"), (), frozenset()),
     "deno": (frozenset(), (), frozenset({"eval"})),
@@ -74,7 +102,8 @@ _INTERPRETERS: dict[str, tuple[frozenset[str], tuple[str, ...], frozenset[str]]]
 _NPM_INSTALL = frozenset(
     {
         "install", "i", "in", "ins", "inst", "insta", "instal", "isnt", "isnta", "isntal",
-        "isntall", "add", "ci", "clean-install", "exec", "x", "update", "up", "upgrade",
+        "isntall", "add", "ci", "clean-install", "exec", "x", "update", "up", "upgrade", "it",
+        "cit", "install-test", "install-ci-test", "rebuild",
     }
 )  # fmt: skip
 _INSTALL_WORDS: dict[str, frozenset[str]] = {
@@ -109,10 +138,21 @@ def _deny(message: str) -> PolicyViolation:
     return PolicyViolation(message, hint="See SECURITY.md §10 for what a gate may run.")
 
 
-def _program(arg: str) -> str:
-    """The basename of an argv element, casefolded, with Python versions folded to `python`."""
+def program_name(arg: str) -> str:
+    """The basename of an argv element, casefolded; versioned Python, pip and perl are folded."""
     name = arg.rsplit("/", 1)[-1].casefold()
-    return "python" if _PYTHON.fullmatch(name) else name
+    for pattern, family in ((_PYTHON, "python"), (_PERL, "perl"), (_PIP, "pip")):
+        if pattern.fullmatch(name):
+            return family
+    return name
+
+
+_program = program_name
+
+
+def _invisible(ch: str) -> bool:
+    category = unicodedata.category(ch)
+    return category[0] == "C" or category in ("Zl", "Zp") or (category == "Zs" and ch != " ")
 
 
 def _check_element(arg: object) -> str:
@@ -120,8 +160,9 @@ def _check_element(arg: object) -> str:
         raise _deny("argv elements must be strings")
     if not arg or len(arg) > MAX_ARG_LENGTH:
         raise _deny(f"argv elements must have 1-{MAX_ARG_LENGTH} characters")
-    if any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in arg):
-        raise _deny("argv elements must not contain NUL, newline or other control characters")
+    if any(_invisible(ch) for ch in arg):
+        # Control characters, and invisible ones the trust display would not show.
+        raise _deny("argv elements must not contain control, format or invisible characters")
     return arg
 
 
@@ -140,6 +181,12 @@ def _check_prefix(prefix: object) -> Argv:
         raise _deny("an allowed argv prefix must not contain placeholders")
     if _program(checked[0]) in HARD_DENIED:
         raise _deny(f"{checked[0]!r} is hard-denied and cannot be allowed by any configuration")
+    if _program(checked[0]) in _NEEDS_PROGRAM and not any(
+        not arg.startswith("-") and arg.casefold() not in _RUNNER_WORDS for arg in checked[1:]
+    ):
+        raise _deny(
+            f"the allowed prefix {list(checked)} must also name the program or subcommand it runs"
+        )
     return checked
 
 
@@ -170,10 +217,26 @@ def _subsequence(needle: Sequence[str], hay: Sequence[str]) -> bool:
     return all(any(item == want for item in it) for want in needle)
 
 
-def _runner_present(argv: Argv) -> bool:
+def _normalized(argv: Argv) -> list[str]:
+    """argv casefolded; after a Python program, an attached `-m<module>` (`-mpip`, `-Impip`) is
+    split into `-m` and the module."""
+    out: list[str] = []
+    python = False
+    for arg in argv:
+        match = _ATTACHED_MODULE.fullmatch(arg) if python else None
+        out.extend(("-m", match.group(1).casefold()) if match else (arg.casefold(),))
+        python = python or _program(arg) == "python"
+    return out
+
+
+def _matches(sequences: Sequence[Argv], argv: Argv) -> Argv | None:
     head = _program(argv[0])
-    rest = [arg.casefold() for arg in argv[1:]]
-    return any(head == runner[0] and _subsequence(runner[1:], rest) for runner in RUNNERS)
+    rest = _normalized(argv)[1:]
+    return next((seq for seq in sequences if head == seq[0] and _subsequence(seq[1:], rest)), None)
+
+
+def _runner_present(argv: Argv) -> bool:
+    return _matches(RUNNERS, argv) is not None
 
 
 def _flag_hit(arg: str, letters: frozenset[str], long_flags: Iterable[str]) -> bool:
@@ -208,21 +271,20 @@ def _check_interpreters(argv: Argv) -> None:
 
 
 def _check_install(argv: Argv) -> None:
-    """Package installation and fetch-and-run are allowed only in the prepare step."""
-    for index, arg in enumerate(argv):
-        program = _program(arg)
-        rest = [item.casefold() for item in argv[index + 1 :]]
-        family = "pip" if re.fullmatch(r"pip\d*(?:\.\d+)*", program) else program
-        words = _INSTALL_WORDS.get(family, frozenset())
-        hit = any(item in words for item in rest)
+    """Package installation is allowed only in the prepare step."""
+    normalized = _normalized(argv)
+    for index, item in enumerate(normalized):
+        program = _program(item)
+        rest = normalized[index + 1 :]
+        hit = any(word in _INSTALL_WORDS.get(program, frozenset()) for word in rest)
         if program == "uv":
-            hit = hit or any(item.startswith("--with") for item in rest)
+            hit = hit or any(word.startswith("--with") for word in rest)
             hit = hit or ("pip" in rest and ("install" in rest or "sync" in rest))
             hit = hit or ("tool" in rest and "install" in rest)
         if program == "python":
             hit = hit or any(a == "-m" and b in _PIP_MODULES for a, b in pairwise(rest))
         if hit:
-            raise _deny(f"package installation is allowed only in the prepare step: {arg!r}")
+            raise _deny(f"package installation is allowed only in the prepare step: {item!r}")
 
 
 def check_argv(
@@ -234,6 +296,9 @@ def check_argv(
         raise _deny("unexpanded or partial placeholder in argv")
     if _program(checked[0]) in HARD_DENIED:
         raise _deny(f"{checked[0]!r} is hard-denied")
+    fetch = _matches(FETCH_AND_RUN, checked)
+    if fetch is not None:
+        raise _deny(f"{' '.join(fetch)} fetches and runs a package; it is hard-denied")
     if not any(checked[: len(prefix)] == prefix for prefix in policy.allowed_prefixes):
         raise _deny(f"argv does not start with an allowed prefix: {list(checked[:6])}")
     if _runner_present(checked):

@@ -3,7 +3,9 @@
 argv lists only, a timeout, a constructed environment (never a copy of `os.environ`), a new
 process group, stdin closed unless given, and an output cap. On timeout the whole process group
 gets SIGTERM, then SIGKILL after `KILL_GRACE_S`. When the leader exits, anything it left behind
-in its group is killed too, so a background child cannot outlive the call or hold its pipes.
+in its group is killed too. A child that starts its own session escapes the group kill; it can
+delay the call by at most `DRAIN_S` and keeps running until the sandbox (build prompt 06)
+contains it.
 
 Each of stdout and stderr is capped at `max_output_bytes`; the excess is read and dropped, and
 the drop is recorded. Sandboxing arrives with build prompt 06: until then any profile is refused
@@ -248,8 +250,9 @@ def run_safe(
         proc.wait()
         raise
     _signal_group(proc.pid, signal.SIGKILL)  # anything the leader left behind
+    drain_until = time.monotonic() + DRAIN_S
     for thread in threads:
-        thread.join(timeout=DRAIN_S)
+        thread.join(timeout=max(drain_until - time.monotonic(), 0))
     return _result(checked, proc.returncode, captures, timed_out=timed_out, start=start)
 
 

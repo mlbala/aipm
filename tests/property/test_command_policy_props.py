@@ -16,7 +16,7 @@ from aipm.security.command_policy import CommandPolicy, compile_gate
 from aipm.security.paths import SafeRelPath
 
 UV_RUN = ("uv", "run", "--frozen", "--offline")
-PREFIXES = ((*UV_RUN, "ruff"), (*UV_RUN, "pytest"), ("python", "-m", "pytest"), ("node",))
+PREFIXES = ((*UV_RUN, "ruff"), (*UV_RUN, "pytest"), ("python", "-m", "pytest"), ("node", "x.js"))
 POLICY = CommandPolicy(allowed_prefixes=PREFIXES, test_roots=("tests",))
 
 DENIED = {

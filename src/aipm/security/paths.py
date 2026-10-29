@@ -7,7 +7,9 @@ Protected patterns are matched case-insensitively (macOS file systems are), at a
 after trailing dots and spaces are dropped from each component. A glob is rejected when it
 could match a protected path at the repository root (`**`, `*.md`, `.*/**`), or when its own
 text names a protected path at any depth (`src/**/.env*`). Glob wildcards are `*` and `?`
-within one component and `**` as a whole component; every other character is literal.
+within one component and `**` as a whole component. Brackets, braces and a leading `!` are
+refused in globs, because other matchers give them meaning. No path or glob may start with `-`,
+`@` or `+`, which tools read as an option or an option file.
 """
 
 import os
@@ -84,13 +86,17 @@ def _parts(raw: object, *, glob: bool) -> list[str]:
         raise _reject(value, f"more than {MAX_COMPONENTS} components")
     if ".." in parts:
         raise _reject(value, "contains '..'")
-    if parts[0].startswith("-"):
-        raise _reject(value, "starts with '-'")
+    if parts[0].startswith(("-", "@", "+")):
+        # `-x` is an option, and `@file` or `+file` makes many tools read options from a file.
+        raise _reject(value, "starts with '-', '@' or '+'")
     if glob:
         if any("**" in part and part != "**" for part in parts):
             raise _reject(value, "'**' must be a whole component")
         if parts.count("**") > MAX_GLOBSTARS:
             raise _reject(value, f"more than {MAX_GLOBSTARS} '**' components")
+        if any(ch in "[]{}" for ch in value) or value.startswith("!"):
+            # Standard matchers read these as classes, braces or negation: `.gi[t]hub/**`.
+            raise _reject(value, "brackets, braces or a leading '!' in a glob")
     elif any(ch in "*?" for ch in value):
         raise _reject(value, "wildcard in a literal path")
     return parts

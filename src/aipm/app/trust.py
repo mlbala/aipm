@@ -6,6 +6,7 @@ surface hash: the CLI passes them after an interactive "yes", or the user passes
 """
 
 import re
+import secrets
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,7 @@ from aipm.state.trust_store import (
     render_surface,
 )
 
-_HASH12 = re.compile(r"[0-9a-f]{12}")
+_HASH_PREFIX = re.compile(r"[0-9a-f]{12,64}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,16 +101,21 @@ def inspect(context: TrustContext, *, store: FileTrustStore | None = None) -> Tr
 def confirm(
     project: Path | None, value: str, *, store: FileTrustStore | None = None
 ) -> TrustReport:
-    """Record trust if `value` is the first 12 hex characters of the current surface hash."""
+    """Record trust if `value` starts the current surface hash (12 to 64 hex characters).
+
+    `--confirm` passes at least the 12 characters SECURITY.md §6 asks for; the interactive flow
+    passes the full hash of the surface it showed, so a surface that changed in between, even
+    one crafted to share a prefix, is refused.
+    """
     trust_store = store if store is not None else default_trust_store()
     report = inspect(load(project), store=trust_store)
     given = value.strip().lower()
-    if not _HASH12.fullmatch(given):
+    if not _HASH_PREFIX.fullmatch(given):
         raise PolicyViolation(
-            "--confirm takes the first 12 hex characters of the surface hash",
+            "--confirm takes the first 12 (or more) hex characters of the surface hash",
             hint="Run `aipm trust --show` to see the surface and its hash.",
         )
-    if given != report.surface_hash[:12]:
+    if not secrets.compare_digest(given, report.surface_hash[: len(given)]):
         raise PolicyViolation(
             "--confirm does not match the current surface hash (wrong or stale)",
             hint="Run `aipm trust --show` and review the surface again.",

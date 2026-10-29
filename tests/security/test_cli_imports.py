@@ -29,12 +29,20 @@ def aipm_imports(source: str) -> list[tuple[int, str]]:
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
             found.extend((node.lineno, alias.name) for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+        elif isinstance(node, ast.ImportFrom) and node.level > 0:
+            # Relative imports would dodge the prefixes below; the CLI uses none.
+            found.append((node.lineno, f"aipm.<relative import, level {node.level}>"))
+        elif isinstance(node, ast.ImportFrom) and node.module:
             for alias in node.names:
                 full = f"{node.module}.{alias.name}"
-                # `from aipm.app import init` imports a module; `from aipm import __version__`
-                # imports a name from the package.
-                found.append((node.lineno, full if full.startswith("aipm.app.") else node.module))
+                # `from aipm.app import init` and `from aipm import state` import modules;
+                # `from aipm import __version__` imports the one allowed package name.
+                if node.module == "aipm" and alias.name == "__version__":
+                    found.append((node.lineno, "aipm"))
+                elif node.module in ("aipm", "aipm.app", "aipm.domain", "aipm.security"):
+                    found.append((node.lineno, full))
+                else:
+                    found.append((node.lineno, node.module))
     return [(line, name) for line, name in found if name == "aipm" or name.startswith("aipm.")]
 
 
@@ -60,6 +68,10 @@ def test_cli_imports_only_allowed_modules() -> None:
         "from aipm.security.paths import safe_relpath\n",
         "from aipm.security.new_module import x\n",
         "def f():\n    from aipm.config.loader import load_config\n",
+        "from ..security import new_module\n",
+        "from . import output\n",
+        "from aipm import state\n",
+        "from aipm.security import paths\n",
     ],
 )
 def test_the_allow_list_catches_violations(source: str) -> None:
@@ -73,6 +85,8 @@ def test_the_allow_list_catches_violations(source: str) -> None:
         "from aipm.app import init as use_case\n",
         "from aipm.domain.errors import AipmError\n",
         "from aipm.security.sanitize import sanitize_text\n",
+        "from aipm.security import sanitize\n",
+        "from aipm.domain import errors\n",
         "from aipm.cli.output import fail\n",
         "import typer\n",
     ],

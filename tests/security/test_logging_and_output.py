@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from aipm.app.runtime import user_redactor
 from aipm.cli.output import print_untrusted
 from aipm.domain.models import PrdDoc, PrdFrontMatter
 from aipm.observability.logging import LOGGER_NAME, configure_logging
@@ -136,3 +137,14 @@ def test_print_untrusted_to_stderr(capsys: pytest.CaptureFixture[str]) -> None:
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == "to stderr \n"
+
+
+def test_cli_logging_applies_the_users_redact_patterns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "user.yaml"
+    config.write_text("security: {extra_redact_patterns: ['ACME-[0-9]{6}']}\n", encoding="utf-8")
+    monkeypatch.setenv("AIPM_CONFIG", str(config))
+    assert user_redactor().redact("ticket ACME-123456") == "ticket «REDACTED:custom»"
+    config.write_text("telemetry: true\n", encoding="utf-8")
+    assert user_redactor().redact("ticket ACME-123456") == "ticket ACME-123456"

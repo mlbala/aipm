@@ -168,3 +168,25 @@ def test_init_from_a_subdirectory_uses_the_repo_root(python_repo: Path) -> None:
     assert result.exit_code == 0, result.output
     assert (python_repo / ".pm" / "config.yaml").exists()
     assert not (python_repo / "src" / ".pm").exists()
+
+
+def test_a_symlinked_gitignore_is_not_followed(tmp_repo: Path, tmp_path: Path) -> None:
+    outside = tmp_path / "outside-ignore"
+    outside.write_text("README.md\n", encoding="utf-8")
+    (tmp_repo / ".gitignore").symlink_to(outside)
+    result = init(tmp_repo)
+    assert result.exit_code == 0, result.output
+    text = (tmp_repo / ".pm" / "repo-map.md").read_text(encoding="utf-8")
+    assert "- README.md" in text
+
+
+def test_user_redact_patterns_apply_to_written_files(tmp_repo: Path, user_dirs: UserDirs) -> None:
+    user_dirs.config.write_text(
+        "security: {extra_redact_patterns: ['ACME-[0-9]{6}']}\n", encoding="utf-8"
+    )
+    (tmp_repo / "README.md").write_text("# Ticket ACME-123456\n", encoding="utf-8")
+    result = init(tmp_repo)
+    assert result.exit_code == 0, result.output
+    text = (tmp_repo / ".pm" / "repo-map.md").read_text(encoding="utf-8")
+    assert "ACME-123456" not in text
+    assert "«REDACTED:custom»" in text

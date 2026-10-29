@@ -32,7 +32,16 @@ from aipm.config.schema import Config
 from aipm.domain.errors import AipmError, PolicyViolation
 from aipm.domain.models import GateDef, PrepareDef, RepoId, StrictModel
 from aipm.domain.models.base import Sha256, Str200, Str500
-from aipm.security.command_policy import CommandPolicy, check_argv, compile_gate, compile_prepare
+from aipm.observability.redaction import process_redactor
+from aipm.security.command_policy import (
+    HARD_DENIED,
+    CommandPolicy,
+    check_argv,
+    compile_gate,
+    compile_prepare,
+    program_name,
+)
+from aipm.security.sanitize import sanitize_text
 
 SURFACE_VERSION = 1
 TRUST_FILE = "trust.json"
@@ -124,12 +133,31 @@ def _scanner_entry(
     return {"argv": list(run), "resolved": which(run[0])}
 
 
+def _resolver(which: Which) -> Which:
+    """Resolve executables to real absolute paths, refusing links to hard-denied programs."""
+
+    def resolve(name: str) -> str | None:
+        found = which(name)
+        if found is None:
+            return None
+        real = os.path.realpath(found)
+        if program_name(real) in HARD_DENIED:
+            raise PolicyViolation(
+                f"{name!r} resolves to the hard-denied program {real!r}",
+                hint="Fix your PATH or the argv prefix; this surface can never be trusted.",
+            )
+        return real
+
+    return resolve
+
+
 def execution_surface(cfg: Config, *, which: Which = shutil.which) -> dict[str, Any]:
     """The canonical execution surface (SECURITY.md §6).
 
     Raises `PolicyViolation` (exit 6) if any configured argv or prefix fails the command policy.
     """
     policy = _LazyPolicy(cfg)
+    which = _resolver(which)
     prefixes = [*cfg.allowed_executables, *cfg.security.extra_allowed_executables]
     if prefixes:
         policy()
@@ -139,6 +167,7 @@ def execution_surface(cfg: Config, *, which: Which = shutil.which) -> dict[str, 
         "allowed_executables": [list(p) for p in cfg.allowed_executables],
         "extra_allowed_executables": [list(p) for p in cfg.security.extra_allowed_executables],
         "resolved_executables": {p[0]: which(p[0]) for p in sorted(prefixes)},
+        "test_roots": list(cfg.test_roots),
         "prepare": prepare,
         "gates": {
             name: _gate_entry(name, gate, policy, which) for name, gate in sorted(cfg.gates.items())
@@ -308,11 +337,12 @@ class FileTrustStore:
     def trust(self, repo: RepoId, surface_hash: str, summary: str) -> None:
         """Record trust (only after interactive confirmation or `--confirm`)."""
         content = self._load()
+        clean = process_redactor().redact(sanitize_text(summary, source="trust summary").text)
         content.repos[repo] = TrustEntry(
             surface_hash=surface_hash,
             trusted_at=datetime.now(UTC),
             aipm_version=__version__[:200],
-            summary=summary[:500],
+            summary=clean[:500],
         )
         self._save(content)
 
