@@ -1,0 +1,44 @@
+Project: {{ project }}
+
+## Gate menu
+
+{% for gate in gates -%}
+- `{{ gate.name }}`{% if gate.required %} (required){% endif %}
+{% endfor %}
+## Rules
+
+- At most {{ max_tasks }} tasks.
+- Trace every must feature: {{ must_features | join(", ") if must_features else "none" }}.
+- Trace every threat of severity medium or higher: {{ threats_to_trace | join(", ") if threats_to_trace else "none" }}.
+- `feature`, `security` and `refactor` tasks include the `unit` and `ac_trace` gates.
+- Protected paths, which no task may own:
+{%- for path in protected %}
+  - `{{ path }}`
+{%- endfor %}
+
+## Project settings
+
+{{ settings | untrusted }}
+
+## The PRD
+
+{{ prd | untrusted }}
+
+## The architecture
+
+{{ architecture | untrusted }}
+
+## The threat model
+
+{{ threat_model | untrusted }}
+
+## Task
+
+Write the plan for this project. Number tasks from T-001 in the order they should be built.
+{% if problems is not none %}
+## Problems with your previous reply
+
+aipm's plan validator rejected your previous reply for the reasons in the block below. Reply again with the whole plan and fix every one of them.
+
+{{ problems | untrusted }}
+{% endif %}

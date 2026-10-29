@@ -4,6 +4,7 @@ Every model forbids extra keys, strips surrounding whitespace, bounds every stri
 and hides input values in validation errors, so an error message never echoes a secret.
 """
 
+from collections.abc import Mapping
 from enum import StrEnum
 from typing import Annotated, ClassVar, Literal, NewType
 
@@ -30,6 +31,23 @@ class ArtifactKind(StrEnum):
     WORKSHEET = "worksheet"
     APPROVALS = "approvals"
     REPO_MAP = "repo_map"
+
+
+ARTIFACT_FILES: Mapping[ArtifactKind, str] = {
+    ArtifactKind.CONFIG: "config.yaml",
+    ArtifactKind.REQUIREMENTS: "requirements.yaml",
+    ArtifactKind.PRD: "prd.md",
+    ArtifactKind.ARCHITECTURE: "architecture.md",
+    ArtifactKind.THREAT_MODEL: "threat-model.md",
+    ArtifactKind.TASKS: "tasks.yaml",
+    ArtifactKind.WORKSHEET: "worksheet.md",
+    ArtifactKind.APPROVALS: "approvals.yaml",
+    ArtifactKind.REPO_MAP: "repo-map.md",
+}
+"""One file per kind inside `.pm/` (ARCHITECTURE §6.1). ADRs are the `adr/` directory."""
+
+ADR_DIR = "adr"
+"""`.pm/adr/NNNN-<slug>.md`; G2 approves the directory as a whole, under this name."""
 
 
 class Phase(StrEnum):

@@ -1,0 +1,11 @@
+id: C-019
+vector: structural
+input:
+  surface: llm-output
+  # A plan with 500 tasks, over the tasks.yaml cap of 200.
+  text: "tasks: [T-001 ... T-500]"
+expected:
+  outcome: >-
+    The planner's output schema caps tasks at 200, so the reply fails validation, and so does the
+    repair attempt; nothing is written (ARCHITECTURE §6.3, SECURITY.md §7.3).
+  exit_code: 1

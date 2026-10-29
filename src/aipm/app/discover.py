@@ -20,6 +20,7 @@ from typing import Protocol
 
 from aipm.app import runtime
 from aipm.app.approve import is_approved, load_approvals, record_approval
+from aipm.app.guards import InjectionSuspected, check_injection
 from aipm.app.init import project_name
 from aipm.app.inputs import AnswersFile, answer_text, load_answers, read_repo_file
 from aipm.app.workspace import find_repo_root, require_initialized
@@ -76,12 +77,6 @@ class PendingQuestions(HumanInputRequired):
     """Questions are unanswered in a non-interactive run (exit 4); `data` lists them."""
 
     code = "PENDING_QUESTIONS"
-
-
-class InjectionSuspected(HumanInputRequired):
-    """A role reported suspected prompt injection and the run may not continue (exit 4)."""
-
-    code = "INJECTION_SUSPECTED"
 
 
 # ---------------------------------------------------------------- what the prompter sees
@@ -870,30 +865,9 @@ class _Discovery:
     # ------------------------------------------------------------ injection, PRD and G1
 
     def _check_injection(self, role: RoleName, excerpts: Sequence[str]) -> None:
-        if not excerpts:
-            return
-        items = [e for e in excerpts if e.strip()] or ["(no excerpt given)"]
-        self.store.append_event(
-            SecurityEventKind.INJECTION_SIGNAL,
-            source=f"llm:{role.value}",
-            detail=f"the {role.value} reported {len(items)} suspected instructions in its input",
-            data={"excerpts": list(items)},
-        )
-        data: dict[str, object] = {"role": role.value, "injection_suspected": list(items)}
-        if self.prompter is not None:
-            if not self.prompter.confirm_risk(role.value, items):
-                raise InjectionSuspected("stopped after suspected prompt injection", data=data)
-            return
-        if not self.options.accept_risk:
-            raise InjectionSuspected(
-                f"the {role.value} reported suspected prompt injection in its input",
-                hint="Review the input. To continue anyway, run again with --accept-risk.",
-                data=data,
-            )
-        self.warnings.append(
-            f"--accept-risk: the {role.value} reported suspected prompt injection: "
-            + " | ".join(items)
-        )
+        confirm = self.prompter.confirm_risk if self.prompter is not None else None
+        check_injection(self.store, role, excerpts, confirm=confirm,
+                        accept_risk=self.options.accept_risk, warnings=self.warnings)  # fmt: skip
 
     def _write_prd(self, doc: RequirementsDoc) -> None:
         text = self.store.read_text(ArtifactKind.REQUIREMENTS)

@@ -27,7 +27,9 @@ from ruamel.yaml import YAML
 
 from aipm.domain.errors import LockHeld, PolicyViolation, SchemaError, UsageError
 from aipm.domain.models import (
+    ADR_DIR,
     SCHEMA_VERSION,
+    AdrDoc,
     ApprovalsDoc,
     ArchitectureDoc,
     Artifact,
@@ -42,6 +44,7 @@ from aipm.domain.models import (
     ThreatModelDoc,
     YamlArtifact,
 )
+from aipm.domain.models.artifacts import is_adr_file_name
 from aipm.observability.redaction import process_redactor
 from aipm.security.redact import Redactor
 from aipm.security.sanitize import sanitize_text
@@ -57,6 +60,7 @@ from aipm.state.layout import (
 from aipm.state.yamlio import MAX_YAML_BYTES, dump_yaml, load_yaml
 
 MAX_EVENTS_BYTES = 16 * 1_048_576
+MAX_ADR_FILES = 100
 _HOLDER = re.compile(r"(\d{1,10}) (\S{1,40})")
 
 _MODELS: Mapping[ArtifactKind, type[YamlArtifact] | type[MarkdownArtifact[Any]]] = {
@@ -199,7 +203,7 @@ class FileStateStore:
             with suppress(FileNotFoundError):
                 tmp.unlink()
             raise
-        dir_fd = os.open(self.root, os.O_RDONLY)
+        dir_fd = os.open(target.parent, os.O_RDONLY)
         try:
             os.fsync(dir_fd)
         finally:
@@ -281,10 +285,8 @@ class FileStateStore:
             raise SchemaError(f".pm/{name} is not valid UTF-8 (byte {exc.start})") from None
         return self._parse(model, text, f".pm/{name}")
 
-    def save(self, artifact: Artifact) -> str:
-        """Sanitize, redact and write atomically; return the sha256 of the written bytes."""
-        name = artifact_name(artifact.artifact_kind)
-        source = f".pm/{name}"
+    def _render(self, artifact: Artifact, source: str) -> tuple[bytes, int]:
+        """The cleaned, checked bytes to write, and how many invisible characters were removed."""
         signals: list[int] = []
         if isinstance(artifact, MarkdownArtifact):
             meta = self._clean(artifact.front_matter(), source, signals)
@@ -294,15 +296,132 @@ class FileStateStore:
             text = dump_yaml(self._clean(artifact.to_document(), source, signals))
         self._refuse_secrets(text, source)
         self._parse(type(artifact), text, source)
-        data = text.encode("utf-8")
-        self._atomic_write(name, data)
-        if removed := sum(signals):
+        return text.encode("utf-8"), sum(signals)
+
+    def _signal(self, source: str, removed: int) -> None:
+        if removed:
             self.append_event(
                 SecurityEventKind.INJECTION_SIGNAL,
                 source=source,
                 detail=f"{removed} invisible characters removed before writing",
             )
+
+    def preview(self, artifact: Artifact) -> tuple[str, str]:
+        """The exact text `save` would write, and its sha256, without writing anything."""
+        name = artifact_name(artifact.artifact_kind)
+        data, _ = self._render(artifact, f".pm/{name}")
+        return data.decode("utf-8"), normalized_sha256(data)
+
+    def save(self, artifact: Artifact) -> str:
+        """Sanitize, redact and write atomically; return the sha256 of the written bytes."""
+        name = artifact_name(artifact.artifact_kind)
+        source = f".pm/{name}"
+        data, removed = self._render(artifact, source)
+        self._atomic_write(name, data)
+        self._signal(source, removed)
         return normalized_sha256(data)
+
+    def load_with_hash(self, kind: ArtifactKind) -> tuple[Artifact, str]:
+        """Load an artifact and hash the very bytes that were parsed (a consistent read)."""
+        model = _MODELS.get(kind)
+        if model is None:
+            raise UsageError(f"the store does not load {kind.value} files")
+        name = artifact_name(kind)
+        data = self._read(name, limit=MAX_YAML_BYTES)
+        if data is None:
+            raise UsageError(f".pm/{name} does not exist")
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise SchemaError(f".pm/{name} is not valid UTF-8 (byte {exc.start})") from None
+        return self._parse(model, text, f".pm/{name}"), normalized_sha256(data)
+
+    # ------------------------------------------------------------ the ADR directory
+
+    def _adr_dir(self, *, create: bool) -> bool:
+        """Check `.pm/adr` is a real directory (made if `create`); False if it is missing."""
+        self._check_root(create=create)
+        path = self.root / ADR_DIR
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            if not create:
+                return False
+            path.mkdir(mode=0o755)
+            info = os.lstat(path)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise PolicyViolation(f".pm/{ADR_DIR} must be a real directory, not a link or a file")
+        return True
+
+    def adr_names(self) -> list[str]:
+        """The ADR file names aipm reads, in order; other entries in `.pm/adr/` are ignored."""
+        if not os.path.lexists(self.root) or not self._adr_dir(create=False):
+            return []
+        entries = (entry.name for entry in (self.root / ADR_DIR).iterdir())
+        names = sorted(name for name in entries if is_adr_file_name(name))
+        if len(names) > MAX_ADR_FILES:
+            raise SchemaError(f".pm/{ADR_DIR} holds more than {MAX_ADR_FILES} ADR files")
+        return names
+
+    def _check_adr_entries(self) -> None:
+        """Every ADR-named entry must be a regular file, so a replace cannot fail half way."""
+        for name in self.adr_names():
+            info = os.lstat(self.root / ADR_DIR / name)
+            if not stat.S_ISREG(info.st_mode):
+                raise PolicyViolation(f".pm/{ADR_DIR}/{name} is not a regular file")
+
+    def _adr_bytes(self) -> list[tuple[str, bytes]]:
+        found: list[tuple[str, bytes]] = []
+        for name in self.adr_names():
+            data = self._read(f"{ADR_DIR}/{name}", limit=MAX_YAML_BYTES)
+            if data is not None:
+                found.append((name, data))
+        return found
+
+    @staticmethod
+    def _listing_sha256(files: list[tuple[str, bytes]]) -> str:
+        listing = "".join(f"{name} {normalized_sha256(data)}\n" for name, data in files)
+        return hashlib.sha256(listing.encode("ascii")).hexdigest()
+
+    def adr_sha256(self) -> str:
+        """The hash G2 pins for `adr/`: sha256 of each file name and normalized file hash."""
+        return self._listing_sha256(self._adr_bytes())
+
+    def load_adrs(self) -> tuple[list[AdrDoc], str]:
+        """Every ADR, in file-name order, and the hash of exactly the bytes that were parsed."""
+        files = self._adr_bytes()
+        docs: list[AdrDoc] = []
+        for name, data in files:
+            source = f".pm/{ADR_DIR}/{name}"
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise SchemaError(f"{source} is not valid UTF-8 (byte {exc.start})") from None
+            doc = self._parse(AdrDoc, text, source)
+            if isinstance(doc, AdrDoc):
+                docs.append(doc)
+        return docs, self._listing_sha256(files)
+
+    def save_adrs(self, docs: list[AdrDoc]) -> str:
+        """Replace the ADR set: write each file atomically, then remove ADRs not in `docs`."""
+        names = [doc.file_name for doc in docs]
+        if len(set(names)) != len(names) or len({d.meta.id for d in docs}) != len(docs):
+            raise UsageError("ADR IDs and file names must be unique")
+        rendered = [(name, *self._render(doc, f".pm/{ADR_DIR}/{name}")) for name, doc in
+                    zip(names, docs, strict=True)]  # fmt: skip
+        self._adr_dir(create=True)
+        self._check_adr_entries()
+        for name, data, removed in rendered:
+            self._atomic_write(f"{ADR_DIR}/{name}", data)
+            self._signal(f".pm/{ADR_DIR}/{name}", removed)
+        for old in sorted(set(self.adr_names()) - set(names)):
+            target = self.root / ADR_DIR / old
+            try:
+                target.unlink(missing_ok=True)
+            except OSError as exc:
+                message = f".pm/{ADR_DIR}/{old} cannot be removed ({exc.strerror})"
+                raise PolicyViolation(message) from None
+        return self.adr_sha256()
 
     def read_text(self, kind: ArtifactKind) -> str | None:
         """Read an artifact's text with the store's safety checks, or None if it is missing.

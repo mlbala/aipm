@@ -1,0 +1,105 @@
+# The plan for the clinic-booking design. T-004 leaves out ac_trace on purpose: the validator adds
+# it and reports the change.
+responses:
+  - json:
+      tasks:
+        - id: T-001
+          title: "Project skeleton and settings"
+          description: "Create the package, settings loaded from the environment, and the test setup."
+          type: infra
+          traces: [NFR-01]
+          depends_on: []
+          owns_files: ["pyproject.toml", "src/clinic/__init__.py", "src/clinic/settings.py",
+                       "tests/conftest.py"]
+          reads_files: []
+          deps_add: [{ecosystem: pypi, name: fastapi}, {ecosystem: pypi, name: sqlalchemy}]
+          acceptance: ["The app starts and GET /health returns 200"]
+          gates: [lint, unit]
+          size: S
+        - id: T-002
+          title: "Slots and appointments without double booking"
+          description: "Models and the booking service; a slot can hold one appointment."
+          type: feature
+          traces: [F-001]
+          depends_on: [T-001]
+          owns_files: ["src/clinic/booking/**", "tests/booking/**"]
+          reads_files: ["src/clinic/settings.py"]
+          deps_add: []
+          acceptance:
+            - "Free slots per doctor are listed for the next four weeks"
+            - "Booking a taken slot fails with a clear error"
+            - "Two bookings for the same slot at the same time leave exactly one appointment"
+          gates: [lint, types, unit, ac_trace]
+          size: M
+        - id: T-003
+          title: "One-time code verification with a rate limit"
+          description: "Send a six-digit code by WhatsApp and verify it."
+          type: security
+          traces: [F-001, TM-01]
+          depends_on: [T-002]
+          owns_files: ["src/clinic/api/otp.py", "tests/api/test_otp.py"]
+          reads_files: ["src/clinic/booking/**"]
+          deps_add: [{ecosystem: pypi, name: slowapi}]
+          acceptance:
+            - "A wrong code returns 401 and counts the attempt"
+            - "The sixth attempt within ten minutes returns 429"
+          gates: [lint, unit, ac_trace, secrets]
+          size: M
+        - id: T-004
+          title: "Booking API with move and cancel links"
+          description: "Book, move and cancel through the API; links carry a random token."
+          type: feature
+          traces: [F-001, F-003, TM-03]
+          depends_on: [T-002]
+          owns_files: ["src/clinic/api/booking.py", "tests/api/test_booking.py"]
+          reads_files: ["src/clinic/booking/**"]
+          deps_add: []
+          acceptance:
+            - "A booking returns a move link and a cancel link"
+            - "Moving or cancelling is refused less than 4 hours before the visit"
+            - "A link shows no patient name"
+          gates: [lint, unit]
+          size: M
+        - id: T-005
+          title: "WhatsApp confirmations and reminders"
+          description: "Confirm at once, remind 24 hours and 2 hours before; handle C and X replies."
+          type: feature
+          traces: [F-002, TM-02]
+          depends_on: [T-002]
+          owns_files: ["src/clinic/notify/**", "tests/notify/**"]
+          reads_files: ["src/clinic/booking/**"]
+          deps_add: []
+          acceptance:
+            - "A booking sends a confirmation"
+            - "Reminders go out 24 hours and 2 hours before"
+            - "A reply of X cancels the appointment"
+            - "A webhook call with a bad signature is rejected"
+          gates: [lint, unit, ac_trace]
+          size: L
+        - id: T-006
+          title: "Reception schedule view"
+          description: "Day view per doctor with arrived and no-show marks, and walk-in bookings."
+          type: feature
+          traces: [F-004, NFR-02]
+          depends_on: [T-002]
+          owns_files: ["src/clinic/staff/**", "tests/staff/**"]
+          reads_files: ["src/clinic/booking/**"]
+          deps_add: []
+          acceptance:
+            - "Reception sees the day's appointments per doctor"
+            - "Marking a patient as arrived is saved"
+          gates: [lint, unit, ac_trace]
+          size: M
+        - id: T-007
+          title: "Monthly report"
+          description: "Bookings, cancellations and no-shows per doctor."
+          type: feature
+          traces: [F-005]
+          depends_on: [T-006]
+          owns_files: ["src/clinic/staff/report.py", "tests/staff/test_report.py"]
+          reads_files: ["src/clinic/booking/**"]
+          deps_add: []
+          acceptance: ["The report counts bookings, cancellations and no-shows per doctor"]
+          gates: [lint, unit, ac_trace]
+          size: S
+      injection_suspected: []

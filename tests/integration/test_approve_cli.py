@@ -130,9 +130,7 @@ def test_a_prd_changed_after_review_is_not_approved(
     assert "changed after it was shown" in result.stderr
 
 
-@pytest.mark.parametrize(
-    ("artifact", "prompt"), [("design", "04"), ("plan", "04"), ("context", "05")]
-)
+@pytest.mark.parametrize(("artifact", "prompt"), [("context", "05")])
 def test_later_artifacts_are_not_implemented_yet(repo: Path, artifact: str, prompt: str) -> None:
     result = aipm(repo, "approve", artifact, "--yes")
     assert result.exit_code == 2

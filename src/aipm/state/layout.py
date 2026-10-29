@@ -2,11 +2,11 @@
 
 import hashlib
 import os
-from collections.abc import Mapping
 from pathlib import Path
 
 from aipm.domain.errors import UsageError
 from aipm.domain.models import ArtifactKind, RepoId
+from aipm.domain.models.base import ADR_DIR, ARTIFACT_FILES
 
 PM_DIR = ".pm"
 EVENTS_FILE = "events.jsonl"
@@ -21,18 +21,19 @@ GITIGNORE_TEXT = (
     "*.tmp-*\n"
 )
 
-ARTIFACT_FILES: Mapping[ArtifactKind, str] = {
-    ArtifactKind.CONFIG: "config.yaml",
-    ArtifactKind.REQUIREMENTS: "requirements.yaml",
-    ArtifactKind.PRD: "prd.md",
-    ArtifactKind.ARCHITECTURE: "architecture.md",
-    ArtifactKind.THREAT_MODEL: "threat-model.md",
-    ArtifactKind.TASKS: "tasks.yaml",
-    ArtifactKind.WORKSHEET: "worksheet.md",
-    ArtifactKind.APPROVALS: "approvals.yaml",
-    ArtifactKind.REPO_MAP: "repo-map.md",
-}
-"""One file per kind; ADRs are a directory (`adr/NNNN-<slug>.md`) handled with the design step."""
+__all__ = [
+    "ADR_DIR",
+    "ARTIFACT_FILES",
+    "EVENTS_FILE",
+    "GITIGNORE_FILE",
+    "GITIGNORE_TEXT",
+    "LOCK_FILE",
+    "PM_DIR",
+    "artifact_name",
+    "artifact_path",
+    "pm_root",
+    "repo_id",
+]
 
 
 def pm_root(repo_root: Path) -> Path:

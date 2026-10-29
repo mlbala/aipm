@@ -1,0 +1,54 @@
+# The architecture for the clinic-booking PRD.
+responses:
+  - json:
+      stack:
+        language: python
+        framework: fastapi
+        database: postgres
+        package_manager: uv
+        test_framework: pytest
+        deploy: container
+      stack_template: python-uv
+      components:
+        - id: C-01
+          name: api
+          paths: ["src/clinic/api/**"]
+          responsibility: "HTTP API for booking, moving and cancelling appointments"
+        - id: C-02
+          name: booking
+          paths: ["src/clinic/booking/**"]
+          responsibility: "Slots, appointments and the rule against double booking"
+        - id: C-03
+          name: notifications
+          paths: ["src/clinic/notify/**"]
+          responsibility: "WhatsApp confirmations, reminders and C/X replies"
+        - id: C-04
+          name: staff
+          paths: ["src/clinic/staff/**"]
+          responsibility: "Reception and doctor schedule views, staff login with 2FA"
+      is_llm_app: false
+      overview: >-
+        One FastAPI service with a Postgres database, deployed as a single container. Patients
+        use a small server-rendered web app; staff use the same app behind a 2FA login.
+      data: |-
+        - Doctor, Slot, Appointment, Patient (name, mobile number), StaffUser.
+        - Appointments are deleted 12 months after the visit (NFR-01).
+      interfaces: |-
+        - Web pages for patients and staff.
+        - The Meta WhatsApp Cloud API for messages and its webhook for replies.
+      deployment: >-
+        Managed container hosting in the EU, with staging and production, and a managed Postgres
+        database in the same region.
+      security: >-
+        Patients prove their mobile number with a one-time code. Staff log in with a password and
+        TOTP. All patient data stays in the EU.
+      adrs:
+        - title: "FastAPI and Postgres in one container"
+          context: "A small clinic, under 100 bookings a day, and one developer."
+          decision: "One FastAPI service and one managed Postgres database."
+          consequences: "Simple to run; scaling past one container needs work later."
+        - title: "One-time codes by WhatsApp for patients"
+          context: "Patients have no accounts; the clinic already uses WhatsApp."
+          decision: "Patients confirm their number with a six-digit code sent by WhatsApp."
+          consequences: "No passwords to manage; codes must be rate limited."
+      injection_suspected: []

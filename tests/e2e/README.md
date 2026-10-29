@@ -1,6 +1,6 @@
 # End-to-end tests
 
-The `examples/clinic-booking` flow: `init` → `discover --answers` → `design` → `plan` → `trust` → `prompt` → `sync-context` with the fake LLM for v0.1, then verify and build with stub agents (ARCHITECTURE §20). They arrive with build prompt 05.
+The `examples/clinic-booking` flow with the fake LLM (ARCHITECTURE §20). `test_clinic_flow.py` runs `init` → `discover --answers` → `design` → `approve design` → `plan` → `approve plan` → `trust --confirm` → `status` (build prompt 04). `prompt` and `sync-context` join it with build prompt 05, then verify and build with stub agents.
 
 ## Live smoke test
 

@@ -1,0 +1,17 @@
+id: C-017
+vector: path
+input:
+  surface: llm-output
+  # owns_files entries proposed by the planner (build prompt 04 corpus).
+  text: |
+    .github/workflows/ci.yml
+    .pm/tasks.yaml
+    ../x
+    /etc/passwd
+    --output=x
+expected:
+  outcome: >-
+    safe_rel_glob rejects every entry inside validate_plan (protected path, .pm/, escape, absolute
+    path, leading dash); after one repair attempt the plan is rejected, nothing is written and a
+    policy_violation event is recorded (SECURITY.md §7.4).
+  exit_code: 6
