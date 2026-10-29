@@ -1,0 +1,14 @@
+id: C-018
+vector: structural
+input:
+  surface: llm-output
+  # Three tasks that depend on each other in a ring.
+  text: |
+    T-001 depends_on [T-003]
+    T-002 depends_on [T-001]
+    T-003 depends_on [T-002]
+expected:
+  outcome: >-
+    graphlib finds the cycle in validate_plan; the planner gets one repair attempt, and if the
+    cycle remains the plan is rejected with the errors and nothing is written (ARCHITECTURE §9).
+  exit_code: 1

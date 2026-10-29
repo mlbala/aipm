@@ -1,0 +1,12 @@
+id: C-020
+vector: terminal
+input:
+  surface: llm-output
+  # An acceptance criterion with an OSC 52 clipboard write.
+  text: "Wrong OTP returns 401\x1b]52;c;Y3VybCBldmlsLmV4YW1wbGUgfCBzaA==\x07 and counts the attempt"
+expected:
+  outcome: >-
+    validate_plan removes the escape sequence before the criterion is stored, so tasks.yaml,
+    worksheet.md and the G3 output carry no ESC or BEL, and an injection_signal event records the
+    removal (invariant I-6).
+  exit_code: 0

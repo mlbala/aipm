@@ -8,7 +8,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from aipm.domain.models.artifacts import (
+    APPROVED_NAMES,
     AcceptanceCriterion,
+    AdrDoc,
+    AdrFrontMatter,
     Answer,
     AnswerSource,
     Approval,
@@ -30,6 +33,7 @@ from aipm.domain.models.artifacts import (
     Mode,
     NonFunctional,
     OpenQuestion,
+    OverrideReason,
     PrdDerivedFrom,
     PrdDoc,
     PrdFrontMatter,
@@ -41,6 +45,7 @@ from aipm.domain.models.artifacts import (
     Source,
     SourceKind,
     Stack,
+    StaleOverride,
     Stride,
     Task,
     TasksDerivedFrom,
@@ -54,6 +59,8 @@ from aipm.domain.models.artifacts import (
     ThreatModelFrontMatter,
 )
 from aipm.domain.models.base import (
+    ADR_DIR,
+    ARTIFACT_FILES,
     SCHEMA_VERSION,
     ArtifactKind,
     FrontMatter,
@@ -73,13 +80,20 @@ from aipm.domain.models.events import (
     SecurityEventKind,
 )
 from aipm.domain.models.gates import BuiltinGate, GateDef, NetworkProfile, PrepareDef
+from aipm.domain.models.plan import ProposedDependency, ProposedTask
+from aipm.domain.models.snapshot import StateSnapshot
 
 type Artifact = YamlArtifact | MarkdownArtifact[Any]
 """Any artifact the state store can load and save."""
 
 __all__ = [
+    "ADR_DIR",
+    "APPROVED_NAMES",
+    "ARTIFACT_FILES",
     "SCHEMA_VERSION",
     "AcceptanceCriterion",
+    "AdrDoc",
+    "AdrFrontMatter",
     "Answer",
     "AnswerSource",
     "Approval",
@@ -113,6 +127,7 @@ __all__ = [
     "NetworkProfile",
     "NonFunctional",
     "OpenQuestion",
+    "OverrideReason",
     "Phase",
     "PrdDerivedFrom",
     "PrdDoc",
@@ -121,6 +136,8 @@ __all__ = [
     "Priority",
     "ProjectContext",
     "ProjectInfo",
+    "ProposedDependency",
+    "ProposedTask",
     "RepoId",
     "RepoMapDoc",
     "RepoMapFrontMatter",
@@ -132,6 +149,7 @@ __all__ = [
     "Source",
     "SourceKind",
     "Stack",
+    "StaleOverride",
     "StateSnapshot",
     "StrictModel",
     "Stride",
@@ -150,11 +168,6 @@ __all__ = [
     "Workspace",
     "YamlArtifact",
 ]
-
-
-@dataclass(frozen=True, slots=True)
-class StateSnapshot:
-    """Placeholder for the hashes and approvals that phase derivation reads (prompt 04)."""
 
 
 @dataclass(frozen=True, slots=True)

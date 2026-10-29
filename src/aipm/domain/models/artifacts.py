@@ -7,6 +7,7 @@ from typing import Annotated, ClassVar, Literal, Self
 from pydantic import AwareDatetime, Field, StringConstraints, model_validator
 
 from aipm.domain.models.base import (
+    ADR_DIR,
     AcceptanceId,
     AdrId,
     ArtifactKind,
@@ -331,6 +332,48 @@ class ThreatModelDoc(MarkdownArtifact[ThreatModelFrontMatter]):
     artifact_kind: ClassVar[ArtifactKind] = ArtifactKind.THREAT_MODEL
 
 
+# ---------------------------------------------------------------- adr/NNNN-<slug>.md
+
+_ADR_FILE = re.compile(r"[0-9]{4}-[a-z0-9]+(?:-[a-z0-9]+)*\.md")
+_SLUG_MAX = 48
+
+
+class AdrFrontMatter(FrontMatter):
+    """An ADR's front matter. aipm allocates the ID; the title is model text (T2 until G2)."""
+
+    kind: Literal["adr"] = "adr"
+    id: AdrId
+    title: Str120
+    status: Literal["accepted"] = "accepted"
+
+
+class AdrDoc(MarkdownArtifact[AdrFrontMatter]):
+    """One architecture decision record in `.pm/adr/`."""
+
+    artifact_kind: ClassVar[ArtifactKind] = ArtifactKind.ADR
+
+    @property
+    def file_name(self) -> str:
+        """`NNNN-<slug>.md`, built by aipm from the ID and a lowercase reduction of the title."""
+        return adr_file_name(self.meta.id, self.meta.title)
+
+
+def adr_file_name(adr_id: str, title: str) -> str:
+    """The file name for an ADR: digits from the ID, then `[a-z0-9-]` from the title."""
+    number = adr_id.removeprefix("ADR-")
+    words = re.findall(r"[a-z0-9]+", title.casefold())
+    slug = "-".join(words)[:_SLUG_MAX].strip("-") or "decision"
+    name = f"{number}-{slug}.md"
+    if not is_adr_file_name(name):
+        raise ValueError(f"not an ADR file name: {name!r}")
+    return name
+
+
+def is_adr_file_name(name: str) -> bool:
+    """Whether `name` is a file name aipm would write in `.pm/adr/`."""
+    return len(name) <= 64 and _ADR_FILE.fullmatch(name) is not None
+
+
 # ---------------------------------------------------------------- tasks.yaml
 
 
@@ -505,11 +548,55 @@ class Approval(StrictModel):
     at: AwareDatetime
 
 
+class OverrideReason(StrEnum):
+    """Why a command ran on input that is not approved and current."""
+
+    STALE = "stale"
+    UNAPPROVED = "unapproved"
+
+
+class StaleOverride(StrictModel):
+    """A recorded `--accept-stale` run (ARCHITECTURE §7.1). Never counts as an approval."""
+
+    command: Literal["design", "plan"]
+    artifact: RelPath
+    sha256: Sha256
+    reason: OverrideReason
+    by: Str200
+    at: AwareDatetime
+
+
+APPROVED_NAMES = {
+    ArtifactKind.PRD: "prd.md",
+    ArtifactKind.ARCHITECTURE: "architecture.md",
+    ArtifactKind.THREAT_MODEL: "threat-model.md",
+    ArtifactKind.ADR: ADR_DIR,
+    ArtifactKind.TASKS: "tasks.yaml",
+}
+"""The `artifact` value an approval records for each kind (G2 approves `adr` as a whole)."""
+
+
 class ApprovalsDoc(YamlArtifact):
     """`approvals.yaml`."""
 
     artifact_kind: ClassVar[ArtifactKind] = ArtifactKind.APPROVALS
     approvals: list[Approval] = Field(default_factory=list[Approval], max_length=1000)
+    overrides: list[StaleOverride] = Field(default_factory=list[StaleOverride], max_length=1000)
+
+    def has(self, gate: ApprovalGate, artifact: str, sha256: str | None) -> bool:
+        """Whether this exact hash of the artifact has an approval for the gate."""
+        if not sha256:
+            return False
+        return any(
+            a.gate is gate and a.artifact == artifact and a.sha256 == sha256 for a in self.approvals
+        )
+
+    def to_document(self) -> dict[str, object]:
+        """`overrides` is written only once there is one, so older files keep their bytes."""
+        data = super().to_document()
+        if not self.overrides:
+            data.pop("overrides", None)
+        return data
 
 
 # ---------------------------------------------------------------- repo-map.md
