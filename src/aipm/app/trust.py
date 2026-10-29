@@ -129,3 +129,22 @@ def revoke(project: Path | None, *, store: FileTrustStore | None = None) -> bool
     root = find_repo_root(project)
     trust_store = store if store is not None else default_trust_store()
     return trust_store.revoke(repo_id(root))
+
+
+def require_trusted(
+    root: Path, loaded: LoadedConfig, *, command: str, store: FileTrustStore | None = None
+) -> TrustReport:
+    """Exit 6 unless this user trusts the repository's current execution surface.
+
+    For the commands that hand gate argv to an agent (`prompt`, `sync-context`), which the
+    agent then runs outside aipm's sandbox (SECURITY.md §6 rule 3). A surface that fails the
+    command policy can never be trusted, and exits 6 with the reason.
+    """
+    report = inspect(TrustContext(root=root, loaded=loaded), store=store)
+    if not report.trusted:
+        raise PolicyViolation(
+            f"aipm {command} hands this repository's gate commands to your coding agent, and you "
+            "have not trusted them",
+            hint="Review them with `aipm trust --show`, then run `aipm trust`.",
+        )
+    return report
