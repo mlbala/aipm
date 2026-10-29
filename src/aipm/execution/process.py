@@ -294,6 +294,12 @@ def _close_pipes(proc: asyncio.subprocess.Process) -> None:  # noqa: TID251
     transport.close()
 
 
+def _stop_reading(proc: asyncio.subprocess.Process, tasks: list[asyncio.Task[None]]) -> None:  # noqa: TID251
+    for task in tasks:
+        task.cancel()
+    _close_pipes(proc)
+
+
 async def _await_exit(proc: asyncio.subprocess.Process, timeout_s: float) -> bool:  # noqa: TID251
     """The asyncio variant of `_wait`."""
     if await _leader_exited(proc, timeout_s):
@@ -346,11 +352,17 @@ async def run_safe_async(
         tasks.append(asyncio.create_task(_afeed(cast("asyncio.StreamWriter", proc.stdin), stdin)))
     try:
         timed_out = await _await_exit(proc, timeout_s)
-    except BaseException:  # cancellation included
+    except asyncio.CancelledError:
         _signal_group(proc.pid, signal.SIGKILL)
-        for task in tasks:
-            task.cancel()
-        _close_pipes(proc)
+        # On Linux asyncio reaps children inside the loop (through a pidfd): wait for the killed
+        # leader to be reaped, so no zombie outlives a cancelled call. SIGKILL makes this short.
+        with contextlib.suppress(asyncio.CancelledError):
+            await _leader_exited(proc, KILL_GRACE_S)
+        _stop_reading(proc, tasks)
+        raise
+    except BaseException:
+        _signal_group(proc.pid, signal.SIGKILL)
+        _stop_reading(proc, tasks)
         raise
     _signal_group(proc.pid, signal.SIGKILL)
     _, pending = await asyncio.wait(tasks, timeout=DRAIN_S)

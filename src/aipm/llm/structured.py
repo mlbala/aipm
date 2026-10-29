@@ -20,6 +20,9 @@ from typing import Any, get_args, get_origin
 from pydantic import BaseModel, ValidationError
 
 MAX_RESPONSE_CHARS = 524_288
+MAX_JSON_DEPTH = 64
+"""Arrays and objects nested deeper than this are refused before parsing: the check must not
+depend on the interpreter's recursion limit, which Python 3.14 no longer hits at this depth."""
 MAX_PROBLEMS = 10
 
 _KEEP = ("type", "enum")  # docstring descriptions stay home; guidance is in the prompt
@@ -186,6 +189,19 @@ def describe_errors(exc: ValidationError, model: type[BaseModel]) -> list[str]:
     return problems
 
 
+_JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"', re.DOTALL)
+_BRACKETS = re.compile(r"[\[\]{}]")
+
+
+def _depth(text: str) -> int:
+    """The deepest nesting of arrays and objects, counting brackets outside strings."""
+    deepest = level = 0
+    for match in _BRACKETS.finditer(_JSON_STRING.sub('""', text)):
+        level += 1 if match.group() in "[{" else -1
+        deepest = max(deepest, level)
+    return deepest
+
+
 def parse_response[T: BaseModel](raw: str, schema: type[T]) -> T:
     """Validate a provider response into `schema`, or raise `OutputInvalid`."""
     text = raw.strip()
@@ -194,6 +210,8 @@ def parse_response[T: BaseModel](raw: str, schema: type[T]) -> T:
     fenced = _FENCE.match(text)
     if fenced:
         text = fenced.group("body").strip()
+    if _depth(text) > MAX_JSON_DEPTH:
+        raise OutputInvalid(["the reply is nested too deeply"])
     try:
         data = json.loads(text, object_pairs_hook=_no_duplicates, parse_constant=_no_constants)
     except json.JSONDecodeError as exc:
