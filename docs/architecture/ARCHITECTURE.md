@@ -937,7 +937,7 @@ git: {integration_branch: aipm/integration}
 logging: {level: info, json: false}
 ```
 
-**Environment variables:** `AIPM_CONFIG`, `AIPM_NO_COLOR`, `AIPM_NON_INTERACTIVE`, `AIPM_LOG_LEVEL`, and `AIPM_LLM__MODELS__DEFAULT` (the `__` separator selects a nested key). aipm has no telemetry, so there is no telemetry setting.
+**Environment variables:** `AIPM_CONFIG`, `AIPM_NO_COLOR`, `AIPM_NON_INTERACTIVE`, `AIPM_LOG_LEVEL`, and `AIPM_LLM__MODELS__DEFAULT` (the `__` separator selects a nested key). An `AIPM_*` variable never sets a user-only key (it is ignored with a warning), and `AIPM_CONFIG` must be an absolute path outside the repository (exit 6), because tools such as pipenv load a repository's `.env` into the environment ([ADR-0018](adr/0018-environment-cannot-set-user-only-keys.md)). aipm has no telemetry, so there is no telemetry setting.
 
 ## 16. CLI specification
 

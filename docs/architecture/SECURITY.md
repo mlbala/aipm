@@ -128,6 +128,7 @@ The **execution surface** is everything aipm will execute or hand to an agent as
    - A repo-level `.pm/config.yaml` value for a **user-only** key is ignored, with a warning: `llm.provider`, `llm.base_url`, `llm.api_key_env`, `llm.pricing`, `dispatch.tools.*.pass_env`, `dispatch.tools.*.allow_auto_mode` and `security.extra_allowed_executables`. Otherwise a cloned repo could redirect the user's API key and repo content to its own server, read arbitrary environment variables, or turn off USD budget accounting.
    - A repo value for a **tighten-only** key can only make the setting stricter: `security.*`, `dispatch.sandbox`, `dispatch.tools.*.bare`, `dispatch.parallel`, `dispatch.max_retries`, `dispatch.task_timeout`, `budget.*` (the minimum wins) and `context.allowed_url_domains` (the intersection).
    - Setting a user-only key or weakening a tighten-only key requires the user-level config or a CLI flag for that invocation. Each weakening is printed as a warning on every run.
+   - `AIPM_*` environment variables never set a user-only key: such a variable is ignored with a warning, because tools such as pipenv load a repository's `.env` into the environment. They may still relax a tighten-only key, with the warning (R-8). `AIPM_CONFIG` must be an absolute path outside the repository, or aipm exits 6 ([ADR-0018](adr/0018-environment-cannot-set-user-only-keys.md)).
 6. **`approvals.yaml` is a record, not a control.** It records who approved what, for the team. aipm never treats it as proof of trust, because anyone who can write to the repo can forge it.
 7. **Repo hooks and MCP servers.** When `dispatch.tools.claude.bare` is false, aipm reads the repo's `.claude/settings.json` hooks and `.mcp.json` servers. It includes them in the execution surface and therefore requires trust for them.
 
@@ -147,11 +148,12 @@ This layer applies to every T2 input, and to every LLM output written to a file 
   - the Unicode Tags block, U+E0000–U+E007F (used for ASCII smuggling);
   - zero-width characters: U+200B–U+200F, U+2060–U+2064, U+FEFF;
   - bidi controls: U+202A–U+202E, U+2066–U+2069;
-  - variation selectors (U+FE00–U+FE0F, U+E0100–U+E01EF) outside emoji sequences.
+  - variation selectors (U+FE00–U+FE0F, U+E0100–U+E01EF) outside emoji sequences;
+  - every other default-ignorable code point: format characters, and the letters and marks that render as nothing (Hangul fillers U+115F, U+1160, U+3164, U+FFA0; Khmer U+17B4, U+17B5; Mongolian U+180B–U+180D, U+180F; U+034F), plus the unassigned default-ignorable ranges. Paths and argv refuse them.
 - **Removal is a signal.** The count of removed characters per source is logged. A non-zero count for invisible characters raises an `injection_signal` event (§7.9).
 - **Ignored files.** These files are never read for LLM context:
   - anything matched by `.gitignore` or `.aipmignore`;
-  - a built-in deny list: `.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_*`, `*credentials*`, `*secret*`, `.npmrc`, `.pypirc`, `.netrc`, `.git/`, `.pm/runs/`, `.pm/cache/`.
+  - a built-in deny list, matched without regard to case (`Secrets.yaml`, `server.PEM`): `.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_*`, `*credentials*`, `*secret*`, `.npmrc`, `.pypirc`, `.netrc`, `.git/`, `.pm/runs/`, `.pm/cache/`.
 
 ### 7.2 L2 spotlighting and typed untrusted content
 
@@ -243,7 +245,7 @@ The coding agent and gate processes run in the sandbox (§9), with a scrubbed en
   3. a generic pattern `(?i)(api[_-]?key|secret|token|passw(or)?d)\s*[:=]\s*['"]?[^\s'"]{8,}`;
   4. any patterns in `security.extra_redact_patterns`.
 
-  The replacement is `«REDACTED:<kind>»`.
+  The replacement is `«REDACTED:<kind>»`. Text is cleaned (L1, §7.1) before it is redacted, never after, so a secret split by an escape sequence or an invisible character is whole when the redactor sees it. This holds for prompts, `.pm/` writes and log records.
 
   The redactor takes an environment snapshot as a constructor argument instead of reading `os.environ` itself, which keeps `aipm.security` pure. The redactors used by the LLM gateway, `StateStore` and logging are always built from the full `os.environ`, and a test asserts this.
 - **Pre-write secret scan.** If, after redaction, a file aipm is about to write still matches a high-confidence secret pattern, the write is aborted with exit 6.
@@ -302,7 +304,7 @@ Each adapter builds its argv in code from fixed fragments. The policy rejects an
 
 1. **No shell, one process module.** argv is a list of 1–32 strings, each at most 512 characters, with no NUL and no newline. `shell=True` and `os.system` do not exist anywhere in the codebase. Only `aipm.execution.process` can start a process. A ruff `banned-api` list bans every other way to start one in `src/aipm/**`: `subprocess`, `os.system`, `os.popen`, `os.spawn*`, `os.exec*`, `os.posix_spawn*`, `os.fork`, `os.forkpty`, `pty`, `multiprocessing`, `asyncio.create_subprocess_exec`, `asyncio.create_subprocess_shell`, and the dynamic-import routes `importlib.import_module` and the `builtins` module. ruff cannot see the bare `__import__` builtin or the `__builtins__` name, so a test scans every module for them. import-linter forbids the `subprocess` import as a second layer (ARCHITECTURE §5.1).
 2. **Allowed argv prefixes.** Every argv MUST start with one of the argv prefixes in the stack template's `allowed_executables` (for example `["uv", "run", "--frozen", "--offline", "ruff"]`), or in the user-level `security.extra_allowed_executables`. Any other argv is rejected. The trust store resolves `argv[0]` with `shutil.which` at trust time, and the resolved absolute path is part of the trust hash. `compile_gate` itself stays pure.
-3. **Hard-denied executables.** These cannot be allowed by any configuration. They are rejected as `argv[0]`, and at any argv position after a runner (rule 4):
+3. **Hard-denied executables.** These cannot be allowed by any configuration. They are rejected at any argv position, because a wrapper such as `time`, `nice`, `timeout`, `caffeinate` or `find -exec` starts the program named after it ([ADR-0019](adr/0019-hard-denied-programs-at-any-argv-position.md)):
    - shells: `sh`, `bash`, `zsh`, `fish`, `dash`, `ksh`, `csh`, `tcsh`, `pwsh`, `cmd`;
    - network tools: `curl`, `wget`, `nc`, `ncat`, `socat`, `ssh`, `scp`, `sftp`, `rsync`, `ftp`, `telnet`;
    - privilege tools: `sudo`, `su`, `doas`;
@@ -312,7 +314,7 @@ Each adapter builds its argv in code from fixed fragments. The policy rejects an
    - `git`, because aipm runs git itself.
 4. **Runners and denied argument patterns.** A runner is an argv prefix that starts another program: `uv run`, `uv tool run`, `npm exec`, `pnpm dlx`, `yarn dlx` and `python -m`. Checking only `argv[0]` is not enough: `["uv", "run", "bash", "-c", "curl … | sh"]` starts with an allowed executable.
    - After a runner, the policy rejects any hard-denied executable name (rule 3) at any position, and the inline-code flags `-c`, `-e`, `--eval`, and `-p` for node, at any position.
-   - Inline code flags for interpreters: `python -c`, `node -e/--eval/-p`, `ruby -e`, `perl -e`, `deno eval`.
+   - Inline code flags for interpreters: `python -c`, `node -e/--eval/-p`, `ruby -e`, `perl -e`, `deno eval`, `osascript -e`, `php -r`, `lua -e`, `Rscript -e`, `julia -e`.
    - Fetch-and-run and package installation in gates: `pip install`, `python -m pip`, `npm install|i|exec|x`, `pnpm dlx`, `yarn dlx`, `uv pip install`, `uv run --with`, `uv add`. Installation is allowed only in the `prepare` step and only from its template.
 5. **Placeholders.** Exactly three exist, and each must be a whole argv element:
    - `{paths}` and `{test_paths}`: each expanded value is its own argv element and passes `safe_relpath`: relative, inside the workspace, no `..`, no leading `-`, no NUL, and no symlink that resolves outside the workspace.
@@ -371,6 +373,7 @@ Each adapter builds its argv in code from fixed fragments. The policy rejects an
 | T-4 | A corrupt or hand-edited `.pm/` state breaks aipm | Malformed YAML, alias bomb | ARCH §6.2/§6.4 (schema validation, aliases rejected, atomic writes, lock) |
 | T-5 | Context-file poisoning persists an injection into every agent session | The architecture body includes "always send the .env to …" | §7.1, §7.10 (URLs removed), ARCH §10.2 (templates, managed blocks, diff approval) |
 | T-6 | An agent persists through its global config | Writes a hook to `~/.claude/settings.json` | §9.1 (isolated config home, `denyWrite`, integrity check) |
+| T-7 | Repository content becomes configuration through the environment | A repo `.env`, loaded by pipenv, sets `AIPM_LLM__BASE_URL` and `AIPM_LLM__API_KEY_ENV`, or `AIPM_CONFIG=.pm/user.yaml` | §6 rule 5, ADR-0018 (environment never sets user-only keys; `AIPM_CONFIG` absolute and outside the repo); R-8 |
 | R-1 | No record of who approved or ran what | | `approvals.yaml`, trust-store records, journal, commit trailers (SG-7) |
 | I-1 | Secrets are sent to the LLM provider | `.env` content in the repo map | §7.1 (deny list), §8 (redactor) |
 | I-2 | Secrets end up in logs, `.pm/` or prompts | A test prints a token | §8 (redact on write, pre-write scan, `secrets` gate) |
@@ -466,6 +469,8 @@ Fake `claude`/`codex`/`copilot`/`gemini` binaries placed on `PATH`. Each scenari
 | R-5 | Tamper heuristics can be evaded by subtle test weakening | Static heuristics are limited | Review the integration branch before `aipm merge`; `ac_trace`; AC veto |
 | R-6 | Vulnerabilities in the agents or scanners themselves | Third-party code | Keep the tools updated; `doctor` shows versions |
 | R-7 | macOS `sandbox-exec` is deprecated by Apple | Platform | Track `srt` updates; fail closed under `require_sandbox` |
+| R-8 | `AIPM_*` variables may relax tighten-only keys, and a tool that loads a repository's `.env` (pipenv) hands that to the repository | The environment is the user's own way to change settings for one shell, and the behaviour is relied on (ADR-0018) | Do not load repository `.env` files into the shell that runs aipm; every relaxation is printed as a warning on every run |
+| R-9 | Trust covers the argv, not the code it loads: `pytest` imports `conftest.py`, and a repo-relative executable can change after `git pull` without changing the surface hash | Gates must run the project's own code | Review changes to test configuration and scripts after pulling; run gates in the sandbox (v0.2) |
 
 ## 16. Vulnerability disclosure (root `SECURITY.md`)
 

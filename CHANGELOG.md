@@ -4,6 +4,22 @@ All notable changes to aipm are recorded here. The format follows [Keep a Change
 
 ## [Unreleased]
 
+### Security
+
+The v0.1 red-team pass ([docs/security/reviews/v0.1.md](docs/security/reviews/v0.1.md)) found six problems, all fixed:
+
+- The command policy refuses a hard-denied program (a shell, `curl`, `rm`, `git`, …) at any argv position, so a wrapper such as `time`, `nice`, `timeout`, `caffeinate` or `find -exec` can no longer start one (ADR-0019). `osascript -e`, `php -r`, `lua -e`, `Rscript -e` and `julia -e` count as inline code.
+- `AIPM_*` environment variables can no longer set user-only keys such as `llm.base_url` or `llm.api_key_env` (ignored with a warning), and `AIPM_CONFIG` must be an absolute path outside the repository (exit 6). A repository `.env` loaded by pipenv or a similar tool could otherwise redirect your API key (ADR-0018).
+- `http` and `https` URLs written without slashes (`https:evil.example`) are removed from context files and prompts.
+- Logging removes escape sequences before it redacts, so a secret split by an escape sequence is redacted.
+- Default-ignorable characters that render as nothing (Hangul fillers, Khmer and Mongolian marks) are removed from text and refused in paths and gate argv.
+- The secrets deny list matches file names without regard to case (`Secrets.yaml`, `server.PEM`).
+
+### Added
+
+- Corpus cases C-028 to C-034, `tests/security/test_redteam_v01.py`, red-team fuzzing in `tests/property/test_redteam_v01_props.py`, and the `ci-long` Hypothesis profile: `uv run pytest --hypothesis-profile=ci-long` runs each new property 2,000 times.
+- SECURITY.md: threat T-7 (repository content as configuration through the environment) and residual risks R-8 and R-9.
+
 ## [0.1.0] - not yet tagged
 
 v0.1, the PM core. The owner tags it after the v0.1 security red-team pass (build prompt 09) and sets the date here.
