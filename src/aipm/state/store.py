@@ -1,13 +1,73 @@
 """The only way to write `.pm/` (AGENTS.md rule 7): atomic, locked, redacted (ARCHITECTURE §5.3).
 
+Every write sanitizes and redacts each string of the artifact, refuses the write if the result
+still holds a secret (exit 6), validates the exact text it is about to write, then replaces the
+file atomically (temp file, fsync, `os.replace`, directory fsync). `.pm/` itself must be a real
+directory inside the repository, and no file in it is read or written through a symlink, so a
+cloned repo cannot point aipm's reads or writes elsewhere.
+
 Security events are appended to `.pm/events.jsonl` through the store as well (§6.1).
 """
 
-from contextlib import AbstractContextManager
+import hashlib
+import json
+import os
+import re
+import secrets
+import stat
+from collections.abc import Generator, Mapping
+from contextlib import AbstractContextManager, contextmanager, suppress
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
-from aipm.domain.models import Artifact, ArtifactKind
+from filelock import FileLock, Timeout
+from pydantic import JsonValue, ValidationError
+from ruamel.yaml import YAML
+
+from aipm.domain.errors import LockHeld, PolicyViolation, SchemaError, UsageError
+from aipm.domain.models import (
+    SCHEMA_VERSION,
+    ApprovalsDoc,
+    ArchitectureDoc,
+    Artifact,
+    ArtifactKind,
+    MarkdownArtifact,
+    PrdDoc,
+    RepoMapDoc,
+    RequirementsDoc,
+    SecurityEvent,
+    SecurityEventKind,
+    TasksDoc,
+    ThreatModelDoc,
+    YamlArtifact,
+)
+from aipm.observability.redaction import process_redactor
+from aipm.security.redact import Redactor
+from aipm.security.sanitize import sanitize_text
+from aipm.state import frontmatter
+from aipm.state.layout import (
+    EVENTS_FILE,
+    GITIGNORE_FILE,
+    GITIGNORE_TEXT,
+    LOCK_FILE,
+    artifact_name,
+    pm_root,
+)
+from aipm.state.yamlio import MAX_YAML_BYTES, dump_yaml, load_yaml
+
+MAX_EVENTS_BYTES = 16 * 1_048_576
+_HOLDER = re.compile(r"(\d{1,10}) (\S{1,40})")
+
+_MODELS: Mapping[ArtifactKind, type[YamlArtifact] | type[MarkdownArtifact[Any]]] = {
+    ArtifactKind.REQUIREMENTS: RequirementsDoc,
+    ArtifactKind.PRD: PrdDoc,
+    ArtifactKind.ARCHITECTURE: ArchitectureDoc,
+    ArtifactKind.THREAT_MODEL: ThreatModelDoc,
+    ArtifactKind.TASKS: TasksDoc,
+    ArtifactKind.APPROVALS: ApprovalsDoc,
+    ArtifactKind.REPO_MAP: RepoMapDoc,
+}
 
 
 class StateStore(Protocol):
@@ -36,6 +96,344 @@ class StateStore(Protocol):
         ...
 
 
-def open_store(repo_root: Path) -> StateStore:
-    """Return the store for `<repo_root>/.pm`."""
-    raise NotImplementedError("v0.1: build prompt 02")
+def normalized_sha256(data: bytes) -> str:
+    """sha256 of the normalized bytes: LF line endings, trailing whitespace stripped (§6.2)."""
+    text = data.decode("utf-8", errors="surrogateescape").replace("\r\n", "\n").replace("\r", "\n")
+    lines = [line.rstrip(" \t") for line in text.split("\n")]
+    normalized = "\n".join(lines).rstrip("\n") + "\n"
+    return hashlib.sha256(normalized.encode("utf-8", errors="surrogateescape")).hexdigest()
+
+
+def _check_version(raw: Mapping[str, object], source: str) -> None:
+    version = raw.get("schema_version")
+    if isinstance(version, int) and not isinstance(version, bool) and version > SCHEMA_VERSION:
+        raise SchemaError(
+            f"{source} has schema_version {version}; this aipm reads up to {SCHEMA_VERSION}",
+            hint="Upgrade aipm to read this file.",
+        )
+
+
+def _line_of(text: str, loc: tuple[int | str, ...]) -> int | None:
+    """Best-effort 1-based line of a validation error, from a round-trip parse."""
+    try:
+        parser: Any = YAML(typ="rt", pure=True)
+        node: Any = parser.load(text)
+        line: int | None = None
+        for key in loc:
+            line = node.lc.key(key)[0] if isinstance(key, str) else node.lc.item(key)[0]
+            node = node[key]
+    except Exception:  # only a hint for the error message
+        return None
+    return None if line is None else line + 1
+
+
+def _describe(exc: ValidationError, source: str, text: str, *, offset: int) -> str:
+    parts: list[str] = []
+    for error in exc.errors()[:5]:
+        loc = tuple(error["loc"])
+        field = ".".join(str(part) for part in loc) or "(document)"
+        line = _line_of(text, loc[1:] if offset else loc)
+        where = f" (line {line + offset})" if line is not None else ""
+        parts.append(f"{field}{where}: {error['msg']}")
+    more = len(exc.errors()) - len(parts)
+    suffix = f"; and {more} more" if more > 0 else ""
+    return f"{source} is not valid: " + "; ".join(parts) + suffix
+
+
+class FileStateStore:
+    """`StateStore` over the files in `<repo>/.pm`."""
+
+    def __init__(self, repo_root: Path, *, redactor: Redactor | None = None) -> None:
+        self.repo_root = Path(os.path.realpath(repo_root))
+        self.root = pm_root(self.repo_root)
+        self.redactor = redactor if redactor is not None else process_redactor()
+
+    # ------------------------------------------------------------ directory and file safety
+
+    def _check_root(self, *, create: bool) -> None:
+        try:
+            info = os.lstat(self.root)
+        except FileNotFoundError:
+            if not create:
+                raise UsageError(
+                    f"{self.root} does not exist", hint="Run `aipm init` first."
+                ) from None
+            self.root.mkdir(mode=0o755)
+            info = os.lstat(self.root)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise PolicyViolation(f"{self.root} must be a real directory, not a link or a file")
+
+    def _read(self, name: str, *, limit: int) -> bytes | None:
+        """Read a `.pm/` file without following links; None if it does not exist."""
+        self._check_root(create=False)
+        try:
+            # O_NONBLOCK: a FIFO planted in place of a file cannot hang the read.
+            fd = os.open(self.root / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise PolicyViolation(f".pm/{name} cannot be read safely ({exc.strerror})") from None
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            raise PolicyViolation(f".pm/{name} is not a regular file")
+        with os.fdopen(fd, "rb") as handle:
+            data = handle.read(limit + 1)
+        if len(data) > limit:
+            raise SchemaError(f".pm/{name} is larger than {limit} bytes")
+        return data
+
+    def _atomic_write(self, name: str, data: bytes) -> None:
+        self._check_root(create=True)
+        target = self.root / name
+        if target.is_symlink():
+            raise PolicyViolation(f".pm/{name} is a symlink; refusing to write through it")
+        tmp = self.root / f"{name}.tmp-{os.getpid()}-{secrets.token_hex(4)}"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            tmp.replace(target)
+        except BaseException:
+            with suppress(FileNotFoundError):
+                tmp.unlink()
+            raise
+        dir_fd = os.open(self.root, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
+    # ------------------------------------------------------------ cleaning
+
+    def _clean_text(self, text: str, source: str, signals: list[int]) -> str:
+        result = sanitize_text(text, source=source)
+        signals.append(result.invisible_removed)
+        return self.redactor.redact(result.text)
+
+    def _clean(self, value: object, source: str, signals: list[int]) -> object:
+        if isinstance(value, str):
+            return self._clean_text(value, source, signals)
+        if isinstance(value, Mapping):
+            items: Mapping[object, object] = value  # pyright: ignore[reportUnknownVariableType]
+            return {
+                self._clean(key, source, signals): self._clean(item, source, signals)
+                for key, item in items.items()
+            }
+        if isinstance(value, list):
+            seq: list[object] = value  # pyright: ignore[reportUnknownVariableType]
+            return [self._clean(item, source, signals) for item in seq]
+        return value
+
+    def _refuse_secrets(self, text: str, source: str) -> None:
+        if self.redactor.contains_secret(text):
+            raise PolicyViolation(
+                f"refusing to write {source}: it still contains a secret after redaction",
+                hint="Remove the secret from the input and try again.",
+            )
+
+    # ------------------------------------------------------------ parsing
+
+    def _parse(
+        self,
+        model: type[YamlArtifact] | type[MarkdownArtifact[Any]],
+        text: str,
+        source: str,
+    ) -> Artifact:
+        offset = 0
+        if issubclass(model, MarkdownArtifact):
+            meta, body = frontmatter.parse(text, source=source)
+            _check_version(meta, source)
+            document: Mapping[object, object] = {"meta": meta, "body": body}
+            yaml_text = text.replace("\r\n", "\n").split("\n---\n", 1)[0].removeprefix("---\n")
+            offset = 1
+        else:
+            raw = load_yaml(text, source=source)
+            if not isinstance(raw, dict):
+                raise SchemaError(f"{source} must be a YAML mapping")
+            mapping: dict[object, object] = raw  # pyright: ignore[reportUnknownVariableType]
+            document = mapping
+            _check_version({str(k): v for k, v in mapping.items()}, source)
+            yaml_text = text
+        try:
+            return model.model_validate(document)
+        except ValidationError as exc:
+            raise SchemaError(
+                _describe(exc, source, yaml_text, offset=offset),
+                hint=f"Fix the field in {source}, or regenerate the file with aipm.",
+            ) from None
+
+    # ------------------------------------------------------------ the StateStore protocol
+
+    def load(self, kind: ArtifactKind) -> Artifact:
+        """Load and validate an artifact; a newer schema_version exits 2."""
+        model = _MODELS.get(kind)
+        if model is None:
+            raise UsageError(f"the store does not load {kind.value} files")
+        name = artifact_name(kind)
+        data = self._read(name, limit=MAX_YAML_BYTES)
+        if data is None:
+            raise UsageError(f".pm/{name} does not exist")
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise SchemaError(f".pm/{name} is not valid UTF-8 (byte {exc.start})") from None
+        return self._parse(model, text, f".pm/{name}")
+
+    def save(self, artifact: Artifact) -> str:
+        """Sanitize, redact and write atomically; return the sha256 of the written bytes."""
+        name = artifact_name(artifact.artifact_kind)
+        source = f".pm/{name}"
+        signals: list[int] = []
+        if isinstance(artifact, MarkdownArtifact):
+            meta = self._clean(artifact.front_matter(), source, signals)
+            body = self._clean_text(artifact.body, source, signals)
+            text = frontmatter.dump(meta, body)  # type: ignore[arg-type]
+        else:
+            text = dump_yaml(self._clean(artifact.to_document(), source, signals))
+        self._refuse_secrets(text, source)
+        self._parse(type(artifact), text, source)
+        data = text.encode("utf-8")
+        self._atomic_write(name, data)
+        if removed := sum(signals):
+            self.append_event(
+                SecurityEventKind.INJECTION_SIGNAL,
+                source=source,
+                detail=f"{removed} invisible characters removed before writing",
+            )
+        return normalized_sha256(data)
+
+    def exists(self, kind: ArtifactKind) -> bool:
+        """Return whether the artifact exists."""
+        return os.path.lexists(self.root / artifact_name(kind))
+
+    def sha256(self, kind: ArtifactKind) -> str | None:
+        """Return the normalized hash, or None if missing."""
+        if not os.path.lexists(self.root):
+            return None
+        data = self._read(artifact_name(kind), limit=MAX_YAML_BYTES)
+        return None if data is None else normalized_sha256(data)
+
+    @contextmanager
+    def _locked(self) -> Generator[None]:
+        self._check_root(create=True)
+        path = self.root / LOCK_FILE
+        if path.is_symlink():
+            raise PolicyViolation(f"{path} is a symlink; refusing to lock through it")
+        lock = FileLock(
+            path,
+            timeout=0,
+            mode=0o600,
+            thread_local=False,
+            fallback_to_soft=False,
+            preserve_lock_file=True,
+            on_acquired=_record_holder,
+        )
+        try:
+            lock.acquire()
+        except Timeout:
+            raise LockHeld(
+                f"another aipm process holds the .pm/ lock ({_holder(path)})",
+                hint="Wait for it to finish. A crashed process releases the lock by itself.",
+            ) from None
+        try:
+            yield
+        finally:
+            lock.release()
+
+    def lock(self) -> AbstractContextManager[None]:
+        """Hold the `.pm/` lock; raises `LockHeld` (exit 7) if another process has it."""
+        return self._locked()
+
+    # ------------------------------------------------------------ other .pm/ files
+
+    def write_gitignore(self) -> None:
+        """Write `.pm/.gitignore` (runs, cache, events and the lock stay local)."""
+        self._atomic_write(GITIGNORE_FILE, GITIGNORE_TEXT.encode("utf-8"))
+
+    def write_text(self, name: str, text: str) -> str:
+        """Write a generated, schema-less `.pm/` file (sanitized, redacted, atomic)."""
+        if "/" in name or name.startswith(".") or not name:
+            raise UsageError(f"not a plain .pm/ file name: {name!r}")
+        source = f".pm/{name}"
+        cleaned = self._clean_text(text, source, [])
+        self._refuse_secrets(cleaned, source)
+        data = cleaned.encode("utf-8")
+        self._atomic_write(name, data)
+        return normalized_sha256(data)
+
+    def append_event(
+        self,
+        kind: SecurityEventKind,
+        *,
+        source: str = "",
+        detail: str = "",
+        data: Mapping[str, JsonValue] | None = None,
+        ack_of: str | None = None,
+    ) -> SecurityEvent:
+        """Append a security event with a fresh random ID to `.pm/events.jsonl`."""
+        signals: list[int] = []
+        draft = SecurityEvent(
+            id=f"EV-{secrets.token_hex(6)}",
+            ts=datetime.now(UTC),
+            kind=kind,
+            source=source[:200],
+            detail=detail[:1000],
+            ack_of=ack_of,
+            data=dict(data or {}),
+        )
+        event = SecurityEvent.model_validate(
+            self._clean(draft.model_dump(mode="json"), EVENTS_FILE, signals)
+        )
+        line = json.dumps(event.model_dump(mode="json"), ensure_ascii=True, separators=(",", ":"))
+        self._refuse_secrets(line, EVENTS_FILE)
+        self._check_root(create=True)
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
+        try:
+            fd = os.open(self.root / EVENTS_FILE, flags, 0o600)
+        except OSError as exc:
+            message = f".pm/{EVENTS_FILE} cannot be appended safely ({exc.strerror})"
+            raise PolicyViolation(message) from None
+        try:
+            os.write(fd, (line + "\n").encode("ascii"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        return event
+
+    def read_events(self) -> list[SecurityEvent]:
+        """Return the valid events in `.pm/events.jsonl`; malformed lines are skipped."""
+        if not os.path.lexists(self.root):
+            return []
+        data = self._read(EVENTS_FILE, limit=MAX_EVENTS_BYTES)
+        events: list[SecurityEvent] = []
+        for line in (data or b"").decode("utf-8", errors="replace").splitlines():
+            with suppress(ValidationError, ValueError):
+                events.append(SecurityEvent.model_validate_json(line))
+        return events
+
+
+def _record_holder(fd: int) -> None:
+    os.ftruncate(fd, 0)
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.write(fd, f"{os.getpid()} {datetime.now(UTC).strftime('%Y-%m-%dT%H:%M:%SZ')}\n".encode())
+
+
+def _holder(path: Path) -> str:
+    """Describe the lock holder from the lock file, which is untrusted: only digits and a time."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as handle:
+            raw = handle.read(64).decode("ascii", errors="replace").strip()
+    except OSError:
+        raw = ""
+    match = _HOLDER.fullmatch(raw)
+    if match is None:
+        return "holder unknown"
+    return f"PID {match.group(1)}, since {match.group(2)}"
+
+
+def open_store(repo_root: Path, *, redactor: Redactor | None = None) -> FileStateStore:
+    """Return the store for `<repo_root>/.pm`, with a redactor built from the full environment."""
+    return FileStateStore(repo_root, redactor=redactor)
