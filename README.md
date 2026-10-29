@@ -7,7 +7,7 @@
 
 **An AI product manager for your terminal.** aipm interviews you for requirements, designs the architecture, splits the work into tasks, and writes prompts and `AGENTS.md` for Claude Code, Codex, Copilot and Gemini CLI. It then verifies every task with tests and security gates.
 
-> **Status: pre-alpha.** The commands are being built, step by step, from the prompts in [`docs/prompts/`](docs/prompts/README.md). `aipm init`, `aipm doctor`, `aipm trust`, `aipm discover` and `aipm approve prd` work today. Every other command is registered, and until its build step lands it exits with code 2 and says which step or milestone brings it.
+> **Status: pre-alpha.** The commands are being built, step by step, from the prompts in [`docs/prompts/`](docs/prompts/README.md). `aipm`, `aipm init`, `aipm doctor`, `aipm trust`, `aipm discover`, `aipm design`, `aipm plan`, `aipm status` and `aipm approve prd|design|plan` work today. Every other command is registered, and until its build step lands it exits with code 2 and says which step or milestone brings it.
 
 ## Install
 
@@ -84,6 +84,18 @@ answers:
 ```
 
 A dimension key answers that dimension's text and choice questions; a yes/no question is answered only by its ID, so a file never says "yes" to a question it has not seen. `--from` and `--answers` files must be inside the repository, and aipm refuses files it never reads for model context: anything in `.gitignore` or `.aipmignore`, and secret-looking names such as `.env*`, `*.key`, `*.pem`, `id_*`, `*secret*`, `*credentials*` and `.netrc`. If a model reports instructions hidden in its input (`injection_suspected`), aipm shows them and asks before it continues; a non-interactive run exits 4 unless you pass `--accept-risk`.
+
+### Design and plan: `design`, `plan`, `approve design|plan` and `status`
+
+`aipm design` turns the approved PRD into `.pm/architecture.md`, one `.pm/adr/NNNN-<slug>.md` per decision and `.pm/threat-model.md`, then shows G2: the stack, the components, the ADR titles and every threat of severity medium or higher. The architect may only pick a built-in stack template, and an LLM app's threat model must cover all ten OWASP Top 10 for LLM Applications items; a reply that breaks a rule gets one repair attempt, and nothing is written from one that fails twice. For a greenfield project, approving G2 copies the chosen template's prepare step, gates and allowed commands into `.pm/config.yaml`; that changes the commands aipm may run, so trust is needed again. A current design is not regenerated without `--regenerate`, and a stale one (the PRD changed) asks for it.
+
+`aipm plan` asks the planner for a task graph, then checks it with a deterministic validator: task IDs and dependencies (no cycles), safe owned and read paths (never `.pm/`, `.github/` or another protected path), gate names from the menu only, `unit` and `ac_trace` on feature, security and refactor tasks, every must feature and every threat of medium or higher traced, at most 40 owned paths and 10 acceptance criteria per task (an L task with more than 6 must be split), and valid package names in `deps_add`. Tasks that could change the same files at the same time are merged when small enough, or ordered otherwise, and every change is listed. A plan that still breaks a rule after one repair attempt is not written: a policy problem (an unknown gate, an unsafe path, a bad package name) exits 6, anything else exits 1. `--max-tasks N` lowers the cap of 200.
+
+It writes `.pm/tasks.yaml` and a readable `.pm/worksheet.md`, then shows G3: the task table, the DAG depth and parallel width, the full command line of the prepare step and every gate (from your config, never from the plan), every new dependency, and the tasks that own test or test-config files. Approving G3 in a terminal also trusts those exact commands. `aipm approve design` and `aipm approve plan` approve without running a model; `--yes` records the approval but never trust, and prints the `aipm trust --confirm` command to run instead.
+
+Every command checks that its input is approved and current. When the PRD or the design changed after it was approved, `design` and `plan` exit 2 and say what to run first; `--accept-stale` runs anyway and records that in `.pm/approvals.yaml`. Every `.pm/` file a model reads is wrapped as untrusted text with a label such as `approved:prd`, whether it is approved or not.
+
+`aipm` on its own prints the phase (for example `design_approved`), anything stale with its downstream impact, and the next command; in a terminal it offers to run it. `aipm status` shows task counts and a progress bar, blocked tasks with their reasons and questions, unacknowledged security events, the features and threats no done task covers yet, and the budget. `--all` lists every task, `--task T-007` shows one in full, and `--ack EVENT-ID` acknowledges a security event recorded on this machine. It never calls a model.
 
 ### Models and providers
 
