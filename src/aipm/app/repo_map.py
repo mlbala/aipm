@@ -110,11 +110,16 @@ def _children(directory: Path) -> Iterator[os.DirEntry[str]]:
     return iter(entries)
 
 
-def scan_repo(root: Path, *, max_input_bytes: int) -> RepoScan:
-    """Walk the repository and summarize it."""
-    spec = GitIgnoreSpec.from_lines(
+def ignore_spec(root: Path) -> GitIgnoreSpec:
+    """Files never read for LLM context: `.gitignore`, `.aipmignore` and the §7.1 deny list."""
+    return GitIgnoreSpec.from_lines(
         [*_read_ignore(root / ".gitignore"), *_read_ignore(root / ".aipmignore"), *DENY_PATTERNS]
     )
+
+
+def scan_repo(root: Path, *, max_input_bytes: int) -> RepoScan:
+    """Walk the repository and summarize it."""
+    spec = ignore_spec(root)
     entries: list[str] = []
     skipped = 0
     truncated = False

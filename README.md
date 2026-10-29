@@ -7,7 +7,7 @@
 
 **An AI product manager for your terminal.** aipm interviews you for requirements, designs the architecture, splits the work into tasks, and writes prompts and `AGENTS.md` for Claude Code, Codex, Copilot and Gemini CLI. It then verifies every task with tests and security gates.
 
-> **Status: pre-alpha.** The commands are being built, step by step, from the prompts in [`docs/prompts/`](docs/prompts/README.md). `aipm init`, `aipm doctor` and `aipm trust` work today. Every other command is registered, and until its build step lands it exits with code 2 and says which step or milestone brings it.
+> **Status: pre-alpha.** The commands are being built, step by step, from the prompts in [`docs/prompts/`](docs/prompts/README.md). `aipm init`, `aipm doctor`, `aipm trust`, `aipm discover` and `aipm approve prd` work today. Every other command is registered, and until its build step lands it exits with code 2 and says which step or milestone brings it.
 
 ## Install
 
@@ -62,6 +62,47 @@ Every command accepts `--json`, which prints exactly one result object to stdout
 `aipm trust` records your approval of that exact surface, for you and this machine only, in your user state directory. It asks interactively, or takes `--confirm` with the first 12 characters of the surface hash, so a script has to name the surface it trusts. `--yes` never grants trust. Any change to a gate, the prepare step, a dispatch flag, a security setting or the resolved path of an executable changes the hash and needs trust again. `aipm trust --show` prints the surface without recording anything, and `--revoke` removes your trust.
 
 `aipm doctor` lists the versions of git, uv, the coding agents and the scanners (missing tools are listed, not errors), whether your API key variables are set (never their values), whether the `.pm/` files are valid, and the lock and trust status.
+
+### Requirements: `discover` and `approve prd`
+
+`aipm discover` interviews you a few questions at a time, aimed at whatever the coverage checklist (problem, users, features, data, integrations, scale, security, deployment, constraints, success metrics) still lacks. Start from a file with `--from idea.md`, or describe the project in one paragraph. Answers the model finds in the file are shown for you to confirm; unconfirmed ones do not count. Each question takes Enter for its default, and offers "use defaults for the rest of this round" and "I'm done". Accepted defaults become written assumptions. The coverage score is computed by aipm, not by the model, and a topic cannot score above 0.5 until you (not a default, not the file alone) have answered it. The interview stops at `discover.coverage_threshold` (0.85), after `discover.max_rounds` (6), or when you are done; `--threshold` and `--max-rounds` override them for one run.
+
+It writes `.pm/requirements.yaml` (the source of truth), a readable `.pm/requirements.md` and `.pm/prd.md`, then shows the PRD for approval (G1). Run `aipm discover` again to answer open questions and confirm assumptions, or `aipm discover --edit Q-004` to change one answer; the PRD is rewritten and needs approval again. `aipm approve prd` approves the current PRD (with `--yes`, without the review prompt); it refuses a PRD written from older requirements, or while a blocking question is open. Approvals are a record in `.pm/approvals.yaml`; they never grant trust.
+
+Without a terminal (`--non-interactive`, `--json`, or piped stdin), answers come from `--answers FILE` and `--defaults`. Anything still unanswered saves your progress and exits 4, printing the pending questions as JSON, so a script can answer them and run again:
+
+```yaml
+# answers.yaml: keys are question IDs, assumption IDs or checklist dimensions
+schema_version: 1
+description: "A booking app for a small clinic, with WhatsApp reminders."   # when there is no --from
+confirm_extracted: true          # confirm every answer found in the --from file, unreviewed
+answers:
+  Q-004: "India only, no payments yet"
+  integrations: "none"
+  security_compliance: [GDPR, EU data residency]
+  A-002: true                    # confirm an assumption (or give text to replace it)
+```
+
+A dimension key answers that dimension's text and choice questions; a yes/no question is answered only by its ID, so a file never says "yes" to a question it has not seen. `--from` and `--answers` files must be inside the repository, and aipm refuses files it never reads for model context: anything in `.gitignore` or `.aipmignore`, and secret-looking names such as `.env*`, `*.key`, `*.pem`, `id_*`, `*secret*`, `*credentials*` and `.netrc`. If a model reports instructions hidden in its input (`injection_suspected`), aipm shows them and asks before it continues; a non-interactive run exits 4 unless you pass `--accept-risk`.
+
+### Models and providers
+
+aipm talks to a model through one gateway, with the official `anthropic` SDK or any OpenAI-compatible server (OpenAI, Azure OpenAI, OpenRouter, Ollama, vLLM, LM Studio). It asks for JSON that matches a strict schema, validates every reply, and gives a model one chance to repair an invalid reply; nothing is written from a reply that fails twice. It never sends `temperature`, `top_p` or `top_k`. Set the provider in your user config:
+
+```yaml
+# Anthropic (the default): the key is read from ANTHROPIC_API_KEY
+llm:
+  models: {default: claude-sonnet-5-5, interviewer: claude-haiku-5-5}
+
+# A local Ollama server: no key needed on localhost
+llm:
+  provider: openai-compatible
+  base_url: http://localhost:11434/v1
+  api_key_env: OLLAMA_API_KEY
+  models: {default: llama3.3}
+```
+
+`budget.run_tokens` caps the tokens one command may spend (exit 5 when reached); token usage is shown after each run, and cost too when you set prices in `llm.pricing`.
 
 ### Configuration
 

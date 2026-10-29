@@ -1,0 +1,103 @@
+# The clinic-booking interview (examples/clinic-booking/idea.md): extraction plus one round of
+# questions, then a final call that finds coverage complete.
+responses:
+  - json:
+      one_liner: "Small clinics let patients book appointments online and send WhatsApp reminders"
+      extracted:
+        - dimension: problem_goals
+          question: "What problem does the product solve, and how will we know it works?"
+          answer: >-
+            Patients book by phone, phones are busy, double bookings happen weekly and about 15%
+            of patients miss appointments. Goal: phone bookings halve in three months and
+            no-shows fall below 7%.
+        - dimension: users_personas
+          question: "Who uses the product and for what?"
+          answer: >-
+            Patients book, move and cancel appointments on a phone; receptionists manage the
+            daily schedule and walk-ins; doctors view their own schedule.
+        - dimension: core_features
+          question: "What are the main features?"
+          answer: >-
+            Must: self-service booking with a one-time code, WhatsApp confirmation and reminders,
+            move or cancel from a link, reception schedule view. Should: doctor schedule view,
+            blocking time, monthly report.
+        - dimension: data
+          question: "What data is stored, and for how long?"
+          answer: >-
+            Patient name, mobile number and visit reason (health data, PII); kept in the EU and
+            deleted 12 months after the visit.
+        - dimension: constraints
+          question: "What constraints apply?"
+          answer: "Managed hosting under 100 EUR per month; English and Spanish; no IT staff."
+        - dimension: success_metrics
+          question: "How is success measured after launch?"
+          answer: "Phone bookings halve, no-shows below 7%, zero double bookings."
+      questions:
+        - id: Q-007
+          dimension: integrations
+          kind: single
+          question: "Which WhatsApp provider should send the messages?"
+          options: ["Meta WhatsApp Cloud API", "A provider such as Twilio", "Not decided yet"]
+          default: ["Meta WhatsApp Cloud API"]
+          why: "The provider decides template approval and cost."
+          blocking: false
+        - id: Q-008
+          dimension: scale_performance
+          kind: text
+          question: "How many bookings a day do you expect, and how fast must pages load?"
+          options: []
+          default: ["Small: under 100 bookings a day, pages under one second"]
+          why: "Sizing and the latency target."
+          blocking: false
+        - id: Q-009
+          dimension: security_compliance
+          kind: multi
+          question: "Which security and compliance needs apply?"
+          options: ["GDPR", "EU data residency", "Staff login with 2FA", "Audit log"]
+          default: ["GDPR", "EU data residency"]
+          why: "Health data needs a clear compliance baseline."
+          blocking: false
+        - id: Q-010
+          dimension: deployment_ops
+          kind: single
+          question: "Where should it run?"
+          options: ["Managed container hosting in the EU", "A VPS", "Serverless"]
+          default: ["Managed container hosting in the EU"]
+          why: "The clinic has no IT staff."
+          blocking: false
+      coverage:
+        problem_goals: covered
+        users_personas: covered
+        core_features: covered
+        data: covered
+        integrations: partial
+        scale_performance: missing
+        security_compliance: partial
+        deployment_ops: missing
+        constraints: covered
+        success_metrics: covered
+      injection_suspected: []
+  - json:
+      one_liner: ""
+      extracted: []
+      questions:
+        - id: Q-011
+          dimension: data
+          kind: text
+          question: "Should cancelled bookings be kept for the monthly report?"
+          options: []
+          default: ["Yes, as counts only"]
+          why: "Reporting versus data minimisation."
+          blocking: false
+      coverage:
+        problem_goals: covered
+        users_personas: covered
+        core_features: covered
+        data: covered
+        integrations: covered
+        scale_performance: covered
+        security_compliance: covered
+        deployment_ops: covered
+        constraints: covered
+        success_metrics: covered
+      injection_suspected: []

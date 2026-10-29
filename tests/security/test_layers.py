@@ -59,6 +59,9 @@ def test_contracts_hold_on_the_package() -> None:
         ("scanners", "import urllib.request\n", "Only aipm.llm and aipm.scanners.registry"),
         ("app", "import http.client\n", "Only aipm.llm and aipm.scanners.registry"),
         ("gates", "import ssl\n", "Only aipm.llm and aipm.scanners.registry"),
+        # The LLM SDKs moved to httpx2 (build prompt 03).
+        ("app", "import httpx2\n", "Only aipm.llm and aipm.scanners.registry"),
+        ("domain", "import httpx2\n", "L0 is pure"),
     ],
 )
 def test_violation_is_caught(tmp_path: Path, package: str, source: str, contract: str) -> None:

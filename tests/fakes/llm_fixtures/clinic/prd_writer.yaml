@@ -1,0 +1,50 @@
+# The PRD for the clinic-booking requirements.
+responses:
+  - json:
+      problem: >-
+        Sunrise Family Clinic books appointments by phone. Phones are busy in the morning, double
+        bookings happen about once a week, and about 15% of patients miss their appointment.
+      users: |-
+        - Patients, who book, move and cancel appointments on a phone.
+        - Receptionists, who run the daily schedule and book walk-ins.
+        - Doctors, who read their own schedule.
+      goals_and_metrics: |-
+        - Phone bookings fall by half within three months.
+        - No-shows fall below 7%.
+        - Zero double bookings.
+      scope: >-
+        A web app for self-service booking with WhatsApp confirmations and reminders, and
+        schedule views for reception and doctors, in English and Spanish.
+      out_of_scope: |-
+        - Payments and insurance.
+        - Medical records, prescriptions or test results.
+        - Video consultations and multiple locations.
+      features:
+        - id: F-001
+          title: "Book an appointment with a one-time code"
+          priority: must
+          description: "Free slots per doctor for four weeks; name, mobile number and reason."
+        - id: F-002
+          title: "WhatsApp confirmation and reminders"
+          priority: must
+          description: "Confirmation at once, reminders 24 h and 2 h before; reply C or X."
+        - id: F-003
+          title: "Move or cancel from a link"
+          priority: must
+          description: "Allowed up to 4 hours before the appointment."
+        - id: F-004
+          title: "Reception schedule view"
+          priority: must
+          description: "Day view per doctor; arrived and no-show; walk-in bookings."
+        - id: F-005
+          title: "Monthly report"
+          priority: should
+          description: "Bookings, cancellations and no-shows per doctor."
+      non_functional:
+        - id: NFR-01
+          category: privacy
+          statement: "Patient data stays in the EU and is deleted 12 months after the visit."
+        - id: NFR-02
+          category: performance
+          statement: "Pages load in under one second at 100 bookings a day."
+      injection_suspected: []

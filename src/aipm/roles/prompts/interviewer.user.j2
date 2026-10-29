@@ -1,0 +1,34 @@
+Project: {{ project }}
+Round: {{ round }}
+
+## Coverage checklist
+
+Scores are computed by aipm (0 = missing, 0.5 = partial, 0.75 = assumed, 1 = covered). Weights add up to 100.
+
+{% for d in dimensions -%}
+- `{{ d.name }}` (weight {{ d.weight }}, score {{ d.score }}): {{ d.needs }}
+{% endfor %}
+## Requirements gathered so far
+
+{{ requirements | untrusted }}
+{% if idea is not none %}
+## The user's idea file
+
+{{ idea | untrusted }}
+{% endif %}
+{%- if repo_map is not none %}
+## The existing repository
+
+{{ repo_map | untrusted }}
+{% endif %}
+## Task
+
+{% if extract -%}
+1. Extract into `extracted` every answer the idea file already gives.
+2. Propose at most {{ questions_per_round }} questions for what is still missing or unclear.
+{%- else -%}
+1. Leave `extracted` empty.
+2. Propose at most {{ questions_per_round }} questions for the lowest-scoring dimensions.
+{%- endif %}
+   Number new questions from {{ next_question_id }} upward.
+3. Rate every dimension in `coverage`.

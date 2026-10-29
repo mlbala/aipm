@@ -28,9 +28,17 @@ type NonceFactory = Callable[[], str]
 
 _TAG = re.compile(r"<(?=\s*/?\s*untrusted)", re.IGNORECASE)
 _NONCE = re.compile(r"u[0-9a-f]{8}")
-_TEMPLATE_NAME = re.compile(r"[A-Za-z0-9_\-]+(?:/[A-Za-z0-9_\-]+)*\.j2")
+# Components of letters, digits, `_` and `-`, with single dots inside a name
+# (`interviewer.system.j2`), so `.` and `..` can never be a component.
+_NAME_PART = r"[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)*"
+_TEMPLATE_NAME = re.compile(rf"(?:[A-Za-z0-9_\-]+/)*{_NAME_PART}\.j2")
 _SOURCE_MAX = 200
 _MAX_DEPTH = 8
+# The exact tags `untrusted_filter` writes. Content can never contain one: the filter turns
+# every `<` before `untrusted` or `/untrusted` into `&lt;`.
+_BLOCK_TAG = re.compile(
+    r'(<untrusted source="[^"\n]{0,200}" id="(u[0-9a-f]{8})">|</untrusted id="(u[0-9a-f]{8})">)'
+)
 
 
 class UntrustedRenderError(AipmError):
@@ -88,6 +96,52 @@ def untrusted_filter(value: object, *, nonce: NonceFactory = _new_nonce) -> str:
     body = _TAG.sub("&lt;", sanitize_text(value.text, source=value.source).text)
     source = _attribute(value.source)
     return f'<untrusted source="{source}" id="{block_id}">\n{body}\n</untrusted id="{block_id}">'
+
+
+def check_blocks(text: str) -> int:
+    """Check that rendered text holds well-formed blocks; return how many.
+
+    Every block must open and close with the same nonce, and blocks must not nest or overlap.
+    Raises `UntrustedRenderError` otherwise.
+    """
+    open_id: str | None = None
+    count = 0
+    for match in _BLOCK_TAG.finditer(text):
+        opening, closing = match.group(2), match.group(3)
+        if opening is not None:
+            if open_id is not None:
+                raise UntrustedRenderError("an untrusted block opens inside another block")
+            open_id = opening
+        else:
+            if closing != open_id:
+                raise UntrustedRenderError("an untrusted block closes with the wrong id")
+            open_id = None
+            count += 1
+    if open_id is not None:
+        raise UntrustedRenderError("an untrusted block is never closed")
+    return count
+
+
+def map_between_tags(text: str, transform: Callable[[str], str]) -> str:
+    """Apply `transform` to every run of text between block tags, never to a tag or across one.
+
+    The gateway redacts a rendered prompt this way, so a redaction pattern can neither remove a
+    block's closing tag nor swallow aipm's own text after a block (SECURITY.md §7.2, §8). The
+    block structure is checked before and after; a change in it raises `UntrustedRenderError`.
+    """
+    blocks = check_blocks(text)
+    parts = _BLOCK_TAG.split(text)
+    # split() yields: text, tag, opening id, closing id, text, tag, ...; tags and ids repeat
+    # every fourth item, starting at index 1.
+    out: list[str] = []
+    for index in range(0, len(parts), 4):
+        out.append(transform(parts[index]))
+        if index + 1 < len(parts):
+            out.append(parts[index + 1])
+    result = "".join(out)
+    if check_blocks(result) != blocks:
+        raise UntrustedRenderError("transforming the text changed its untrusted blocks")
+    return result
 
 
 def _check_no_untrusted(value: object, depth: int = 0) -> None:

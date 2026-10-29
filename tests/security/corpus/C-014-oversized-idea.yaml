@@ -1,0 +1,11 @@
+id: C-014
+vector: structural
+input:
+  surface: idea.md
+  # The test repeats this text until the file is larger than security.max_input_kib.
+  text: "Book appointments online. "
+expected:
+  outcome: >-
+    An idea file larger than security.max_input_kib (256 KiB by default) is rejected before any
+    prompt is rendered: exit 2, no LLM call, nothing written (SECURITY.md §7.1).
+  exit_code: 2

@@ -1,0 +1,8 @@
+# Answers for the clinic-booking interview, keyed by dimension (aipm discover --answers).
+schema_version: 1
+confirm_extracted: true
+answers:
+  integrations: "Meta WhatsApp Cloud API; no other external systems"
+  scale_performance: "Small: under 100 bookings a day, pages under one second"
+  security_compliance: [GDPR, EU data residency, Staff login with 2FA]
+  deployment_ops: "Managed container hosting in the EU, with staging and production"
