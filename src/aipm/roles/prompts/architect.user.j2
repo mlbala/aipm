@@ -1,0 +1,26 @@
+Project: {{ project }}
+Mode: {{ mode }}
+
+## Built-in stack templates
+
+{% for name in stacks -%}
+- `{{ name }}`
+{% endfor %}
+## The PRD
+
+{{ prd | untrusted }}
+{% if repo_map is not none %}
+## The existing repository
+
+{{ repo_map | untrusted }}
+{% endif %}
+## Task
+
+Design the architecture for this project from the PRD above. Pick `stack_template` from the built-in list only. Number components from C-01.
+{% if problems is not none %}
+## Problems with your previous reply
+
+aipm's checks rejected your previous reply for the reasons in the block below. Reply again with the same JSON shape and fix every one of them.
+
+{{ problems | untrusted }}
+{% endif %}

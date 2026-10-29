@@ -1,0 +1,29 @@
+Project: {{ project }}
+
+## Components
+
+{% for id in components -%}
+- `{{ id }}`
+{% endfor %}
+## The drafted architecture
+
+{{ architecture | untrusted }}
+
+## Task
+
+Model the threats to this architecture with STRIDE. Use only the component IDs listed above.
+{%- if is_llm_app %}
+The product is an LLM app: map threats to the OWASP Top 10 for LLM Applications, and cover every item at least once:
+{% for item in owasp -%}
+- `{{ item.id }}` {{ item.name }}
+{% endfor %}
+{%- else %}
+The product is not an LLM app: set `owasp_llm` to null for every threat.
+{% endif %}
+{% if problems is not none %}
+## Problems with your previous reply
+
+aipm's checks rejected your previous reply for the reasons in the block below. Reply again with the same JSON shape and fix every one of them.
+
+{{ problems | untrusted }}
+{% endif %}
