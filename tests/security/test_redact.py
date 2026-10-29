@@ -123,11 +123,11 @@ def test_token_prefixes_inside_words_are_left_alone() -> None:
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("api_key = 'abcdefgh1234'", "api_key = '«REDACTED:generic»'"),
-        ("API-KEY: abcdefgh1234", "API-KEY: «REDACTED:generic»"),
+        ("api_key = 'aaaabbbb1111'", "api_key = '«REDACTED:generic»'"),
+        ("API-KEY: aaaabbbb1111", "API-KEY: «REDACTED:generic»"),
         ("password=hunter2hunter2", "password=«REDACTED:generic»"),
         ("passwd: abcdefgh", "passwd: «REDACTED:generic»"),
-        ('secret = "abcdefgh1234"', 'secret = "«REDACTED:generic»"'),
+        ('secret = "aaaabbbb1111"', 'secret = "«REDACTED:generic»"'),
         ("token: short", "token: short"),
     ],
 )
