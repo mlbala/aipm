@@ -12,3 +12,4 @@ The security regression suite (SECURITY.md §14). Every security-relevant change
 - `test_context_files.py`: invariant I-3 over every generated context file (fuzzed), corpus C-022 to C-027 in every model-written field and in the PRD and architecture bodies, gate argv only from `compile_gate`, and no reads or writes through links.
 - `test_task_prompt.py`: protected paths only as "MUST NOT modify" rules, previous gate output only inside a well-formed untrusted block, secrets redacted in saved and printed prompts, safe `--out` and `--report` paths, and the size budget.
 - `test_git_head.py`: the base-commit git call is hardened and its environment constructed.
+- `test_step05_review.py`: the fixes from the step 05 security review (plain paths, I-3 after redaction, secrets in context files, quiet `--check` errors, unapproved labels, tools on PATH inside the repository) and the trust rules of `prompt`, `sync-context` and `approve context`.

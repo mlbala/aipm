@@ -38,9 +38,10 @@ def test_the_call_is_hardened_and_its_environment_constructed(
     argv = seen["argv"]
     assert isinstance(argv, list)
     assert Path(argv[0]).is_absolute()
-    assert argv[1:6] == ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
-                         "--no-pager"]  # fmt: skip
-    assert argv[6:] == ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]
+    # The full SECURITY.md §11 set, before the subcommand.
+    assert argv[1:10] == ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+                          "-c", "diff.external=", "-c", "core.pager=cat", "--no-pager"]  # fmt: skip
+    assert argv[10:] == ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]
     env = seen["env"]
     assert isinstance(env, dict)
     assert env["GIT_TERMINAL_PROMPT"] == "0"

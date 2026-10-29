@@ -7,18 +7,17 @@
   an unchanged project renders the same bytes and `sync-context --check` sees no drift. The block
   boundary never depended on the id being secret: `|untrusted` neutralizes every `untrusted` tag
   inside the content (SECURITY.md §7.2).
-- `agent_text_problems` is invariant I-3 as a runtime check (SECURITY.md §14.1).
+- `agent_text_problems` (invariant I-3 as a run-time check) lives in `aipm.security.agent_text`,
+  so the state store can apply it too; it is re-exported here.
 """
 
 import hashlib
 import re
 from collections.abc import Iterable
 
-from aipm.security.sanitize import has_mention, sanitize_for_context, sanitize_text
+from aipm.security.agent_text import agent_text_problems, outside_code
 
 _BACKTICKS = re.compile(r"`+")
-_FENCED = re.compile(r"^(`{3,})[^`\n]*\n.*?^\1[ \t]*$", re.MULTILINE | re.DOTALL)
-_SPAN = re.compile(r"(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)")
 
 
 def _longest_run(text: str) -> int:
@@ -60,27 +59,4 @@ def seed_of(parts: Iterable[str]) -> str:
     return digest.hexdigest()
 
 
-def outside_code(text: str) -> str:
-    """`text` without its fenced code blocks and code spans, where no import is read."""
-    return _SPAN.sub(" ", _FENCED.sub("", text))
-
-
-def agent_text_problems(
-    text: str, *, allowed_url_domains: Iterable[str], imports: Iterable[str] = ()
-) -> list[str]:
-    """What breaks invariant I-3 in `text`: URLs outside the allowlist, HTML comments, invisible
-    or control characters, and, outside code, `@` mentions other than the exact `imports`
-    lines."""
-    problems: list[str] = []
-    if "<!--" in text:
-        problems.append("an HTML comment")
-    removed = sanitize_text(text, source="check").removed
-    if removed:
-        problems.append("invisible or control characters: " + ", ".join(sorted(removed)))
-    if sanitize_for_context(text, allowed_url_domains=allowed_url_domains).removed["url"]:
-        problems.append("a URL outside context.allowed_url_domains")
-    allowed_lines = set(imports)
-    rest = "\n".join(line for line in text.split("\n") if line not in allowed_lines)
-    if has_mention(outside_code(rest)):
-        problems.append("an @ mention that Claude Code could read as a file import")
-    return problems
+__all__ = ["ContentNonces", "agent_text_problems", "code_span", "fence", "outside_code", "seed_of"]

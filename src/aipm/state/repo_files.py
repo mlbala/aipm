@@ -5,7 +5,8 @@ A cloned repository controls these paths, so nothing here follows a symbolic lin
 `AGENTS.md` that links to `~/.bashrc`, or a directory on the way that links elsewhere, is refused
 (exit 6), never read or written through. Only regular files are read, with a size cap. A write
 is atomic (temp file in the same directory, fsync, `os.replace`, directory fsync), keeps the
-file's permission bits, and is refused if the file changed since the caller read it.
+file's read and write permission bits (never execute bits), and is refused if the file changed
+since the caller read it.
 """
 
 import os
@@ -70,7 +71,8 @@ def write_repo_bytes(root: Path, relpath: str, data: bytes, *, expected: bytes |
             f"{relpath} changed while aipm was preparing it; nothing was written",
             hint="Run the command again.",
         )
-    mode = None if expected is None else stat.S_IMODE(os.lstat(target).st_mode)
+    # Keep the file's read and write bits, never execute or special bits.
+    mode = None if expected is None else stat.S_IMODE(os.lstat(target).st_mode) & 0o666
     tmp = parent / f".{name}{_TMP_MARK}{os.getpid()}-{secrets.token_hex(4)}"
     # A new file gets 0666 minus the umask, like any editor would create it.
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666)

@@ -66,8 +66,11 @@ def test_a_policy_violating_gate_fails_check_with_exit_6(repo: Path) -> None:
     config.write_text(hostile, encoding="utf-8")
     result = aipm(repo, "sync-context", "--check")
     assert result.exit_code == 6
-    assert "inline-code flag" in result.stderr
+    assert "gate 'lint' is not allowed by the command policy" in result.stderr
+    assert "ruff" not in result.output  # --check runs without trust: no argv in its output
     assert not (repo / "AGENTS.md").exists()
+    detailed = aipm(repo, "sync-context")
+    assert detailed.exit_code == 6
 
 
 def test_the_design_must_be_approved(tmp_repo: Path, fake_llm: Callable[[str], FakeLLM]) -> None:

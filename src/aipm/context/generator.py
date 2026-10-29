@@ -8,7 +8,8 @@ approved, structured facts in `ProjectContext`:
   outside `context.allowed_url_domains` removed, `@` mentions neutralized);
 - model-written text (the one-liner, feature titles, component names and responsibilities) is
   rendered only inside fenced `untrusted` blocks; IDs, stack names, globs and gate argv, which are
-  validated by pattern or by `compile_gate`, go in code spans;
+  validated by pattern or by `compile_gate`, go in code spans, and paths and globs must be
+  plain (letters, digits and `. _ / * ? + -`) or the command refuses (exit 6);
 - gate argv comes only from `compile_gate` output, which the caller produces only when the
   execution surface is trusted (SECURITY.md §6 rule 3); argv that sanitizing would change is
   refused rather than shown altered;
@@ -32,6 +33,7 @@ from aipm.context.markdown import (
 )
 from aipm.domain.errors import PolicyViolation, UsageError
 from aipm.domain.models import GateCommand, GeneratedFile, ProjectContext
+from aipm.security.agent_text import is_plain_path
 from aipm.security.sanitize import sanitize_for_context
 from aipm.security.untrusted import PackageTemplateLoader, Untrusted, make_env
 
@@ -100,6 +102,22 @@ def literal(value: str, allowed_url_domains: Iterable[str], *, what: str) -> str
         raise PolicyViolation(
             f"{what} holds text that context files never carry ({', '.join(sorted(removed))})",
             hint="Change it in .pm/config.yaml or the plan, then run aipm again.",
+        )
+    return value
+
+
+def path_literal(value: str, *, what: str) -> str:
+    """A path or glob for a code span: plain characters only, or refused (exit 6).
+
+    Globs from the plan and protected paths from the config can hold up to 512 characters;
+    allowing only `A-Z a-z 0-9 . _ / * ? + -` means none of them can carry a sentence, a quote
+    or an `@` mention into the rules an agent reads (SECURITY.md §7.10).
+    """
+    if not is_plain_path(value):
+        raise PolicyViolation(
+            f"{what} {value[:60]!r} holds characters aipm never shows an agent in a path "
+            "(only letters, digits and . _ / * ? + - are allowed)",
+            hint="Rename the path in the plan, the design or .pm/config.yaml, then run aipm again.",
         )
     return value
 
@@ -196,7 +214,7 @@ def _agents_data(ctx: ProjectContext, *, features: bool, descriptions: bool) -> 
             {
                 "id": c.id,
                 "paths": [
-                    code_span(literal(p, allowed, what=f"component {c.id}")) for p in c.paths
+                    code_span(path_literal(p, what=f"a path of component {c.id}")) for p in c.paths
                 ],
             }
             for c in ctx.components
@@ -210,9 +228,9 @@ def _agents_data(ctx: ProjectContext, *, features: bool, descriptions: bool) -> 
             )
             if not kept
         ],
-        "test_roots": [code_span(literal(r, allowed, what="a test root")) for r in ctx.test_roots],
+        "test_roots": [code_span(path_literal(r, what="a test root")) for r in ctx.test_roots],
         "protected": [
-            code_span(literal(p, allowed, what="a protected path")) for p in ctx.protected_paths
+            code_span(path_literal(p, what="a protected path")) for p in ctx.protected_paths
         ],
         "dependency_rule": DEPENDENCY_RULES.get(ctx.new_dependencies, DEPENDENCY_RULES["deny"]),
         "network_rule": NETWORK_RULES.get(ctx.agent_network, NETWORK_RULES["none"]),

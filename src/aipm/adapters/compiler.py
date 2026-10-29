@@ -45,14 +45,16 @@ class PromptTooLarge(UsageError):
     code = "PROMPT_TOO_LARGE"
 
 
-def task_text(task: Task, allowed_url_domains: Sequence[str]) -> Untrusted:
+def task_text(
+    task: Task, allowed_url_domains: Sequence[str], *, approval: str = "approved"
+) -> Untrusted:
     """The task's own words: title, description and acceptance criteria, as one block."""
     lines = [f"Title: {clean(task.title, allowed_url_domains)}"]
     if task.description.strip():
         lines += ["", "Description:", clean(task.description, allowed_url_domains)]
     lines += ["", "Acceptance criteria:"]
     lines += [f"- {c.id}: {clean(c.text, allowed_url_domains)}" for c in task.acceptance]
-    return Untrusted("\n".join(lines), source=f"approved:tasks.yaml#{task.id}")
+    return Untrusted("\n".join(lines), source=f"{approval}:tasks.yaml#{task.id}")
 
 
 def _gates(task: Task, ctx: ProjectContext) -> tuple[list[GateCommand], list[GateCommand]]:
@@ -68,7 +70,7 @@ def _gates(task: Task, ctx: ProjectContext) -> tuple[list[GateCommand], list[Gat
     return [g for g in chosen if g.argv is not None], [g for g in chosen if g.argv is None]
 
 
-def _upstream(task: Task, ctx: ProjectContext) -> tuple[UpstreamTask, ...]:
+def _upstream(task: Task, ctx: ProjectContext, approval: str) -> tuple[UpstreamTask, ...]:
     by_id = {t.id: t for t in ctx.tasks}
     found: list[UpstreamTask] = []
     for dep in task.depends_on:
@@ -81,7 +83,8 @@ def _upstream(task: Task, ctx: ProjectContext) -> tuple[UpstreamTask, ...]:
                 status=other.status.value,
                 commit=other.done.commit if other.done is not None else None,
                 title=Untrusted(
-                    clean(other.title, ctx.allowed_url_domains), source=f"approved:tasks.yaml#{dep}"
+                    clean(other.title, ctx.allowed_url_domains),
+                    source=f"{approval}:tasks.yaml#{dep}",
                 ),
             )
         )
@@ -110,9 +113,17 @@ def previous_attempt(
 
 
 def compile_task_spec(
-    task: Task, ctx: ProjectContext, *, previous: GateReport | None = None
+    task: Task,
+    ctx: ProjectContext,
+    *,
+    previous: GateReport | None = None,
+    approval: str = "approved",
 ) -> TaskSpec:
-    """Assemble the task spec; gate argv comes only from `ctx.gates` (`compile_gate` output)."""
+    """Assemble the task spec; gate argv comes only from `ctx.gates` (`compile_gate` output).
+
+    `approval` labels the task text: `approved`, or `stale` / `unapproved` for a run with
+    `--accept-stale`, so the text never claims an approval it does not have (SECURITY.md §7.2).
+    """
     allowed = ctx.allowed_url_domains
     verify, builtins = _gates(task, ctx)
     failures = previous_attempt(previous, allowed) if previous is not None else ()
@@ -121,12 +132,12 @@ def compile_task_spec(
         project=ctx.project,
         type=task.type.value,
         size=task.size.value,
-        text=task_text(task, allowed),
+        text=task_text(task, allowed, approval=approval),
         acceptance_ids=tuple(c.id for c in task.acceptance),
         owns_files=tuple(task.owns_files),
         reads_files=tuple(task.reads_files),
         deps_add=tuple((d.ecosystem.value, d.name) for d in task.deps_add),
-        upstream=_upstream(task, ctx),
+        upstream=_upstream(task, ctx, approval),
         verify=tuple(verify),
         builtin_gates=tuple(builtins),
         protected_paths=ctx.protected_paths,
@@ -134,6 +145,7 @@ def compile_task_spec(
         agent_network=ctx.agent_network,
         previous_attempt=failures,
         fix=previous is not None,
+        approval=approval,
     )
 
 

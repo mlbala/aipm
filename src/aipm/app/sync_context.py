@@ -31,7 +31,12 @@ from aipm.app.trust import require_trusted
 from aipm.app.workspace import find_repo_root, require_initialized
 from aipm.config.loader import LoadedConfig, load_config
 from aipm.context.managed_block import extract_block, replace_block
-from aipm.domain.errors import HumanInputRequired, UsageError, VerificationFailed
+from aipm.domain.errors import (
+    HumanInputRequired,
+    PolicyViolation,
+    UsageError,
+    VerificationFailed,
+)
 from aipm.domain.models import ApprovalGate, GeneratedFile, ToolName
 from aipm.domain.phase import InputState, plan_inputs
 from aipm.state.repo_files import read_repo_bytes, write_repo_bytes
@@ -151,7 +156,7 @@ def _decode(path: str, data: bytes | None) -> str:
 
 
 def _generated(
-    loaded: LoadedConfig, store: FileStateStore, tools: tuple[ToolName, ...]
+    loaded: LoadedConfig, store: FileStateStore, tools: tuple[ToolName, ...], *, detail: bool
 ) -> list[GeneratedFile]:
     cfg = loaded.config
     snapshot, _ = read_snapshot(
@@ -164,7 +169,7 @@ def _generated(
             + "; ".join(bad),
             hint="Approve them (`aipm approve prd`, `aipm approve design`) or regenerate them.",
         )
-    ctx = build_context(snapshot, cfg)
+    ctx = build_context(snapshot, cfg, detail=detail)
     files: dict[str, GeneratedFile] = {}
     for tool in tools:
         for generated in get_adapter(tool).context_files(ctx):
@@ -173,11 +178,24 @@ def _generated(
 
 
 def _review(
-    root: Path, loaded: LoadedConfig, store: FileStateStore, tools: tuple[ToolName, ...]
+    root: Path,
+    loaded: LoadedConfig,
+    store: FileStateStore,
+    tools: tuple[ToolName, ...],
+    *,
+    detail: bool = True,
 ) -> ContextReview:
     approvals = load_approvals(store)
     changes: list[FileChange] = []
-    for generated in _generated(loaded, store, tools):
+    for generated in _generated(loaded, store, tools, detail=detail):
+        if store.redactor.contains_secret(generated.block):
+            # Checked before anything is shown: a gate argv from the user config, or a .pm/
+            # file edited by hand, could carry a secret into a committed file (SECURITY.md §8).
+            raise PolicyViolation(
+                f"the generated {generated.path} block would contain a secret; nothing was "
+                "shown or written",
+                hint="Remove the secret from the gate commands in your config or from .pm/.",
+            )
         current = read_repo_bytes(root, generated.path)
         text = _decode(generated.path, current)
         block_sha = normalized_sha256(generated.block.encode("utf-8"))
@@ -222,7 +240,7 @@ def review(project: Path | None, tools: Sequence[str] = ()) -> ContextReview:
 def check(project: Path | None, tools: Sequence[str] = ()) -> tuple[str, ...]:
     """`--check`: the up-to-date files, or `VerificationFailed` (exit 3) naming the others."""
     s = _open(project, tools, trust=False)
-    result = _review(s.root, s.loaded, s.store, s.tools)
+    result = _review(s.root, s.loaded, s.store, s.tools, detail=False)
     drift = [f.path for f in result.changed]
     if drift:
         raise VerificationFailed(

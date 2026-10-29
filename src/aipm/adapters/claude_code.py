@@ -81,13 +81,13 @@ def _view(spec: TaskSpec, ctx: ProjectContext) -> dict[str, object]:
     allowed = ctx.allowed_url_domains
 
     def spans(values: tuple[str, ...], what: str) -> list[str]:
-        return [code_span(generator.literal(v, allowed, what=what)) for v in values]
+        return [code_span(generator.path_literal(v, what=what)) for v in values]
 
     titles = [u for u in spec.upstream if u.title is not None]
     upstream_text = (
         Untrusted(
             "\n".join(f"- {u.id}: {u.title.text}" for u in titles if u.title is not None),
-            source="approved:tasks.yaml#upstream",
+            source=f"{spec.approval}:tasks.yaml#upstream",
         )
         if titles
         else None
@@ -98,6 +98,8 @@ def _view(spec: TaskSpec, ctx: ProjectContext) -> dict[str, object]:
         "type": spec.type,
         "size": spec.size,
         "text": spec.text,
+        "approved": spec.approval == "approved",
+        "approval": spec.approval,
         "acceptance_ids": list(spec.acceptance_ids),
         "upstream": [
             {

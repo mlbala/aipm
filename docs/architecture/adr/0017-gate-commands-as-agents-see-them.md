@@ -41,8 +41,13 @@ The argv is otherwise identical to what `verify` runs, and still passes the comm
 
 `--check`, option 2. It needs no trust, writes nothing, and reports only file names. The argv still goes through `compile_gate`, so a policy violation still exits 6. SECURITY.md §6 rule 3 records this exception.
 
+Two related choices, from the step 05 security review:
+
+- **Block ids in context files derive from their content.** SECURITY.md §7.2 asks for a fresh random nonce per render. A context file is committed and checked for drift, so a random id would make every `sync-context` a change and `--check` always fail. The ids are derived from the rendered data instead. The block boundary never relied on a secret id: `|untrusted` turns every `<` before `untrusted` inside the content into `&lt;`, and the fence around each block is longer than any backtick run in it. Task prompts keep fresh random ids.
+- **A non-interactive write can rest on a recorded approval.** `sync-context` writes without asking when `approvals.yaml` holds an approval of those exact block hashes. A repository can forge that file (SECURITY.md §6 rule 6), and the hashes are predictable, so a hostile repository could pre-approve its blocks. It gains nothing a script could not already do: the blocks are a function of the repository's own approved artifacts, rendered by aipm's templates, and writing still needs the user's trust.
+
 ## Consequences
 
 - The commands in prompts and `AGENTS.md` run as shown, on every machine, and `--check` is stable.
 - An agent's own run of `unit` writes its JUnit report nowhere. That is fine: `ac_trace` ignores any report except the one from aipm's run.
-- A repository can be checked for context drift in CI with no trust step. Writing, approving and showing the blocks still need trust.
+- A repository can be checked for context drift in CI with no trust step. Writing, approving and showing the blocks still need trust. When `--check` finds a gate the policy refuses, it names the gate only, never its argv.

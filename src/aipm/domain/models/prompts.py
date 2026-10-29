@@ -108,6 +108,9 @@ class TaskSpec:
     agent_network: str
     previous_attempt: tuple[GateFailure, ...] = ()
     fix: bool = False
+    approval: str = "approved"
+    """`approved`, or how the plan was not (`stale`, `unapproved`) when run with
+    `--accept-stale`; it labels the task text."""
     omitted: tuple[str, ...] = ()
     """What the size budget left out, in the order it was trimmed."""
 

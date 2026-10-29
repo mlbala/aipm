@@ -28,10 +28,12 @@ from aipm.security.paths import protected_patterns
 AGENT_REPORT_FILE = Path("/dev/null")
 
 
-def agent_gates(cfg: Config) -> tuple[GateCommand, ...]:
+def agent_gates(cfg: Config, *, detail: bool = True) -> tuple[GateCommand, ...]:
     """Every gate of the menu: command gates with argv from `compile_gate`, built-ins by name.
 
-    Raises `PolicyViolation` (exit 6) if any argv fails the command policy.
+    Raises `PolicyViolation` (exit 6) if any argv fails the command policy. With
+    `detail=False` (`sync-context --check`, which runs without trust) the error names only the
+    gate, never a piece of its argv.
     """
     gates: list[GateCommand] = []
     policy: CommandPolicy | None = None
@@ -40,17 +42,22 @@ def agent_gates(cfg: Config) -> tuple[GateCommand, ...]:
             builtin = None if gate.builtin is None else gate.builtin.value
             gates.append(GateCommand(name, gate.required, builtin=builtin))
             continue
-        if policy is None:
-            policy = cfg.command_policy()
         try:
+            if policy is None:
+                policy = cfg.command_policy()
             argv = compile_gate(gate, paths=[], policy=policy, report_file=AGENT_REPORT_FILE)
         except PolicyViolation as exc:
-            raise PolicyViolation(f"gate {name!r}: {exc.message}", hint=exc.hint) from None
+            if detail:
+                raise PolicyViolation(f"gate {name!r}: {exc.message}", hint=exc.hint) from None
+            raise PolicyViolation(
+                f"gate {name!r} is not allowed by the command policy",
+                hint="Run `aipm trust --show` to see why.",
+            ) from None
         gates.append(GateCommand(name, gate.required, argv=argv))
     return tuple(gates)
 
 
-def build_context(snapshot: StateSnapshot, cfg: Config) -> ProjectContext:
+def build_context(snapshot: StateSnapshot, cfg: Config, *, detail: bool = True) -> ProjectContext:
     """The approved facts and the agent-facing gate menu. The caller checked the inputs."""
     requirements, prd, arch = snapshot.requirements, snapshot.prd, snapshot.architecture
     if requirements is None or prd is None or arch is None:
@@ -67,7 +74,7 @@ def build_context(snapshot: StateSnapshot, cfg: Config) -> ProjectContext:
             ComponentInfo(c.id, c.name, tuple(c.paths), c.responsibility)
             for c in arch.meta.components
         ),
-        gates=agent_gates(cfg),
+        gates=agent_gates(cfg, detail=detail),
         test_roots=tuple(cfg.test_roots),
         protected_paths=protected_patterns(cfg.security.extra_protected_paths),
         new_dependencies=cfg.security.allow_new_dependencies.value,

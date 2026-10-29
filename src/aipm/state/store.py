@@ -15,7 +15,7 @@ import os
 import re
 import secrets
 import stat
-from collections.abc import Generator, Mapping
+from collections.abc import Generator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -47,6 +47,7 @@ from aipm.domain.models import (
 )
 from aipm.domain.models.artifacts import is_adr_file_name
 from aipm.observability.redaction import process_redactor
+from aipm.security.agent_text import agent_text_problems
 from aipm.security.redact import Redactor
 from aipm.security.sanitize import sanitize_text
 from aipm.state import frontmatter
@@ -528,12 +529,16 @@ class FileStateStore:
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             raise PolicyViolation(f".pm/{name} must be a real directory, not a link or a file")
 
-    def save_prompt(self, task_id: str, tool: str, text: str) -> tuple[str, str]:
+    def save_prompt(
+        self, task_id: str, tool: str, text: str, *, allowed_url_domains: Sequence[str] = ()
+    ) -> tuple[str, str]:
         """Write `.pm/prompts/<T-ID>.<tool>.md`; return the text written and its sha256.
 
         The prompt holds `untrusted` blocks (gate output, model text), so it is redacted between
         the block tags, never across one (SECURITY.md §7.2, §8), and refused if a secret is left.
-        Callers print or copy the returned text, never their own copy.
+        Redaction can cut a code span short, so the redacted text is checked against invariant
+        I-3 again and refused (exit 6) if it fails. Callers print or copy the returned text,
+        never their own copy.
         """
         if not is_valid_id("task", task_id) or not _TOOL.fullmatch(tool):
             raise UsageError(f"not a task ID and tool name: {task_id!r}, {tool!r}")
@@ -545,6 +550,13 @@ class FileStateStore:
         cleaned = sanitize_text(text, source=source)
         redacted = map_between_tags(cleaned.text, self.redactor.redact)
         self._refuse_secrets(redacted, source)
+        problems = agent_text_problems(redacted, allowed_url_domains=allowed_url_domains)
+        if problems:
+            raise PolicyViolation(
+                f"refusing to write {source}: after redaction it fails invariant I-3 "
+                f"({'; '.join(problems)})",
+                hint="A secret-looking value sits in a path or command of this task; remove it.",
+            )
         data = redacted.encode("utf-8")
         if len(data) > MAX_PROMPT_BYTES:
             raise UsageError(f"{source} would be larger than {MAX_PROMPT_BYTES} bytes")

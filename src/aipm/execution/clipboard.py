@@ -2,8 +2,8 @@
 
 Uses `pbcopy`, `wl-copy` or `xclip`, whichever is present, resolved to an absolute path and run
 through `run_safe` with the text on stdin and a constructed environment: the base allowlist plus
-the display variables the Linux tools need, nothing else. No tool, or a failing one, is not an
-error; the caller prints a hint.
+the display variables the Linux tools need, nothing else. A tool found inside the repository
+(`cwd`) is skipped. No tool, or a failing one, is not an error; the caller prints a hint.
 """
 
 import os
@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from aipm.domain.errors import AipmError
-from aipm.execution.process import build_env, run_safe
+from aipm.execution.process import build_env, is_inside, run_safe
 
 CLIPBOARD_TIMEOUT_S = 10.0
 DISPLAY_ENV = ("DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR")
@@ -48,7 +48,7 @@ def copy_text(
     display = {name: env_source[name] for name in DISPLAY_ENV if env_source.get(name)}
     for name, args in _candidates(env_source, platform):
         path = shutil.which(name)
-        if path is None:
+        if path is None or is_inside(path, cwd):
             continue
         try:
             result = run_safe(

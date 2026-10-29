@@ -139,14 +139,17 @@ def test_copy_text_uses_the_platform_tool(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str,
     display: dict[str, str], tool: str, args: str,
 ) -> None:  # fmt: skip
-    fake_tool(tmp_path, tool)
+    tools, work = tmp_path / "bin", tmp_path / "work"
+    tools.mkdir()
+    work.mkdir()
+    fake_tool(tools, tool)
 
     def which(name: str) -> str | None:
-        return str(tmp_path / name) if (tmp_path / name).exists() else None
+        return str(tools / name) if (tools / name).exists() else None
 
     monkeypatch.setattr(clipboard.shutil, "which", which)
     environ = {"HOME": str(tmp_path), "PATH": "/usr/bin:/bin", "SECRET_TOKEN": "nope", **display}
-    used = clipboard.copy_text("prompt text\n", cwd=tmp_path, environ=environ, platform=platform)
+    used = clipboard.copy_text("prompt text\n", cwd=work, environ=environ, platform=platform)
     assert used == tool
     assert (tmp_path / "clip").read_text(encoding="utf-8") == "prompt text\n"
     assert (tmp_path / "args").read_text(encoding="utf-8").strip() == args
@@ -162,5 +165,16 @@ def test_copy_text_with_a_failing_tool_returns_none(
     failing = tmp_path / "pbcopy"
     failing.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
     failing.chmod(0o755)
+    (tmp_path / "work").mkdir()
     monkeypatch.setattr(clipboard.shutil, "which", lambda _n: str(failing))
-    assert clipboard.copy_text("x", cwd=tmp_path, environ={}, platform="darwin") is None
+    assert clipboard.copy_text("x", cwd=tmp_path / "work", environ={}, platform="darwin") is None
+
+
+def test_a_clipboard_tool_inside_the_repository_is_never_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    planted = fake_tool(tmp_path, "pbcopy")
+    monkeypatch.setattr(clipboard.shutil, "which", lambda _n: str(planted))
+    assert clipboard.copy_text("x", cwd=tmp_path, environ={"HOME": str(tmp_path)},
+                               platform="darwin") is None  # fmt: skip
+    assert not (tmp_path / "clip").exists()

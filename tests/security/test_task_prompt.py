@@ -177,8 +177,36 @@ def test_out_does_not_follow_a_link_out_of_the_repository(repo: Path, tmp_path: 
     victim.write_text("keep\n", encoding="utf-8")
     (repo / "prompt.md").symlink_to(victim)
     result = aipm(repo, "prompt", "T-001", "--out", str(repo / "prompt.md"))
-    assert result.exit_code == 2
+    assert result.exit_code == 6
     assert victim.read_text(encoding="utf-8") == "keep\n"
+
+
+def test_out_does_not_follow_a_link_inside_the_repository(repo: Path) -> None:
+    script = repo / "ci.sh"
+    script.write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
+    script.chmod(0o755)
+    (repo / "prompt.md").symlink_to(script)
+    result = aipm(repo, "prompt", "T-001", "--out", str(repo / "prompt.md"))
+    assert result.exit_code == 6
+    assert script.read_text(encoding="utf-8") == "#!/bin/sh\necho ok\n"
+
+
+def test_out_never_keeps_execute_bits(repo: Path) -> None:
+    target = repo / "prompt.md"
+    target.write_text("old\n", encoding="utf-8")
+    target.chmod(0o755)
+    assert aipm(repo, "prompt", "T-001", "--out", str(target)).exit_code == 0
+    assert target.stat().st_mode & 0o777 == 0o644
+
+
+def test_out_honours_extra_protected_paths(repo: Path) -> None:
+    config = repo / ".pm" / "config.yaml"
+    text = config.read_text(encoding="utf-8")
+    config.write_text(text + "security:\n  extra_protected_paths: [docs/**]\n", encoding="utf-8")
+    (repo / "docs").mkdir()
+    result = aipm(repo, "prompt", "T-001", "--out", str(repo / "docs" / "p.md"))
+    assert result.exit_code == 6
+    assert not (repo / "docs" / "p.md").exists()
 
 
 def test_report_must_be_inside_the_repository(repo: Path, tmp_path: Path) -> None:

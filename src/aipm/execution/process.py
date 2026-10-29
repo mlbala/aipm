@@ -58,6 +58,17 @@ class ProcessResult:
     dropped_bytes: int = 0
 
 
+def is_inside(path: str, root: Path) -> bool:
+    """Whether `path`, links resolved, is `root` or lies under it.
+
+    For executables found on PATH: a repository could put its own `git` or `pbcopy` first on a
+    PATH that holds a relative or repo-local entry, so callers refuse one found inside it.
+    """
+    real = os.path.realpath(path)
+    base = os.path.realpath(root)
+    return real == base or real.startswith(base.rstrip(os.sep) + os.sep)
+
+
 def build_env(
     base_allowlist: Iterable[str] = BASE_ENV_ALLOWLIST,
     extra: Mapping[str, str] | None = None,

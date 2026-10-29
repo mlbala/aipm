@@ -15,6 +15,7 @@ saved gate report is named with `--report FILE`.
 """
 
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -33,7 +34,7 @@ from aipm.config.loader import load_config
 from aipm.domain.errors import InputRejected, SchemaError, UsageError
 from aipm.domain.ids import is_valid_id
 from aipm.domain.models import ArtifactKind, GateReport, Task, TasksDoc, TaskStatus
-from aipm.domain.phase import prompt_inputs
+from aipm.domain.phase import InputState, prompt_inputs
 from aipm.execution.clipboard import copy_text
 from aipm.execution.git import head_sha
 from aipm.reporting.worksheet import WORKSHEET_FILE, render_worksheet
@@ -156,17 +157,23 @@ def load_report(root: Path, given: Path, task_id: str, *, max_bytes: int) -> Gat
     return report
 
 
-def write_out(root: Path, given: Path, text: str) -> str:
-    """Write the prompt to a user-named file inside the repository; returns its relative path."""
-    absolute = Path(os.path.realpath(given if given.is_absolute() else Path.cwd() / given))
+def write_out(root: Path, given: Path, text: str, *, extra_protected: Sequence[str] = ()) -> str:
+    """Write the prompt to a user-named file inside the repository; returns its relative path.
+
+    Only the directories on the way are resolved; the file itself is never followed if it is a
+    link (`safe_relpath` and `write_repo_bytes` refuse, exit 6), and protected paths, including
+    `security.extra_protected_paths`, are refused.
+    """
+    absolute = Path(os.path.normpath(given if given.is_absolute() else Path.cwd() / given))
+    target = Path(os.path.realpath(absolute.parent)) / absolute.name
     try:
-        rel = absolute.relative_to(root)
+        rel = target.relative_to(root)
     except ValueError:
         raise UsageError(
             f"--out {given} is outside the repository",
             hint="To save the prompt elsewhere, redirect it: `aipm prompt T-ID > FILE`.",
         ) from None
-    relpath = safe_relpath(root, rel.as_posix())
+    relpath = safe_relpath(root, rel.as_posix(), extra_protected=extra_protected)
     write_repo_bytes(root, relpath, text.encode("utf-8"), expected=read_repo_bytes(root, relpath))
     return relpath
 
@@ -198,9 +205,9 @@ def run(project: Path | None, options: PromptOptions) -> PromptResult:
             store, coverage_threshold=cfg.discover.coverage_threshold, trusted=True
         )
         warnings = list(loaded.warnings)
-        warnings += require_inputs(
-            store, "prompt", prompt_inputs(snapshot), accept_stale=options.accept_stale
-        )
+        checks = prompt_inputs(snapshot)
+        warnings += require_inputs(store, "prompt", checks, accept_stale=options.accept_stale)
+        approval = next((c.state.value for c in checks if c.state is not InputState.OK), "approved")
         tasks = snapshot.tasks
         task = next((t for t in tasks.tasks if t.id == options.task_id), None) if tasks else None
         if tasks is None or task is None:
@@ -214,10 +221,17 @@ def run(project: Path | None, options: PromptOptions) -> PromptResult:
         keep = task.status is TaskStatus.IN_PROGRESS and task.base_sha is not None
         base_sha = task.base_sha if keep and task.base_sha is not None else head_sha(root)
         ctx = build_context(snapshot, cfg)
-        rendered = render_within_budget(adapter, compile_task_spec(task, ctx, previous=report), ctx)
-        text, _ = store.save_prompt(task.id, tool.value, rendered.text)
+        spec = compile_task_spec(task, ctx, previous=report, approval=approval)
+        rendered = render_within_budget(adapter, spec, ctx)
+        text, _ = store.save_prompt(
+            task.id, tool.value, rendered.text, allowed_url_domains=ctx.allowed_url_domains
+        )
         _record_start(store, tasks, task, base_sha)
-    out = write_out(root, options.out, text) if options.out is not None else None
+    out = (
+        write_out(root, options.out, text, extra_protected=cfg.security.extra_protected_paths)
+        if options.out is not None
+        else None
+    )
     copied = copy_text(text, cwd=root) if options.copy else None
     return PromptResult(
         repo_root=str(root),
