@@ -17,6 +17,7 @@ One file per decision, using the template below. A new ADR is proposed in a pull
 | [ADR-0011](0011-apache-2-license.md) | Apache-2.0 license | Accepted |
 | [ADR-0012](0012-ruamel-yaml-deterministic.md) | `ruamel.yaml` with deterministic output; aliases and tags rejected | Accepted |
 | [ADR-0013](0013-srt-sandbox.md) | `srt` as the preferred sandbox, optional, failing closed under `require_sandbox` | Accepted |
+| [ADR-0014](0014-structured-output-without-forced-tools.md) | Structured output: native schema, then JSON mode, then prompt; no forced tool calls | Accepted |
 
 ## Template
 

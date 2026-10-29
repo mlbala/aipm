@@ -7,13 +7,14 @@ CLI, ruff, lint-imports) are test tooling; aipm itself starts processes only thr
 
 import os
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 import pytest_socket
 
+from aipm.llm.fake import FakeLLM
 from tests.fakes.secrets import FAKE_SECRETS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -111,7 +112,25 @@ def allow_unix_sockets() -> None:
     pytest_socket.disable_socket(allow_unix_socket=True)
 
 
+LLM_FIXTURES = REPO_ROOT / "tests" / "fakes" / "llm_fixtures"
+
+
 @pytest.fixture
-def fake_llm() -> None:
-    """Placeholder until build prompt 03 adds `aipm.llm.fake.FakeLLM`."""
-    pytest.skip("FakeLLM arrives in build prompt 03 (aipm.llm.fake)")
+def fake_llm(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], FakeLLM]:
+    """Route every gateway built in this test to a FakeLLM loaded from `llm_fixtures/<name>`.
+
+    The real gateway (redaction, validation, repair, budget) still runs; only the provider is
+    replaced. The returned FakeLLM records every request it receives.
+    """
+
+    def use(fixture: str) -> FakeLLM:
+        fake = FakeLLM(LLM_FIXTURES, fixture)
+
+        def provider(llm: object, **_: object) -> FakeLLM:
+            del llm
+            return fake
+
+        monkeypatch.setattr("aipm.llm.gateway.make_provider", provider)
+        return fake
+
+    return use

@@ -4,6 +4,7 @@ Every error aipm raises on purpose is an `AipmError` that carries its exit code 
 stable error code for the JSON envelope. Only the CLI turns them into a process exit.
 """
 
+from collections.abc import Mapping
 from enum import IntEnum
 from typing import ClassVar
 
@@ -24,15 +25,22 @@ class ExitCode(IntEnum):
 
 
 class AipmError(Exception):
-    """An expected failure with an exit code and a stable error code."""
+    """An expected failure with an exit code and a stable error code.
+
+    `data` is optional machine-readable detail, such as the pending questions of a
+    non-interactive `discover`; the CLI prints it as JSON (ARCHITECTURE §16.2).
+    """
 
     exit_code: ClassVar[ExitCode] = ExitCode.INTERNAL
     code: ClassVar[str] = "INTERNAL_ERROR"
 
-    def __init__(self, message: str, *, hint: str | None = None) -> None:
+    def __init__(
+        self, message: str, *, hint: str | None = None, data: Mapping[str, object] | None = None
+    ) -> None:
         super().__init__(message)
         self.message = message
         self.hint = hint
+        self.data: dict[str, object] = dict(data or {})
 
 
 class UsageError(AipmError):

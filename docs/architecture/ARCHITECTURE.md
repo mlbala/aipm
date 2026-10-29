@@ -840,7 +840,7 @@ Each placeholder must be a whole argv element, and each expanded value is its ow
   - `openai-compatible` uses the official `openai` SDK with `base_url`. It covers OpenAI, Azure OpenAI, OpenRouter, Ollama, vLLM, LM Studio and any other compatible server.
   - Other providers can be added through the `aipm.llm_providers` entry point (for example a LiteLLM plugin).
 - **Routing:** the model is chosen per role from `llm.models.<role>`, falling back to `llm.models.default`.
-- **Structured output:** the gateway uses each provider's native JSON-schema output where available, then forced tool-call output, then JSON with validation. Every response is validated against the role's Pydantic model, with one repair attempt.
+- **Structured output:** the gateway uses each provider's native JSON-schema output where available, then the provider's JSON mode, then JSON requested in the prompt; it never forces a tool call ([ADR-0014](adr/0014-structured-output-without-forced-tools.md)). Every response is validated against the role's Pydantic model, with one repair attempt.
 - **Prompt assembly:**
   - The system template comes from `aipm/roles/prompts/<role>.system.j2`, rendered in a sandboxed Jinja environment with `StrictUndefined`.
   - The user content is assembled from typed inputs. Untrusted parts are wrapped ([SECURITY.md §7.2](SECURITY.md#72-l2-spotlighting-and-typed-untrusted-content)).
@@ -1134,6 +1134,7 @@ These are the decisions in ADR form. Each will also get an `adr/NNNN-*.md` file 
 | ADR-0011 | Apache-2.0 license | Explicit patent grant; enterprise-friendly | MIT |
 | ADR-0012 | `ruamel.yaml` with deterministic output; aliases and tags rejected | Clean diffs, comment preservation, no YAML bombs | PyYAML |
 | ADR-0013 | `srt` as the preferred sandbox, optional, with fail-closed behaviour under `require_sandbox` | OS-level filesystem and network isolation with no containers, on macOS and Linux | Docker-only sandboxing |
+| ADR-0014 | Structured output: native schema, then JSON mode, then prompt; no forced tool calls | Current Claude models reject forced `tool_choice`, and roles stay tool-less | Forced tool-call output as the second mechanism |
 
 ## 24. Open questions (defaults apply unless changed)
 

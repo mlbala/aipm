@@ -1,0 +1,37 @@
+# Two questions: Q-002 has no default (stays pending without an answer), Q-003 has one.
+# The second call ends the interview.
+responses:
+  - json:
+      one_liner: "A booking app for a small clinic"
+      extracted: []
+      questions:
+        - id: Q-002
+          dimension: scale_performance
+          kind: text
+          question: "How many bookings a day do you expect?"
+          options: []
+          default: []
+          why: "Sizing."
+          blocking: false
+        - id: Q-003
+          dimension: deployment_ops
+          kind: single
+          question: "Where should it run?"
+          options: ["Managed hosting in the EU", "A VPS"]
+          default: ["Managed hosting in the EU"]
+          why: "The clinic has no IT staff."
+          blocking: false
+      coverage: {problem_goals: partial, users_personas: missing, core_features: missing,
+                 data: missing, integrations: missing, scale_performance: missing,
+                 security_compliance: missing, deployment_ops: missing, constraints: missing,
+                 success_metrics: missing}
+      injection_suspected: []
+  - json:
+      one_liner: ""
+      extracted: []
+      questions: []
+      coverage: {problem_goals: covered, users_personas: partial, core_features: partial,
+                 data: missing, integrations: missing, scale_performance: covered,
+                 security_compliance: missing, deployment_ops: covered, constraints: missing,
+                 success_metrics: missing}
+      injection_suspected: []

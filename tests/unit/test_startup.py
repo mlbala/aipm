@@ -40,3 +40,16 @@ def test_help_imports_no_heavy_modules() -> None:
         [sys.executable, "-c", code], capture_output=True, text=True, check=True, timeout=30
     )
     assert proc.stdout.strip() == "[]", proc.stdout
+
+
+def test_importing_the_llm_layer_loads_no_sdk() -> None:
+    """The providers import their SDK only when a call is made (ARCHITECTURE §5.1)."""
+    code = (
+        "import sys\n"
+        "import aipm.app.discover, aipm.llm.gateway\n"
+        "print(sorted(m for m in sys.modules if m.split('.')[0] in ('anthropic', 'openai')))\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True, timeout=30
+    )
+    assert proc.stdout.strip() == "[]", proc.stdout
