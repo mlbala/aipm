@@ -282,7 +282,7 @@
     gates: lint, types, unit, ac_trace
     new dependencies: none
     blocked: gates_failed unit failed twice
-    question: Should a slot be 15 or 20 minutes?
+    agent says: Should a slot be 15 or 20 minutes?
     description:
       Models and the booking service; a slot can hold one appointment.
     acceptance criteria:
@@ -303,7 +303,7 @@
   Blocked tasks:
     T-002 Slots and appointments without double booking: gates_failed
       unit failed twice
-      question: Should a slot be 15 or 20 minutes?
+      agent says: Should a slot be 15 or 20 minutes?
   
   Security events (1 unacknowledged):
     EV-0123456789ab 2026-10-29T09:00:00Z policy_violation [llm:planner] the planner proposed 1 items outside the policy

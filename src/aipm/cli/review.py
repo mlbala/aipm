@@ -11,7 +11,7 @@ from collections.abc import Sequence
 import typer
 
 from aipm.app.approve import DesignReview, PlanReview
-from aipm.cli.output import print_untrusted
+from aipm.cli.output import print_untrusted, warn
 
 MAX_CHANGES_SHOWN = 50
 
@@ -39,6 +39,7 @@ def show_plan(review: PlanReview, changes: Sequence[str] = ()) -> None:
     """G3: the task table, depth and width, every command line, every new dependency, and the
     tasks that own test or test-config paths."""
     facts = review.facts
+    warn(review.warnings)  # before any question about trust (ARCHITECTURE §15)
     print_untrusted(f"\nPlan (G3): .pm/tasks.yaml (sha256 {review.sha256[:12]})")
     for row in facts.rows:
         print_untrusted(f"  {row}")

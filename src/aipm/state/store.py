@@ -60,6 +60,7 @@ from aipm.state.layout import (
 from aipm.state.yamlio import MAX_YAML_BYTES, dump_yaml, load_yaml
 
 MAX_EVENTS_BYTES = 16 * 1_048_576
+MAX_ADR_FILES = 100
 _HOLDER = re.compile(r"(\d{1,10}) (\S{1,40})")
 
 _MODELS: Mapping[ArtifactKind, type[YamlArtifact] | type[MarkdownArtifact[Any]]] = {
@@ -357,7 +358,17 @@ class FileStateStore:
         if not os.path.lexists(self.root) or not self._adr_dir(create=False):
             return []
         entries = (entry.name for entry in (self.root / ADR_DIR).iterdir())
-        return sorted(name for name in entries if is_adr_file_name(name))
+        names = sorted(name for name in entries if is_adr_file_name(name))
+        if len(names) > MAX_ADR_FILES:
+            raise SchemaError(f".pm/{ADR_DIR} holds more than {MAX_ADR_FILES} ADR files")
+        return names
+
+    def _check_adr_entries(self) -> None:
+        """Every ADR-named entry must be a regular file, so a replace cannot fail half way."""
+        for name in self.adr_names():
+            info = os.lstat(self.root / ADR_DIR / name)
+            if not stat.S_ISREG(info.st_mode):
+                raise PolicyViolation(f".pm/{ADR_DIR}/{name} is not a regular file")
 
     def _adr_bytes(self) -> list[tuple[str, bytes]]:
         found: list[tuple[str, bytes]] = []
@@ -399,13 +410,17 @@ class FileStateStore:
         rendered = [(name, *self._render(doc, f".pm/{ADR_DIR}/{name}")) for name, doc in
                     zip(names, docs, strict=True)]  # fmt: skip
         self._adr_dir(create=True)
+        self._check_adr_entries()
         for name, data, removed in rendered:
             self._atomic_write(f"{ADR_DIR}/{name}", data)
             self._signal(f".pm/{ADR_DIR}/{name}", removed)
-        for old in set(self.adr_names()) - set(names):
+        for old in sorted(set(self.adr_names()) - set(names)):
             target = self.root / ADR_DIR / old
-            if not target.is_symlink():
+            try:
                 target.unlink(missing_ok=True)
+            except OSError as exc:
+                message = f".pm/{ADR_DIR}/{old} cannot be removed ({exc.strerror})"
+                raise PolicyViolation(message) from None
         return self.adr_sha256()
 
     def read_text(self, kind: ArtifactKind) -> str | None:

@@ -20,7 +20,13 @@ from typing import Protocol
 
 from aipm.app import runtime
 from aipm.app import trust as trust_use_case
-from aipm.app.approve import PlanReview, plan_review_of, record_approval, require_inputs
+from aipm.app.approve import (
+    PlanReview,
+    plan_review_of,
+    plan_rules,
+    record_approval,
+    require_inputs,
+)
 from aipm.app.guards import check_injection, repair_block
 from aipm.app.snapshot import read_snapshot
 from aipm.app.workspace import find_repo_root, require_initialized
@@ -32,7 +38,6 @@ from aipm.domain.models import (
     APPROVED_NAMES,
     ApprovalGate,
     ArtifactKind,
-    Priority,
     RoleName,
     SecurityEventKind,
     Severity,
@@ -213,21 +218,7 @@ class _Plan:
         return Untrusted(text, source=check.label)
 
     def _rules(self) -> PlanRules:
-        s = self.snapshot
-        features = s.prd.meta.features if s.prd is not None else []
-        nfrs = s.prd.meta.non_functional if s.prd is not None else []
-        threats = s.threat_model.meta.threats if s.threat_model is not None else []
-        return PlanRules(
-            gate_menu=tuple(self.cfg.gates),
-            features=frozenset(f.id for f in features),
-            must_features=frozenset(f.id for f in features if f.priority is Priority.MUST),
-            nfrs=frozenset(n.id for n in nfrs),
-            threats=frozenset(t.id for t in threats),
-            threats_to_trace=frozenset(t.id for t in threats if t.severity in _MEDIUM_UP),
-            serialized_paths=tuple(self.cfg.plan.serialized_paths),
-            extra_protected=tuple(self.cfg.security.extra_protected_paths),
-            max_tasks=self.max_tasks,
-        )
+        return plan_rules(self.snapshot, self.cfg, max_tasks=self.max_tasks)
 
     def _settings(self) -> Untrusted:
         data = {

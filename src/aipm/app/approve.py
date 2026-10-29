@@ -28,6 +28,7 @@ from aipm.app.workspace import find_repo_root, require_initialized
 from aipm.config.loader import load_config
 from aipm.config.schema import Config
 from aipm.config.stacks import load_stack
+from aipm.domain.dag import MAX_TASKS, PlanRules, recheck_plan
 from aipm.domain.errors import NotImplementedYet, PolicyViolation, UsageError
 from aipm.domain.models import (
     APPROVED_NAMES,
@@ -38,6 +39,7 @@ from aipm.domain.models import (
     ArtifactKind,
     Mode,
     PrdDoc,
+    Priority,
     RequirementsDoc,
     Severity,
     StaleOverride,
@@ -395,6 +397,8 @@ class PlanReview:
     trusted: bool
     problems: tuple[str, ...]
     approved: bool
+    warnings: tuple[str, ...] = ()
+    """Config warnings, shown before G3 asks for trust (ARCHITECTURE §15)."""
 
     def to_data(self) -> dict[str, object]:
         """The `--json` payload."""
@@ -413,6 +417,24 @@ class PlanReview:
             "problems": list(self.problems),
             "approved": self.approved,
         }
+
+
+def plan_rules(snapshot: StateSnapshot, cfg: Config, *, max_tasks: int = MAX_TASKS) -> PlanRules:
+    """The plan validator's rules, from the snapshot's PRD and threat model and the config."""
+    features = snapshot.prd.meta.features if snapshot.prd is not None else []
+    nfrs = snapshot.prd.meta.non_functional if snapshot.prd is not None else []
+    threats = snapshot.threat_model.meta.threats if snapshot.threat_model is not None else []
+    return PlanRules(
+        gate_menu=tuple(cfg.gates),
+        features=frozenset(f.id for f in features),
+        must_features=frozenset(f.id for f in features if f.priority is Priority.MUST),
+        nfrs=frozenset(n.id for n in nfrs),
+        threats=frozenset(t.id for t in threats),
+        threats_to_trace=frozenset(t.id for t in threats if t.severity in _MEDIUM_UP),
+        serialized_paths=tuple(cfg.plan.serialized_paths),
+        extra_protected=tuple(cfg.security.extra_protected_paths),
+        max_tasks=max_tasks,
+    )
 
 
 def plan_review_of(store: FileStateStore) -> PlanReview:
@@ -437,6 +459,10 @@ def plan_review_of(store: FileStateStore) -> PlanReview:
         snapshot.hashes.get(ArtifactKind.THREAT_MODEL),
     ):
         problems.append("tasks.yaml is stale: its upstream changed; run `aipm plan`")
+    problems.extend(
+        f"tasks.yaml breaks a plan rule: {p}"
+        for p in recheck_plan(tasks.tasks, plan_rules(snapshot, loaded.config))
+    )
     return PlanReview(
         repo_root=str(store.repo_root),
         sha256=sha,
@@ -447,6 +473,7 @@ def plan_review_of(store: FileStateStore) -> PlanReview:
         trusted=bool(report and report.trusted),
         problems=tuple(problems),
         approved=snapshot.approvals.has(ApprovalGate.G3, APPROVED_NAMES[ArtifactKind.TASKS], sha),
+        warnings=loaded.warnings,
     )
 
 
@@ -502,6 +529,7 @@ __all__ = [
     "is_approved",
     "load_approvals",
     "plan_review_of",
+    "plan_rules",
     "record_approval",
     "record_design",
     "record_overrides",

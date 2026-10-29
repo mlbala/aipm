@@ -187,6 +187,16 @@ def _intersects(a: _Tokens, b: _Tokens) -> bool:
     return False
 
 
+def glob_may_match(glob: str, pattern: str) -> bool:
+    """Whether some path matching `glob` could also match `pattern` at any depth.
+
+    Conservative and case-insensitive, like the protected-path check: `src/**` may match
+    `conftest.py`, `src/*.md` may not. Both are glob strings; nothing is resolved.
+    """
+    tokens = _tokens(glob.casefold(), literal=False)
+    return any(_intersects(tokens, v) for v in _pattern_variants(pattern, any_depth=True))
+
+
 def normalize_relpath(path: str) -> str:
     """Check a relative path's syntax and normalize it, without resolving or protection checks.
 

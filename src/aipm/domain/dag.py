@@ -24,7 +24,9 @@ Issues name their place (`T-003.owns_files[2]`) and the rule in aipm's own words
 value is kept apart in `detail`, for people, and never goes back to a model (`Issue.repair`).
 """
 
+import functools
 import graphlib
+import unicodedata
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
@@ -44,7 +46,7 @@ from aipm.domain.models import (
     TaskSize,
     TaskType,
 )
-from aipm.security.paths import safe_rel_glob
+from aipm.security.paths import glob_may_match, safe_rel_glob
 from aipm.security.sanitize import sanitize_text
 
 MAX_TASKS = 200
@@ -72,13 +74,34 @@ _TYPE_RANK = (
     TaskType.DOCS,
 )
 _DETAIL_MAX = 80
-_TEST_FILES = ("test_*.py", "*_test.py", "conftest.py", "*.test.*", "*.spec.*", "*_test.go")
+_JS = ("js", "jsx", "ts", "tsx", "mjs", "cjs", "mts", "cts")
+_CONFIG_JS = ("js", "ts", "mjs", "cjs", "json")
+_RC = ("", ".js", ".cjs", ".mjs", ".json", ".jsonc", ".yml", ".yaml", ".toml")
+
+
+def _named(stem: str, extensions: Sequence[str]) -> tuple[str, ...]:
+    return tuple(f"{stem}.{ext}" for ext in extensions)
+
+
+_TEST_FILES = (
+    "test_*.py", "*_test.py", "conftest.py", "*_test.go",
+    *_named("*.test", _JS), *_named("*.spec", _JS),
+)  # fmt: skip
+"""Test files, named exactly enough that `src/*.md` is not one (G3 lists the owners)."""
 _TEST_CONFIG = (
     "pyproject.toml", "setup.cfg", "setup.py", "pytest.ini", "tox.ini", "noxfile.py",
-    ".coveragerc", "package.json", "jest.config.*", "vitest.config.*", "karma.conf.*",
-    ".mocharc*", "playwright.config.*", "cypress.config.*",
+    ".coveragerc", "package.json", "tsconfig.json", "biome.json",
+    *_named("jest.config", _CONFIG_JS), *_named("vitest.config", _CONFIG_JS),
+    *_named("karma.conf", _CONFIG_JS), *_named("playwright.config", _CONFIG_JS),
+    *_named("cypress.config", _CONFIG_JS), *_named("eslint.config", _CONFIG_JS),
+    *(f".mocharc{ext}" for ext in _RC), *(f".eslintrc{ext}" for ext in _RC),
+    *(f".prettierrc{ext}" for ext in _RC),
+    # Gate and scanner configuration: owning one could mute a gate.
+    ".gitleaks.toml", ".gitleaksignore", ".semgrepignore", ".semgrep.yml", ".semgrep.yaml",
+    "ruff.toml", ".ruff.toml", "pyrightconfig.json", "mypy.ini", ".mypy.ini",
+    "osv-scanner.toml", ".pre-commit-config.yaml",
 )  # fmt: skip
-"""Test-runner configuration (ARCHITECTURE §13.3): owning one is shown at G3."""
+"""Test-runner, gate and scanner configuration (ARCHITECTURE §13.3): owning one is shown at G3."""
 
 
 class IssueCode(StrEnum):
@@ -201,14 +224,21 @@ def literal_prefix(glob: str) -> tuple[str, ...]:
 
 
 def _match(parts: Sequence[str], pattern: Sequence[str]) -> bool:
-    if not pattern:
-        return not parts
-    if pattern[0] == "**":
-        return any(_match(parts[k:], pattern[1:]) for k in range(len(parts) + 1))
-    return bool(parts) and fnmatchcase(parts[0], pattern[0]) and _match(parts[1:], pattern[1:])
+    """Component-wise glob match; memoized, so `**/**/**` cannot make it backtrack."""
+
+    @functools.cache
+    def at(i: int, j: int) -> bool:
+        if j == len(pattern):
+            return i == len(parts)
+        if pattern[j] == "**":
+            return any(at(k, j + 1) for k in range(i, len(parts) + 1))
+        return i < len(parts) and fnmatchcase(parts[i], pattern[j]) and at(i + 1, j + 1)
+
+    return at(0, 0)
 
 
-def is_serialized(glob: str, patterns: Iterable[str]) -> bool:
+@functools.lru_cache(maxsize=16384)
+def is_serialized(glob: str, patterns: tuple[str, ...]) -> bool:
     """Whether a glob names a serialized resource: it equals a `plan.serialized_paths` pattern,
     or it is a literal path that one matches. Patterns are anchored at the repository root."""
     folded = glob.casefold()
@@ -222,14 +252,13 @@ def is_serialized(glob: str, patterns: Iterable[str]) -> bool:
 
 
 def owned_test_or_config(task: Task, test_roots: Sequence[str]) -> list[str]:
-    """The owned globs that may hold tests or test-runner configuration (shown at G3)."""
-    hits: list[str] = []
-    for glob in task.owns_files:
-        base = glob.rsplit("/", 1)[-1].casefold()
-        under_root = any(globs_may_overlap(glob, f"{root}/**") for root in test_roots)
-        if under_root or any(fnmatchcase(base, p) for p in (*_TEST_FILES, *_TEST_CONFIG)):
-            hits.append(glob)
-    return hits
+    """The owned globs that could hold tests or test, gate or scanner configuration (G3).
+
+    Conservative: a glob counts when any path it matches could be such a file, so `src/**`
+    and `src/t*.py` count, and `src/*.md` does not.
+    """
+    patterns = (*(f"{root}/**" for root in test_roots), *_TEST_FILES, *_TEST_CONFIG)
+    return [glob for glob in task.owns_files if any(glob_may_match(glob, p) for p in patterns)]
 
 
 # ---------------------------------------------------------------- metrics
@@ -254,6 +283,8 @@ class _Work:
     """A task on its way from proposal to `Task`; every field already checked."""
 
     id: str
+    where: str
+    """How issues name the task: its ID when well formed, else `tasks[i]` (never model text)."""
     title: str
     description: str
     type: TaskType
@@ -315,13 +346,17 @@ class _Checker:
         out: list[str] = []
         for k, value in enumerate(values):
             try:
+                # Two spellings of one file (NFC and NFD, a variation selector) would look
+                # disjoint here and become the same path once the store cleans the text.
+                if unicodedata.normalize("NFC", sanitize_text(value, source="plan").text) != value:
+                    raise PolicyViolation("not clean, NFC-normalized text")
                 out.append(safe_rel_glob(value, extra_protected=self.rules.extra_protected))
             except PolicyViolation:
                 self.add(
                     IssueCode.UNSAFE_PATH,
                     f"{where}[{k}]",
                     "not a safe repository-relative glob (no absolute path, '..', leading "
-                    "'-', '@' or '+', protected path or .pm/)",
+                    "'-', '@' or '+', protected path or .pm/, invisible or non-NFC characters)",
                     _shown(value),
                 )
         out = _dedupe(out)
@@ -412,6 +447,7 @@ class _Checker:
             )
         return _Work(
             id=p.id,
+            where=where,
             title=self.clean(p.title, f"{where}.title"),
             description=self.clean(p.description, f"{where}.description"),
             type=p.type,
@@ -435,7 +471,7 @@ class _Checker:
                 if dep not in ids:
                     self.add(
                         IssueCode.UNKNOWN_DEPENDENCY,
-                        f"{w.id}.depends_on[{k}]",
+                        f"{w.where}.depends_on[{k}]",
                         "no task in the plan has this ID",
                         _shown(dep),
                     )
@@ -487,6 +523,7 @@ def _merge(a: _Work, b: _Work, menu: Sequence[str]) -> _Work | None:
         title = title[: MAX_TITLE - 1].rstrip() + "…"
     return _Work(
         id=a.id,
+        where=a.where,
         title=title,
         description=description,
         type=min(a.type, b.type, key=_TYPE_RANK.index),
@@ -727,3 +764,23 @@ def validate_plan(proposed: Sequence[ProposedTask], rules: PlanRules) -> PlanVal
         changes=tuple(checker.changes),
         removed_characters=checker.removed,
     )
+
+
+def recheck_plan(tasks: Sequence[Task], rules: PlanRules) -> list[str]:
+    """Re-apply every rule to a plan read from `tasks.yaml`; empty when it is still valid.
+
+    The file is outside aipm's control between `aipm plan` and G3 (a hand edit, or a cloned
+    repository), so G3 checks it again: any issue, and any change the validator would still
+    make (an unresolved overlap, a missing mandatory gate), is a problem.
+    """
+    proposed: list[ProposedTask] = []
+    for t in tasks:
+        data = t.model_dump(mode="json")
+        data["acceptance"] = [c["text"] for c in data["acceptance"]]
+        for key in ("status", "attempts", "base_sha", "blocked", "done"):
+            data.pop(key, None)
+        proposed.append(ProposedTask.model_validate(data))
+    result = validate_plan(proposed, rules)
+    return [i.message for i in result.issues] + [
+        f"not as the validator would leave it: {change}" for change in result.changes
+    ]

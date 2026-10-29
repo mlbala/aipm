@@ -58,7 +58,7 @@ def _task(t: Task) -> list[str]:
         f"- New dependencies: {_listed(deps)}",
     ]
     if t.blocked is not None:
-        question = f"; question: {cell(t.blocked.question)}" if t.blocked.question else ""
+        question = f"; agent says: {cell(t.blocked.question)}" if t.blocked.question else ""
         lines.append(f"- Blocked: {t.blocked.reason.value}{question}")
     if t.description.strip():
         lines.extend(["", t.description.strip()])

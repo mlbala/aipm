@@ -103,7 +103,7 @@ def test_blocked_and_done_tasks(planned: Path) -> None:
     assert "Tasks: 7 (todo 5, in progress 0, blocked 1, done 1, skipped 0)" in out
     assert "[####--------------------------]  14% (1/7)" in out
     assert "  T-002 Slots and appointments without double booking: agent_blocked" in out
-    assert "    question: How long is one slot?" in out
+    assert "    agent says: How long is one slot?" in out
 
 
 def test_json(planned: Path) -> None:

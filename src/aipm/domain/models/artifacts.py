@@ -1,5 +1,6 @@
 """The `.pm/` artifact schemas, v1 (ARCHITECTURE §6.3), plus the repo map written by `init`."""
 
+import graphlib
 import re
 from enum import StrEnum
 from typing import Annotated, ClassVar, Literal, Self
@@ -428,7 +429,8 @@ class BlockedReason(StrEnum):
 
 _PACKAGE_NAMES = {
     Ecosystem.PYPI: r"^[A-Za-z0-9](?:[A-Za-z0-9._\-]{0,98}[A-Za-z0-9])?$",
-    Ecosystem.NPM: r"^(?:@[a-z0-9\-~][a-z0-9\-._~]{0,99}/)?[a-z0-9\-~][a-z0-9\-._~]{0,113}$",
+    # Scope and name start with a letter or digit, so no name can read as an option (`-g`).
+    Ecosystem.NPM: r"^(?:@[a-z0-9][a-z0-9\-._~]{0,99}/)?[a-z0-9][a-z0-9\-._~]{0,113}$",
 }
 
 
@@ -523,6 +525,15 @@ class TasksDoc(YamlArtifact):
     @model_validator(mode="after")
     def _unique_ids(self) -> Self:
         _unique([t.id for t in self.tasks], "task")
+        ids = {t.id for t in self.tasks}
+        for t in self.tasks:
+            missing = [d for d in t.depends_on if d not in ids]
+            if missing:
+                raise ValueError(f"{t.id} depends on unknown tasks: {', '.join(missing)}")
+        try:
+            graphlib.TopologicalSorter({t.id: t.depends_on for t in self.tasks}).prepare()
+        except graphlib.CycleError:
+            raise ValueError("the task dependencies form a cycle") from None
         return self
 
 

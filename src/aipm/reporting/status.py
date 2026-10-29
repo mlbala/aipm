@@ -165,7 +165,7 @@ def render_status(view: StatusView, *, show_all: bool = False) -> list[str]:
             if b.detail:
                 lines.append(f"    {_line(b.detail)}")
             if b.question:
-                lines.append(f"    question: {_line(b.question)}")
+                lines.append(f"    agent says: {_line(b.question)}")
     lines.append("")
     if view.events:
         lines.append(f"Security events ({len(view.events)} unacknowledged):")
@@ -210,7 +210,7 @@ def render_task(task: Task) -> list[str]:
     if task.blocked is not None:
         lines.append(f"  blocked: {task.blocked.reason.value} {_line(task.blocked.detail)}")
         if task.blocked.question:
-            lines.append(f"  question: {_line(task.blocked.question)}")
+            lines.append(f"  agent says: {_line(task.blocked.question)}")
     if task.done is not None:
         lines.append(f"  done: {task.done.commit[:12]} at {task.done.at.isoformat()}")
     if task.description.strip():
