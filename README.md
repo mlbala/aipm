@@ -15,7 +15,7 @@
 uv tool install git+https://github.com/mlbala/aipm
 ```
 
-aipm needs Python 3.12 or later. It is distributed from GitHub only ([ADR-0001](docs/architecture/adr/0001-distribute-from-github.md)).
+aipm needs Python 3.13 or later. It is distributed from GitHub only ([ADR-0001](docs/architecture/adr/0001-distribute-from-github.md)).
 
 ## Use
 
