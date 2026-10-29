@@ -114,9 +114,9 @@ def test_later_milestone_commands_say_when(command: str, case: tuple[list[str], 
     assert result.stdout == ""
 
 
-# v0.1 commands whose build prompt has run (02: init, doctor, trust). They have their own
-# integration tests and no longer answer "not implemented yet".
-BUILT = {"init", "doctor", "trust"}
+# v0.1 commands whose build prompt has run (02: init, doctor, trust; 03: discover, approve).
+# They have their own integration tests and no longer answer "not implemented yet".
+BUILT = {"init", "doctor", "trust", "discover", "approve"}
 
 
 @pytest.mark.parametrize(
@@ -130,7 +130,7 @@ def test_v01_commands_exit_2_until_built(command: str, argv: list[str]) -> None:
 
 @pytest.mark.parametrize("command", sorted(BUILT - {"doctor"}))
 def test_built_commands_are_no_longer_stubs(command: str, tmp_path: Path) -> None:
-    result = runner.invoke(app, ["-C", str(tmp_path), command])
+    result = runner.invoke(app, ["-C", str(tmp_path), *V01_COMMANDS[command]])
     assert result.exit_code == 2
     assert "not implemented yet" not in result.stderr
     assert "is not inside a git repository" in result.stderr

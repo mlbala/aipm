@@ -52,7 +52,13 @@ def envelope(
 def error_envelope(error: AipmError, *, command: str, version: str) -> Envelope:
     """Build the envelope for a failed command."""
     item: ErrorItem = {"code": error.code, "message": error.message, "hint": error.hint}
-    return envelope(command=command, version=version, exit_code=error.exit_code, errors=[item])
+    return envelope(
+        command=command,
+        version=version,
+        exit_code=error.exit_code,
+        data=dict(error.data),
+        errors=[item],
+    )
 
 
 def dumps(env: Envelope) -> str:

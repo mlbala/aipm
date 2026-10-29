@@ -6,7 +6,7 @@ from typing import Annotated
 import typer
 
 from aipm.cli.commands._options import AcceptRisk
-from aipm.cli.output import not_implemented_yet
+from aipm.cli.output import global_options, handled, is_interactive, print_untrusted, succeed, warn
 
 
 def command(
@@ -32,4 +32,32 @@ def command(
     accept_risk: AcceptRisk = False,
 ) -> None:
     """Interview you for requirements, then write requirements.yaml and the PRD."""
-    not_implemented_yet(ctx, "discover", prompt="03")
+    opts = global_options(ctx)
+    with handled(ctx, "discover"):
+        from aipm.app import discover as use_case
+        from aipm.cli import prompter as prompters
+
+        prompter = prompters.make_prompter() if is_interactive(ctx) else None
+        options = use_case.DiscoverOptions(
+            from_file=from_file,
+            answers=answers,
+            defaults=defaults,
+            edit=edit,
+            max_rounds=max_rounds,
+            threshold=threshold,
+            accept_risk=accept_risk,
+            yes=opts.yes,
+        )
+        result = use_case.run(opts.project, options=options, prompter=prompter)
+        warn(result.warnings)
+        if not opts.json:
+            print_untrusted(
+                f"Coverage {result.score:.2f} (target {result.threshold:.2f}) after "
+                f"{result.rounds} rounds; {result.answers} answers, "
+                f"{result.assumptions} assumptions, {len(result.open_questions)} open questions."
+            )
+            print_untrusted(f"Wrote: {', '.join(f'.pm/{name}' for name in result.written)}")
+            print_untrusted(f"G1 (PRD approval): {result.approval}")
+            for note in result.notes:
+                print_untrusted(f"note: {note}")
+        succeed(ctx, "discover", result.to_data())

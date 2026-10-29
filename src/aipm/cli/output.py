@@ -6,6 +6,7 @@ from an untrusted source, or text that includes repository data, goes through
 terminal escape sequences can take effect (SECURITY.md §7.10).
 """
 
+import json
 import logging
 import os
 import sys
@@ -75,7 +76,9 @@ def print_untrusted(text: str, *, err: bool = False, source: str = "output") -> 
 def fail(ctx: typer.Context, command: str, error: AipmError) -> NoReturn:
     """Report `error` and exit with its exit code.
 
-    With `--json`, exactly one envelope goes to stdout. Otherwise the message goes to stderr.
+    With `--json`, exactly one envelope goes to stdout. Otherwise the message goes to stderr, and
+    the error's machine-readable `data` (such as pending questions) goes to stdout as one JSON
+    object, built with `json.dumps` only (SECURITY.md §7.10).
     """
     if global_options(ctx).json:
         typer.echo(dumps(error_envelope(error, command=command, version=__version__)))
@@ -83,6 +86,8 @@ def fail(ctx: typer.Context, command: str, error: AipmError) -> NoReturn:
         print_untrusted(f"aipm {command}: {error.message}", err=True)
         if error.hint:
             print_untrusted(f"hint: {error.hint}", err=True)
+        if error.data:
+            typer.echo(json.dumps(error.data, ensure_ascii=True))
     raise typer.Exit(code=int(error.exit_code))
 
 
