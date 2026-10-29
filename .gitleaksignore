@@ -1,0 +1,10 @@
+# Reviewed gitleaks false positives (AGENTS.md rule 9: tests use fake values only).
+# Each line is one finding's fingerprint: <commit>:<file>:<rule>:<line>. Only these exact
+# findings are suppressed; every rule still applies to every other line and commit.
+#
+# Commit 9dc9cc6 ("security: redactor") used the fake value "abcdefgh1234" in the generic
+# assignment cases of test_redact.py. Later commits use a low-entropy fake value instead, and
+# the commit cannot be rewritten once pushed (AGENTS.md "Git").
+9dc9cc6ddf76796e1ed130b5dfd29649f07949e8:tests/security/test_redact.py:generic-api-key:126
+9dc9cc6ddf76796e1ed130b5dfd29649f07949e8:tests/security/test_redact.py:generic-api-key:127
+9dc9cc6ddf76796e1ed130b5dfd29649f07949e8:tests/security/test_redact.py:generic-api-key:130

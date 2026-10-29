@@ -1,4 +1,51 @@
-# Built-in configuration defaults (ARCHITECTURE §15).
-# Placeholder: build prompt 02 fills this in, with every key's class
-# (user-only, tighten-only or repo-ok) recorded in aipm/config/schema.py.
+# Built-in configuration defaults (ARCHITECTURE §15): the lowest layer.
+# Layers, later wins: these defaults < user config < .pm/config.yaml < AIPM_* < CLI flags.
+# Key classes (user-only, tighten-only, repo-ok) are recorded in aipm/config/schema.py; a
+# repo-level file cannot set a user-only key or relax a tighten-only one.
+# tests/unit/test_config.py checks that this file equals the schema's own defaults.
 schema_version: 1
+project: {name: null}
+stack_template: null
+llm:
+  provider: anthropic                 # user-only; anthropic | openai-compatible
+  base_url: null                      # user-only
+  api_key_env: ANTHROPIC_API_KEY      # user-only; the name of the variable, never the key
+  models: {default: claude-sonnet-5-5, interviewer: claude-haiku-5-5, ac_reviewer: claude-haiku-5-5}
+  max_output_tokens: 8000             # no sampling keys: the gateway never sends them (§14)
+  pricing: {}                         # user-only
+discover: {coverage_threshold: 0.85, max_rounds: 6, questions_per_round: 4}
+approvals: {gates: [G1, G2, G3]}
+plan: {serialized_paths: [pyproject.toml, uv.lock, package.json, "*lock*", "migrations/**"]}
+dispatch:
+  enabled: true
+  default_tool: claude
+  parallel: 1                         # tighten-only (the minimum wins)
+  max_retries: 3                      # tighten-only
+  task_timeout: 20m                   # tighten-only
+  fail_fast: true
+  sandbox: auto                       # tighten-only; srt is strictest, none loosest
+  tools:
+    claude:
+      bare: true                      # tighten-only
+      pass_env: []                    # user-only
+      allow_auto_mode: false          # user-only
+budget: {run_usd: 10.0, task_usd: 2.0, run_tokens: 2000000}   # tighten-only
+allowed_executables: []               # argv prefixes, copied from the stack template (§13.1)
+test_roots: []                        # copied from the stack template
+prepare: null                         # copied from the stack template
+gates: {}                             # copied from the stack template
+scanners:                             # v0.2
+  semgrep: {configs: [p/python, p/secrets]}
+  extra: {}
+security:                             # tighten-only
+  require_sandbox: false
+  network: {agent: api-only, gates: none, prepare: registries}
+  allow_new_dependencies: ask         # deny is strictest
+  min_dependency_age_days: 30         # the maximum wins
+  extra_protected_paths: []           # the union wins
+  extra_redact_patterns: []           # the union wins
+  extra_allowed_executables: []       # user-only
+  max_input_kib: 256
+context: {allowed_url_domains: []}    # tighten-only (the intersection)
+git: {integration_branch: aipm/integration}
+logging: {level: info, json: false}

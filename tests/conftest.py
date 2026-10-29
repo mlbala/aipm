@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
+import pytest_socket
 
 from tests.fakes.secrets import FAKE_SECRETS
 
@@ -98,6 +99,16 @@ def fake_secrets(monkeypatch: pytest.MonkeyPatch) -> FakeSecrets:
     for name, value in FAKE_SECRETS.items():
         monkeypatch.setenv(name, value)
     return FakeSecrets()
+
+
+@pytest.fixture
+def allow_unix_sockets() -> None:
+    """Allow AF_UNIX sockets only, for asyncio's event-loop self-pipe; the network stays off.
+
+    pytest-socket removes its restrictions again at teardown.
+    """
+    pytest_socket.enable_socket()
+    pytest_socket.disable_socket(allow_unix_socket=True)
 
 
 @pytest.fixture

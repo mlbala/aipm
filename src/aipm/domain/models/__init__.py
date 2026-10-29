@@ -1,73 +1,155 @@
 """Schemas for `.pm/` artifacts and the data passed between components (ARCHITECTURE §6.3).
 
-Placeholders: build prompt 02 replaces them with Pydantic v2 models that use
-`extra="forbid"`, length limits, ID regexes and enums.
+Pydantic v2 models with `extra="forbid"`, length limits, ID regexes and enums. The placeholders
+at the end belong to later build prompts, which replace them.
 """
 
 from dataclasses import dataclass
-from enum import StrEnum
-from typing import NewType
+from typing import Any
 
+from aipm.domain.models.artifacts import (
+    AcceptanceCriterion,
+    Answer,
+    AnswerSource,
+    Approval,
+    ApprovalGate,
+    ApprovalsDoc,
+    ArchitectureDerivedFrom,
+    ArchitectureDoc,
+    ArchitectureFrontMatter,
+    Assumption,
+    Blocked,
+    BlockedReason,
+    Component,
+    Coverage,
+    DependencyAdd,
+    Dimension,
+    Done,
+    Ecosystem,
+    Feature,
+    Mode,
+    NonFunctional,
+    OpenQuestion,
+    PrdDerivedFrom,
+    PrdDoc,
+    PrdFrontMatter,
+    Priority,
+    ProjectInfo,
+    RepoMapDoc,
+    RepoMapFrontMatter,
+    RequirementsDoc,
+    Source,
+    SourceKind,
+    Stack,
+    Stride,
+    Task,
+    TasksDerivedFrom,
+    TasksDoc,
+    TaskSize,
+    TaskStatus,
+    TaskType,
+    Threat,
+    ThreatModelDerivedFrom,
+    ThreatModelDoc,
+    ThreatModelFrontMatter,
+)
+from aipm.domain.models.base import (
+    SCHEMA_VERSION,
+    ArtifactKind,
+    FrontMatter,
+    MarkdownArtifact,
+    Phase,
+    RepoId,
+    RoleName,
+    Severity,
+    StrictModel,
+    ToolName,
+    YamlArtifact,
+)
+from aipm.domain.models.events import (
+    JournalEvent,
+    JournalEventType,
+    SecurityEvent,
+    SecurityEventKind,
+)
+from aipm.domain.models.gates import BuiltinGate, GateDef, NetworkProfile, PrepareDef
 
-class ArtifactKind(StrEnum):
-    """The kinds of `.pm/` artifact (ARCHITECTURE §6.1)."""
+type Artifact = YamlArtifact | MarkdownArtifact[Any]
+"""Any artifact the state store can load and save."""
 
-    CONFIG = "config"
-    REQUIREMENTS = "requirements"
-    PRD = "prd"
-    ARCHITECTURE = "architecture"
-    ADR = "adr"
-    THREAT_MODEL = "threat_model"
-    TASKS = "tasks"
-    WORKSHEET = "worksheet"
-    APPROVALS = "approvals"
-    REPO_MAP = "repo_map"
-
-
-class Phase(StrEnum):
-    """Project phases (ARCHITECTURE §7.1)."""
-
-    UNINITIALIZED = "uninitialized"
-    INITIALIZED = "initialized"
-    DISCOVERING = "discovering"
-    REQUIREMENTS_READY = "requirements_ready"
-    PRD_DRAFT = "prd_draft"
-    PRD_APPROVED = "prd_approved"
-    DESIGN_DRAFT = "design_draft"
-    DESIGN_APPROVED = "design_approved"
-    PLAN_DRAFT = "plan_draft"
-    PLAN_APPROVED = "plan_approved"
-    BUILDING = "building"
-    BUILT = "built"
-
-
-class RoleName(StrEnum):
-    """LLM roles (ARCHITECTURE §14.1)."""
-
-    INTERVIEWER = "interviewer"
-    PRD_WRITER = "prd_writer"
-    ARCHITECT = "architect"
-    THREAT_MODELER = "threat_modeler"
-    PLANNER = "planner"
-    AC_REVIEWER = "ac_reviewer"
-
-
-class ToolName(StrEnum):
-    """Coding tools with an adapter (ARCHITECTURE §11)."""
-
-    CLAUDE = "claude"
-    CODEX = "codex"
-    COPILOT = "copilot"
-    GEMINI = "gemini"
-
-
-RepoId = NewType("RepoId", str)
-"""First 16 hex characters of sha256(realpath(repo_root)) (ARCHITECTURE §6.1)."""
-
-
-@dataclass(frozen=True, slots=True)
-class Artifact:
-    """Placeholder for a loaded `.pm/` artifact (build prompt 02)."""
+__all__ = [
+    "SCHEMA_VERSION",
+    "AcceptanceCriterion",
+    "Answer",
+    "AnswerSource",
+    "Approval",
+    "ApprovalGate",
+    "ApprovalsDoc",
+    "ArchitectureDerivedFrom",
+    "ArchitectureDoc",
+    "ArchitectureFrontMatter",
+    "Artifact",
+    "ArtifactKind",
+    "Assumption",
+    "Blocked",
+    "BlockedReason",
+    "BuiltinGate",
+    "ChangeSet",
+    "Component",
+    "Coverage",
+    "DependencyAdd",
+    "Dimension",
+    "Done",
+    "Ecosystem",
+    "Feature",
+    "FrontMatter",
+    "GateDef",
+    "GateReport",
+    "GeneratedFile",
+    "JournalEvent",
+    "JournalEventType",
+    "MarkdownArtifact",
+    "Mode",
+    "NetworkProfile",
+    "NonFunctional",
+    "OpenQuestion",
+    "Phase",
+    "PrdDerivedFrom",
+    "PrdDoc",
+    "PrdFrontMatter",
+    "PrepareDef",
+    "Priority",
+    "ProjectContext",
+    "ProjectInfo",
+    "RepoId",
+    "RepoMapDoc",
+    "RepoMapFrontMatter",
+    "RequirementsDoc",
+    "RoleName",
+    "SecurityEvent",
+    "SecurityEventKind",
+    "Severity",
+    "Source",
+    "SourceKind",
+    "Stack",
+    "StateSnapshot",
+    "StrictModel",
+    "Stride",
+    "Task",
+    "TaskSize",
+    "TaskSpec",
+    "TaskStatus",
+    "TaskType",
+    "TasksDerivedFrom",
+    "TasksDoc",
+    "Threat",
+    "ThreatModelDerivedFrom",
+    "ThreatModelDoc",
+    "ThreatModelFrontMatter",
+    "ToolName",
+    "Workspace",
+    "YamlArtifact",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,18 +158,8 @@ class StateSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
-class Task:
-    """Placeholder for a task in `tasks.yaml` (build prompt 02)."""
-
-
-@dataclass(frozen=True, slots=True)
 class TaskSpec:
     """Placeholder for the canonical task spec given to adapters (ARCHITECTURE §10.1)."""
-
-
-@dataclass(frozen=True, slots=True)
-class GateDef:
-    """Placeholder for one gate from the trusted menu (ARCHITECTURE §13.1)."""
 
 
 @dataclass(frozen=True, slots=True)
