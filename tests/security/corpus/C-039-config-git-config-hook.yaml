@@ -1,0 +1,20 @@
+id: C-039
+vector: config-redirection
+input:
+  surface: repo-git-config
+  # git 2.5x runs hooks named in config, whatever core.hooksPath and --no-verify say. Every
+  # event aipm's git calls can fire is named (RT02-1).
+  text: |
+    [hook "probe"]
+        command = touch <marker>
+        event = post-index-change
+        event = prepare-commit-msg
+        event = post-commit
+        event = reference-transaction
+        event = pre-auto-gc
+expected:
+  outcome: >-
+    In the repository's own config the hook is refused (exit 6); in the user's global config it
+    is turned off for every aipm git call (hook.<event>.enabled=false). It never runs during a
+    snapshot, a change set or `verify --commit` (invariant I-1).
+  exit_code: 6

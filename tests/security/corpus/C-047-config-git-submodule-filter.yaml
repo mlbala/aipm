@@ -1,0 +1,17 @@
+id: C-047
+vector: config-redirection
+input:
+  surface: repo-git-config:submodule
+  # The same filter as C-038, in the git config of a populated submodule
+  # (.git/modules/<name>/config). git runs `git status` inside the submodule to see whether it
+  # is dirty, and that process reads the submodule's own config (found in the security review
+  # of the RT02-1 fix).
+  text: |
+    [filter "probe"]
+        clean = touch <marker>; cat
+        smudge = cat
+expected:
+  outcome: >-
+    aipm checks the config of every submodule git may enter, nested, and refuses (exit 6)
+    before git lists changes, so the filter never runs (invariant I-1).
+  exit_code: 6

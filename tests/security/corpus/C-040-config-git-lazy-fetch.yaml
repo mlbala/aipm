@@ -1,0 +1,21 @@
+id: C-040
+vector: config-redirection
+input:
+  surface: repo-git-config
+  # A partial clone whose promisor remote is an ext:: transport, a command. Reading a missing
+  # object fetches it lazily (RT02-1).
+  text: |
+    [core]
+        repositoryformatversion = 1
+    [extensions]
+        partialClone = origin
+    [remote "origin"]
+        url = ext::touch <marker>
+        promisor = true
+    [protocol "ext"]
+        allow = always
+expected:
+  outcome: >-
+    aipm never fetches: every git call runs with GIT_NO_LAZY_FETCH=1 and no allowed transport,
+    so reading the missing object fails (exit 2) and the transport command never runs.
+  exit_code: 2

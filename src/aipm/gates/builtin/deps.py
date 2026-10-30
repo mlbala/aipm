@@ -2,23 +2,30 @@
 changed lockfiles (ARCHITECTURE §13.3, SECURITY.md §12.2).
 
 With no manifest or lockfile changed, the gate passes with "no dependency changes", so
-osv-scanner is needed only when dependencies change. A typosquat **fails** the gate (SECURITY.md
-§14.3, which wins over the "warning" of §13.3). A registry lookup that fails is an error.
+osv-scanner is needed only when dependencies change. A package that only a lockfile adds (a
+transitive one, or one a task slipped in beside its declared dependency) is looked up too: it
+must exist and be old enough (red-team v0.2, RT02-3). The typosquat check stays on the names a
+manifest declares: upstream maintainers choose transitive names, so it would flag them wrongly.
+A typosquat **fails** the gate (SECURITY.md §14.3, which wins over the "warning" of §13.3). A
+registry lookup that fails is an error.
 """
 
 import time
 from datetime import datetime
 
+from aipm.domain.errors import PolicyViolation
 from aipm.domain.models import ChangeStatus, Ecosystem, GateDef, GateFinding, GateStatus, Severity
 from aipm.gates.builtin import BuiltinOutcome, outcome, to_findings, tool_missing
 from aipm.gates.context import GateContext
 from aipm.scanners import osv
 from aipm.scanners.base import ScanStatus
 from aipm.scanners.registry import RegistryError, first_release
-from aipm.security.diff_checks import LOCKFILES, is_manifest, new_dependencies
+from aipm.security.diff_checks import LOCKFILES, is_manifest, new_dependencies, new_lock_packages
 from aipm.security.supply_chain import age_ok, typosquat_of
 
 NAME = "deps"
+MAX_LOOKUPS = 500
+"""Registry lookups per attempt; more new packages than this is an error, never a pass."""
 _REGISTRY = {Ecosystem.PYPI: "PyPI", Ecosystem.NPM: "npm"}
 
 
@@ -27,17 +34,38 @@ def _finding(path: str, rule: str, message: str) -> GateFinding:
                        message=message[:500])  # fmt: skip
 
 
+def _to_check(ctx: GateContext) -> list[tuple[str, Ecosystem, str, bool]]:
+    """(path, ecosystem, name, direct) for every new package: manifests first, then lockfiles."""
+    seen: set[tuple[Ecosystem, str]] = set()
+    found: list[tuple[str, Ecosystem, str, bool]] = []
+    for direct, items in ((True, new_dependencies(ctx.changes)),
+                          (False, new_lock_packages(ctx.changes))):  # fmt: skip
+        for path, eco, name in items:
+            if (eco, name) not in seen:
+                seen.add((eco, name))
+                found.append((path, eco, name, direct))
+    return found
+
+
 def check_new(ctx: GateContext, now: datetime) -> tuple[list[GateFinding], list[str]]:
-    """Registry existence, first-release age and typosquats of every new dependency."""
+    """Registry existence and first-release age of every new package, and typosquats of every
+    new direct dependency."""
     findings: list[GateFinding] = []
     errors: list[str] = []
     min_days = ctx.cfg.security.min_dependency_age_days
-    for path, eco, name in new_dependencies(ctx.changes):
-        squat = typosquat_of(eco, name)
+    packages = _to_check(ctx)
+    if len(packages) > MAX_LOOKUPS:
+        errors.append(f"{len(packages)} new packages, more than the {MAX_LOOKUPS} aipm looks up")
+        packages = packages[:MAX_LOOKUPS]
+    for path, eco, name, direct in packages:
+        squat = typosquat_of(eco, name) if direct else None
         if squat is not None:
             findings.append(_finding(path, "typosquat", f"{name} is one edit from {squat}"))
         try:
             info = first_release(eco, name, fetch=ctx.fetch)
+        except PolicyViolation:
+            findings.append(_finding(path, "invalid-name", f"{name!r} is not a valid package name"))
+            continue
         except RegistryError as exc:
             errors.append(f"{eco.value} {name}: {exc}")
             continue

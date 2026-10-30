@@ -15,6 +15,17 @@ at all: a changed one is a severe violation, and git is not started on it (ADR-0
 `commit` runs `git commit --no-verify` with signing taken from the user's global config, never
 the repository's (`gpg.program`, `gpg.ssh.program`, `gpg.x509.program`, `gpg.format`,
 `commit.gpgsign`).
+
+A repository copied with its `.git` directory (a tarball, a copied checkout) brings its own
+`.git/config`, and git runs programs named there that the options above do not reach (red-team
+v0.2, RT02-1, ADR-0022). So every call also gets, through git's `GIT_CONFIG_*` environment
+(the same precedence as `-c`): `hook.<event>.enabled=false` for every hook event, because git
+2.5x runs hooks named in config (`hook.<name>.command`) whatever `core.hooksPath` and
+`--no-verify` say; `gc.auto=0` and `maintenance.auto=false`; and no lazy fetch from a promisor
+remote and no transport at all (`GIT_NO_LAZY_FETCH`, `GIT_ALLOW_PROTOCOL`), since a remote URL
+can name a command (`ext::`). Before git compares or stages work-tree files, `check_repo_config`
+refuses (exit 6) a repository whose own config names a filter driver, a hook command, an SSH
+signing-key command or another work tree.
 """
 
 import hashlib
@@ -44,12 +55,43 @@ HARDENING: tuple[str, ...] = (
     "--no-pager",
 )  # fmt: skip
 """Options that go before every git subcommand."""
+HOOK_EVENTS: tuple[str, ...] = (
+    "applypatch-msg", "pre-applypatch", "post-applypatch", "pre-commit", "pre-merge-commit",
+    "prepare-commit-msg", "commit-msg", "post-commit", "pre-rebase", "post-checkout",
+    "post-merge", "pre-push", "pre-receive", "update", "proc-receive", "post-receive",
+    "post-update", "reference-transaction", "push-to-checkout", "pre-auto-gc", "post-rewrite",
+    "sendemail-validate", "fsmonitor-watchman", "p4-changelist", "p4-prepare-changelist",
+    "p4-post-changelist", "p4-pre-submit", "post-index-change",
+)  # fmt: skip
+"""Every hook event in githooks(5). Older git ignores `hook.<event>.enabled`, and has no config
+hooks for it to stop."""
+CONFIG_OVERRIDES: tuple[tuple[str, str], ...] = (
+    *((f"hook.{event}.enabled", "false") for event in HOOK_EVENTS),
+    ("gc.auto", "0"),
+    ("maintenance.auto", "false"),
+)
+"""Config set for every call through `GIT_CONFIG_COUNT`, which ranks with `-c` (RT02-1)."""
+
+
+def _config_env(pairs: Sequence[tuple[str, str]]) -> dict[str, str]:
+    env = {"GIT_CONFIG_COUNT": str(len(pairs))}
+    for index, (key, value) in enumerate(pairs):
+        env[f"GIT_CONFIG_KEY_{index}"] = key
+        env[f"GIT_CONFIG_VALUE_{index}"] = value
+    return env
+
+
 GIT_ENV: dict[str, str] = {
     "GIT_TERMINAL_PROMPT": "0",
     "GIT_OPTIONAL_LOCKS": "0",
     "GIT_CONFIG_NOSYSTEM": "1",
     "GIT_NO_REPLACE_OBJECTS": "1",
+    "GIT_NO_LAZY_FETCH": "1",
+    "GIT_ALLOW_PROTOCOL": "none",
+    **_config_env(CONFIG_OVERRIDES),
 }
+"""`GIT_ALLOW_PROTOCOL` names no real transport, so every one is refused, whatever the
+repository's `protocol.*.allow` says; aipm never fetches or pushes (SECURITY.md §11)."""
 _LITERAL = {"GIT_LITERAL_PATHSPECS": "1"}
 _SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _REV = re.compile(r"[0-9a-f]{7,64}")
@@ -59,7 +101,7 @@ MAX_LIST_BYTES = 32 * 1_048_576
 MAX_CHANGES = 2_000
 MAX_SNAPSHOT_FILES = 20_000
 MAX_CONTENT_BYTES = 262_144
-MAX_TOTAL_CONTENT = 8 * 1_048_576
+MAX_TOTAL_CONTENT = 48 * 1_048_576
 MAX_HASH_BYTES = 64 * 1_048_576
 MAX_TREE_ENTRIES = 5_000
 _CHUNK = 1_048_576
@@ -84,8 +126,10 @@ AGENT_CONFIG_WATCH: tuple[str, ...] = (
 §9.1). Plugin caches, which agents update on their own, are left out."""
 GLOBAL_GIT_FILES: tuple[str, ...] = (".gitconfig",)
 XDG_GIT_FILES: tuple[str, ...] = ("git/config", "git/attributes", "git/ignore")
-_INCLUDE = re.compile(r"^\s*path\s*=\s*(.+?)\s*$")
-_SECTION = re.compile(r"^\s*\[\s*([A-Za-z]+)")
+MAX_INCLUDE_DEPTH = 10
+"""git's own limit on nested includes."""
+MAX_WATCHED_CONFIGS = 64
+_KEY = re.compile(r"([A-Za-z][A-Za-z0-9-]*)\s*(?:=(.*))?", re.DOTALL)
 
 
 def git_argv(repo: Path, *args: str) -> list[str]:
@@ -131,6 +175,98 @@ def _checked(result: ProcessResult, what: str) -> bytes:
             detail = "its output was larger than aipm reads"
         raise UsageError(f"git {what} failed: {detail}")
     return result.stdout
+
+
+_PROGRAM_KEY = re.compile(
+    r"filter\..+\.(?:clean|smudge|process)|hook\..+\.command|trailer\..+\.(?:cmd|command)|"
+    r"gpg\.ssh\.defaultkeycommand",
+    re.DOTALL,
+)
+"""Repository config keys that make the git commands aipm runs start a program."""
+_REPO_SCOPES = frozenset({b"local", b"worktree"})
+
+
+def repo_config_entries(repo: Path) -> list[tuple[str, str]]:
+    """`(key, value)` for every setting the repository's own config files hold: `.git/config`,
+    `config.worktree` and every file they include, as git itself reads them (`git config
+    --list --show-scope`). Keys come as git prints them: section and name lower case."""
+    out = _checked(
+        _run(repo, "config", "--list", "--show-scope", "-z", "--includes", max_output=1_048_576),
+        "config",
+    )
+    fields = _fields(out)
+    if len(fields) % 2:
+        raise UsageError("git config printed a list aipm cannot read")
+    entries: list[tuple[str, str]] = []
+    for scope, item in zip(fields[0::2], fields[1::2], strict=True):
+        if scope in _REPO_SCOPES:
+            key, _, value = item.partition(b"\n")
+            entries.append(
+                (key.decode("utf-8", errors="replace"), value.decode("utf-8", errors="replace"))
+            )
+    return entries
+
+
+MAX_SUBMODULE_DEPTH = 4
+MAX_SUBMODULES = 64
+
+
+def _gitlinks(repo: Path, base: str | None) -> list[str]:
+    """Submodule paths git may enter: gitlinks in the index, and in `base` when given."""
+    out = _checked(_run(repo, "ls-files", "-s", "-z", max_output=MAX_LIST_BYTES), "ls-files")
+    links: set[str] = set()
+    for record in _fields(out):
+        meta, _, raw = record.partition(b"\t")
+        path = _decode(raw)
+        if meta.startswith(GITLINK_MODE.encode() + b" ") and path is not None:
+            links.add(path)
+    if base is not None:
+        links |= {p for p, (mode, _) in tree_entries(repo, base).items() if mode == GITLINK_MODE}
+    return sorted(links)
+
+
+def check_repo_config(repo: Path, base: str | None = None, *, depth: int = 0) -> None:
+    """Refuse (exit 6) a repository whose own git config makes git run a program, or work on
+    another directory, while aipm compares or stages files (RT02-1, ADR-0022).
+
+    A filter driver (`filter.<name>.clean`, `smudge`, `process`) runs on every file its
+    attributes name; a config hook (`hook.<name>.command`) and a trailer command run on events
+    aipm cannot rule out on every git version; `gpg.ssh.defaultKeyCommand` runs when a commit is
+    signed with SSH and no key is set; `core.worktree` points git at files aipm does not check.
+    A clone never brings its own `.git/config`; a tarball or a copied checkout can. The user's
+    global config is theirs and is not refused (hooks are still turned off).
+
+    git runs `git status` inside every populated submodule to see whether it is dirty, and that
+    process reads the submodule's own config, so each submodule git may enter (the index's
+    gitlinks, and `base`'s) is checked the same way, nested up to `MAX_SUBMODULE_DEPTH`.
+    """
+    found: list[str] = []
+    for key, value in repo_config_entries(repo):
+        if _PROGRAM_KEY.fullmatch(key):
+            found.append(key)
+        elif key == "core.worktree" and not _same_dir(git_dirs(repo).git_dir / value, repo):
+            found.append(key)
+    if found:
+        names = ", ".join(sorted(set(found))[:5])
+        where = "the repository's own git config" if depth == 0 else f"the git config of {repo}"
+        raise PolicyViolation(
+            f"{where} sets {names}, which would make git run a program, or read another work "
+            "tree, outside aipm's checks and sandbox",
+            hint="Move a filter driver you rely on (git-lfs, git-crypt) to your global git "
+            "config (~/.gitconfig), or remove the setting from .git/config, then run aipm again.",
+        )
+    if depth >= MAX_SUBMODULE_DEPTH:
+        return
+    for path in _gitlinks(repo, base)[:MAX_SUBMODULES]:
+        if os.path.lexists(repo / path / ".git"):
+            check_repo_config(repo / path, depth=depth + 1)
+
+
+def _same_dir(path: Path, repo: Path) -> bool:
+    try:
+        return path.samefile(repo)
+    except OSError:
+        return False
 
 
 def head_sha(repo: Path) -> str:
@@ -231,6 +367,7 @@ def parse_status_v2(data: bytes) -> list[StatusEntry]:
 
 def status_porcelain_v2(repo: Path) -> list[StatusEntry]:
     """`git status --porcelain=v2 -z`, untracked files listed one by one, no rename detection."""
+    check_repo_config(repo)
     out = _checked(
         _run(repo, "status", "--porcelain=v2", "-z", "--untracked-files=all", "--no-renames",
              "--ignore-submodules=none", max_output=MAX_LIST_BYTES),
@@ -314,6 +451,7 @@ def parse_numstat(data: bytes) -> list[DiffStat]:
 
 def diff_stats(repo: Path, base: str) -> list[DiffStat]:
     """Lines added and deleted per tracked path between `base` and the work tree."""
+    check_repo_config(repo, base)
     out = _checked(
         _run(repo, "diff", *_DIFF_FLAGS, "--numstat", "-z", base, "--",
              max_output=MAX_LIST_BYTES),
@@ -326,6 +464,7 @@ def diff_text(repo: Path, base: str, paths: Sequence[str], *, max_bytes: int) ->
     """The unified diff of `paths` from `base` to the work tree (T2), and whether it was cut."""
     if not paths:
         return "", False
+    check_repo_config(repo, base)
     with base_index(repo, base) as env:
         result = _run(repo, "diff", *_DIFF_FLAGS, "--no-color", base, "--", *paths,
                       max_output=max_bytes, env=env)  # fmt: skip
@@ -431,6 +570,7 @@ def commit(
     for key, value in trailers:
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9\-]{0,40}", key) or "\n" in value:
             raise UsageError(f"not a commit trailer: {key!r}")
+    check_repo_config(repo)
     signing = signing_overrides(repo)
     _checked(_run(repo, "add", "-A", "--", *paths, max_output=65_536), "add")
     body = message.strip() + "\n\n" + "".join(f"{k}: {v}\n" for k, v in trailers)
@@ -451,6 +591,66 @@ def commit(
     )
     _checked(result, "commit")
     return head_sha(repo)
+
+
+type StagedId = tuple[str, str] | None
+"""`("file" or "link", object id)`, or `None` for a path with nothing there."""
+
+
+def _hash_object(repo: Path, *args: str, stdin: bytes | None = None) -> list[str]:
+    out = _checked(_run(repo, "hash-object", *args, stdin=stdin, max_output=1_048_576),
+                   "hash-object")  # fmt: skip
+    ids = out.decode("ascii", errors="replace").split()
+    if not all(_SHA.fullmatch(i) for i in ids):
+        raise UsageError("git hash-object printed something aipm cannot read")
+    return ids
+
+
+def staged_ids(repo: Path, paths: Sequence[str]) -> dict[str, StagedId]:
+    """What `git add` would store for each path right now, through the same attributes and
+    filters (RT02-8): taken before the gates run, compared with the commit afterwards. A
+    directory (a submodule) is left out; it holds no file content to compare."""
+    ids: dict[str, StagedId] = {}
+    plain: list[str] = []
+    for path in paths:
+        full = repo / path
+        try:
+            info = os.lstat(full)
+        except FileNotFoundError:
+            ids[path] = None
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            target = os.fsencode(full.readlink())
+            ids[path] = ("link", _hash_object(repo, "--stdin", "--no-filters", stdin=target)[0])
+        elif stat.S_ISREG(info.st_mode):
+            plain.append(path)
+    if plain:
+        check_repo_config(repo)
+    lined = [p for p in plain if "\n" not in p and "\r" not in p]
+    if lined:
+        found = _hash_object(repo, "--stdin-paths", stdin="".join(f"{p}\n" for p in lined).encode())
+        if len(found) != len(lined):
+            raise UsageError("git hash-object did not hash every file")
+        ids.update((p, ("file", oid)) for p, oid in zip(lined, found, strict=True))
+    for path in plain:
+        if path not in ids:
+            ids[path] = ("file", _hash_object(repo, "--", path)[0])
+    return ids
+
+
+def committed_ids(repo: Path, rev: str, paths: Sequence[str]) -> dict[str, StagedId]:
+    """What the commit `rev` holds at each path, in the form `staged_ids` gives."""
+    entries = tree_entries(repo, rev)
+    ids: dict[str, StagedId] = {}
+    for path in paths:
+        entry = entries.get(path)
+        if entry is None:
+            ids[path] = None
+        else:
+            mode, oid = entry
+            kind = "link" if mode == SYMLINK_MODE else "file" if mode.startswith("100") else mode
+            ids[path] = (kind, oid)
+    return ids
 
 
 # ---------------------------------------------------------------- hashing and integrity
@@ -583,33 +783,142 @@ def git_dirs(repo: Path) -> GitDirs:
     return GitDirs(git_dir, common, dotgit)
 
 
-def _include_paths(config: Path, home: Path) -> list[Path]:
-    """Files a git config names in `[include]` and `[includeIf]` sections (one level)."""
+def _read_config(path: Path) -> str:
+    """A config file's text, or "" when it is not a regular file aipm can read now (never
+    blocks on a FIFO)."""
     try:
-        lines = config.read_text(encoding="utf-8", errors="replace")[:1_048_576].splitlines()
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     except OSError:
-        return []
-    found: list[Path] = []
-    section = ""
-    for line in lines:
-        head = _SECTION.match(line)
-        if head is not None:
-            section = head.group(1).casefold()
+        return ""
+    with os.fdopen(fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            return ""
+        return handle.read(1_048_576).decode("utf-8", errors="replace")
+
+
+def _logical_lines(text: str) -> list[str]:
+    """Lines with git's backslash-newline continuations joined."""
+    lines: list[str] = []
+    pending = ""
+    for line in text.splitlines():
+        if line.endswith("\\") and (len(line) - len(line.rstrip("\\"))) % 2:
+            pending += line[:-1]
             continue
-        match = _INCLUDE.match(line)
-        if section in ("include", "includeif") and match is not None:
-            value = match.group(1).strip('"')
-            target = home / value[2:] if value.startswith("~/") else Path(value)
-            found.append(target if target.is_absolute() else config.parent / target)
-    return found[:32]
+        lines.append(pending + line)
+        pending = ""
+    if pending:
+        lines.append(pending)
+    return lines
+
+
+def _header(line: str) -> tuple[str, str] | None:
+    """`(section, rest of the line)` for a `[section ...]` line; quotes may hold a `]`."""
+    quoted = False
+    escaped = False
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == '"':
+            quoted = not quoted
+        elif char == "]" and not quoted:
+            name = line[1:index].strip().split(None, 1)
+            section = name[0].split(".", 1)[0].casefold() if name else ""
+            return section, line[index + 1 :]
+    return None
+
+
+def _value(raw: str) -> str:
+    """A config value as git reads it: quotes removed, escapes applied, comments cut."""
+    out: list[str] = []
+    quoted = False
+    index = 0
+    text = raw.strip()
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and index + 1 < len(text):
+            nxt = text[index + 1]
+            out.append({"n": "\n", "t": "\t", "b": "\b"}.get(nxt, nxt))
+            index += 2
+            continue
+        if char == '"':
+            quoted = not quoted
+        elif char in "#;" and not quoted:
+            break
+        else:
+            out.append(char)
+        index += 1
+    return "".join(out).strip() if not quoted else "".join(out)
+
+
+def config_values(text: str) -> list[tuple[str, str, str]]:
+    """`(section, name, value)` for every `name = value` in a git config file, the section and
+    name folded to lower case as git compares them. A `[section]` header may share its line
+    with a setting."""
+    found: list[tuple[str, str, str]] = []
+    section = ""
+    for line in _logical_lines(text):
+        rest = line.strip()
+        if rest.startswith("["):
+            parsed = _header(rest)
+            if parsed is None:
+                continue
+            section, rest = parsed[0], parsed[1].strip()
+        if not rest or rest[0] in "#;":
+            continue
+        match = _KEY.fullmatch(rest)
+        if match is not None:
+            found.append((section, match.group(1).casefold(), _value(match.group(2) or "")))
+    return found
+
+
+def _expand(value: str, base: Path, home: Path) -> Path | None:
+    """A path setting as git resolves it: `~/` from home, relative to `base`."""
+    if not value or value.startswith("%(prefix)"):
+        return None
+    if value == "~" or value.startswith("~/"):
+        return home / value[2:]
+    if value.startswith("~"):
+        expanded = Path(value).expanduser()
+        return expanded if expanded.is_absolute() else None
+    path = Path(value)
+    return path if path.is_absolute() else base / path
+
+
+def config_paths(configs: Sequence[Path], home: Path, repo: Path) -> dict[str, Path]:
+    """Every file the configs include, nested as deep as git follows them, and every
+    `core.excludesFile` and `core.attributesFile` they name (red-team v0.2, RT02-7)."""
+    found: dict[str, Path] = {}
+    queue = [(config, 0) for config in configs]
+    seen: set[Path] = set()
+    while queue and len(seen) < MAX_WATCHED_CONFIGS:
+        config, depth = queue.pop(0)
+        if config in seen:
+            continue
+        seen.add(config)
+        for section, name, value in config_values(_read_config(config)):
+            if section in ("include", "includeif") and name == "path":
+                target = _expand(value, config.parent, home)
+                if target is not None:
+                    found[f"include: {target}"] = target
+                    if depth < MAX_INCLUDE_DEPTH:
+                        queue.append((target, depth + 1))
+            elif section == "core" and name in ("excludesfile", "attributesfile"):
+                target = _expand(value, repo, home)
+                if target is not None:
+                    found[f"core.{name}: {target}"] = target
+    return found
 
 
 def integrity_snapshot(repo: Path, home: Path) -> dict[str, str | None]:
     """Hashes of what git and the agents read from outside the work tree (SECURITY.md §11).
 
     `.git/config`, `config.worktree`, `info/attributes`, `info/exclude`, `hooks/`, the linked
-    work tree's `.git` file, files those configs include, the user's global git config, and the
-    agents' global settings, hooks and skills. Read only; git is not run.
+    work tree's `.git` file, files those configs include (nested), the excludes and attributes
+    files they name, the user's global git config, and the agents' global settings, hooks and
+    skills. Read only; git is not run. git gets no `XDG_CONFIG_HOME` (`build_env`), so it reads
+    `~/.config/git/`; when aipm's own `XDG_CONFIG_HOME` points elsewhere, both are watched.
     """
     dirs = git_dirs(repo)
     xdg = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
@@ -631,10 +940,10 @@ def integrity_snapshot(repo: Path, home: Path) -> dict[str, str | None]:
         configs.append(home / rel)
     for rel in XDG_GIT_FILES:
         watched[f"$XDG_CONFIG_HOME/{rel}"] = xdg / rel
-    configs.append(xdg / "git" / "config")
-    for config in configs:
-        for included in _include_paths(config, home):
-            watched[f"include: {included}"] = included
+        if xdg != home / ".config":
+            watched[f"~/.config/{rel}"] = home / ".config" / rel
+    configs += [xdg / "git" / "config", home / ".config" / "git" / "config"]
+    watched.update(config_paths(configs, home, repo))
     for rel in AGENT_CONFIG_WATCH:
         watched[f"~/{rel}"] = home / rel
     return {label: hash_path(path) for label, path in watched.items()}
@@ -665,7 +974,9 @@ def _bytecode(path: str | None) -> bool:
 
 def listing(repo: Path, base: str) -> Listing:
     """Tracked changes since `base`, untracked files, and ignored files (not directories),
-    all against a fresh index of `base`, never the user's own index."""
+    all against a fresh index of `base`, never the user's own index. A repository whose own
+    config names a program for git to run is refused first (`check_repo_config`)."""
+    check_repo_config(repo, base)
     with base_index(repo, base) as env:
         tracked = diff_names(repo, base, env=env)
         others = untracked(repo, env=env)
@@ -764,12 +1075,15 @@ def change_set(
     home: Path,
     watch_ignored: Callable[[str], bool],
     wants_content: Callable[[str], bool],
+    content_limit: Callable[[str], int] | None = None,
 ) -> ChangeSet:
     """Everything that changed since the attempt snapshot (ARCHITECTURE §12.4 step 3.1).
 
     The integrity hashes are compared first; if any differs, git is not run and the change set
     holds only that. A path counts as changed when it differs from `base_sha` (or is untracked)
     and from its snapshot hash. A `.pm/` path whose hash is aipm's last write is aipm's own.
+    `content_limit` says how many bytes of a path to read (`MAX_CONTENT_BYTES` unless it says
+    otherwise; lockfiles need more).
     """
     base = inputs.base_sha
     moved = compare(inputs.integrity, integrity_snapshot(repo, home))
@@ -792,7 +1106,10 @@ def change_set(
         if len(changes) >= MAX_CHANGES:
             complete = False
             break
-        change, used = _describe(repo, path, statuses[path], tree, patterns, budget, wants_content)
+        cap = MAX_CONTENT_BYTES if content_limit is None else content_limit(path)
+        change, used = _describe(
+            repo, path, statuses[path], tree, patterns, min(cap, budget), wants_content
+        )
         budget -= used
         changes.append(change)
     return ChangeSet(
@@ -867,7 +1184,7 @@ def _describe(
     truncated = False
     used = 0
     if wants_content(path) and budget > 0:
-        limit = min(MAX_CONTENT_BYTES, budget)
+        limit = budget
         if base_entry is not None and base_mode not in (GITLINK_MODE, SYMLINK_MODE):
             raw, cut = read_object(repo, base_entry[1], max_bytes=limit)
             before, truncated, used = raw.decode("utf-8", errors="replace"), cut, len(raw)

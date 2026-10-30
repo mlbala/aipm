@@ -309,10 +309,11 @@ def line_of(value: object) -> int | None:
 
 
 def new_dir(ctx: ScanContext, name: str) -> Path:
-    """A fresh private directory for one scanner run in the attempt's temp dir."""
+    """A fresh private directory for one scanner run in the attempt's temp dir. Gates may
+    write to that dir, so a name already taken, even by a dangling link, is skipped."""
     base = ctx.temp_dir / name
     index = 0
-    while base.exists():
+    while os.path.lexists(base):
         index += 1
         base = ctx.temp_dir / f"{name}-{index}"
     return _private_dir(base)

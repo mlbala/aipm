@@ -1,0 +1,22 @@
+id: C-042
+vector: config-redirection
+input:
+  surface: agent-diff:package-lock.json
+  # A task that declares one dependency may edit the lockfile. These entries add a package no
+  # manifest names, an alias that installs another package, and a tarball from another host
+  # (RT02-3).
+  text: |
+    {"lockfileVersion": 3, "packages": {
+      "": {"name": "app"},
+      "node_modules/left-pad-tools": {"version": "1.0.0",
+        "resolved": "https://registry.npmjs.org/left-pad-tools/-/left-pad-tools-1.0.0.tgz"},
+      "node_modules/lodash": {"name": "lodahs", "version": "1.0.0",
+        "resolved": "https://registry.npmjs.org/lodahs/-/lodahs-1.0.0.tgz"},
+      "node_modules/chalk": {"version": "5.3.0",
+        "resolved": "https://registry.npmjs.org.evil.example/chalk/-/chalk-5.3.0.tgz"}}}
+expected:
+  outcome: >-
+    Every package the lockfile adds is looked up like a new direct dependency (it exists and is
+    old enough), under its real name; the tarball from another host is a dependency violation
+    (exit 3).
+  exit_code: 3

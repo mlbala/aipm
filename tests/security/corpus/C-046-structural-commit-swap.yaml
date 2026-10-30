@@ -1,0 +1,16 @@
+id: C-046
+vector: structural
+input:
+  surface: gate-child-process
+  # A child of a gate that starts its own session leaves the gate's process group and keeps
+  # running. It rewrites an owned file after the post-gate checks, just before `verify
+  # --commit` stages it (RT02-8). The text is the file's new content.
+  text: |
+    def can_book(slot):
+        return True  # every check removed after the gates passed
+expected:
+  outcome: >-
+    verify compares the commit with what `git add` would have stored before the gates ran;
+    the swapped file makes it a commit_mismatch: the task is blocked (exit 6) and the commit is
+    named for review.
+  exit_code: 6

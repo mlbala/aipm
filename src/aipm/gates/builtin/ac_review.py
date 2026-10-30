@@ -4,6 +4,10 @@ The criteria and the diff reach the reviewer as `Untrusted`. A `not_met` fails t
 the veto stops `done` whether or not the gate is required, unless that criterion was overridden
 with `verify --override-ac ID --reason` (recorded by the caller). `met` adds nothing; `unclear`
 gives a warning. Reported prompt injection is passed back to the caller, which records it.
+
+Files on the secrets deny list or in `.aipmignore` (`GateContext.withheld`) are named in the
+diff, never shown, and the reviewer is not asked at all when the secrets gate of the same run
+did not pass: the diff may hold a secret the redactor does not know (red-team v0.2, RT02-5).
 """
 
 import time
@@ -35,11 +39,15 @@ class ReviewOutcome:
 
 
 def build_diff(ctx: GateContext) -> tuple[str, bool]:
-    """The attempt's diff (T2): tracked changes from git, new untracked files added as text."""
-    paths = [c.path for c in ctx.changes.files if not c.path.startswith(".pm/")]
+    """The attempt's diff (T2): tracked changes from git, new untracked files added as text.
+    A withheld file is named on a line of its own, its contents left out."""
+    changed = [c for c in ctx.changes.files if not c.path.startswith(".pm/")]
+    withheld = {c.path for c in changed if ctx.withheld(c.path)}
+    paths = [c.path for c in changed if c.path not in withheld]
     text, cut = diff_text(ctx.root, ctx.ws.base_sha, paths, max_bytes=MAX_DIFF_BYTES)
-    added = [c.path for c in ctx.changes.files if c.status is ChangeStatus.ADDED
-             and not c.path.startswith(".pm/") and f" b/{c.path}\n" not in text]  # fmt: skip
+    text = "".join(f"(contents withheld: {p})\n" for p in sorted(withheld)[:50]) + text
+    added = [c.path for c in changed if c.status is ChangeStatus.ADDED
+             and c.path not in withheld and f" b/{c.path}\n" not in text]  # fmt: skip
     if added and not cut:
         stage = stage_files(ctx.root, added, ctx.ws.temp_dir / "ac-review-new")
         for rel in stage.files:
@@ -60,12 +68,14 @@ def run(
     required: bool,
     override_ac: str | None = None,
     unavailable: str = "no LLM is configured",
+    hold: str | None = None,
 ) -> ReviewOutcome:
-    """Ask the AC reviewer, and veto on `not_met`."""
+    """Ask the AC reviewer, and veto on `not_met`. `hold` says why it must not be asked."""
     started = time.monotonic()
-    if reviewer is None:
+    if reviewer is None or hold is not None:
         status = GateStatus.ERROR if required else GateStatus.SKIPPED
-        return ReviewOutcome(outcome(NAME, status, unavailable, required=required, started=started))
+        why = unavailable if reviewer is None else f"not asked: {hold}"
+        return ReviewOutcome(outcome(NAME, status, why, required=required, started=started))
     diff, cut = build_diff(ctx)
     criteria = tuple(
         ReviewedCriterion(c.id, Untrusted(c.text, source=f"approved:tasks:{c.id}"))

@@ -1,0 +1,18 @@
+id: C-038
+vector: config-redirection
+input:
+  surface: repo-git-config
+  # A repository copied with its .git directory (a tarball, a copied checkout) brings its own
+  # .git/config. A clean filter runs whenever git compares or stages a file that
+  # .gitattributes sends through it (red-team v0.2, RT02-1). <marker> is replaced by a path the
+  # test watches; the filter only touches it.
+  text: |
+    [filter "probe"]
+        clean = touch <marker>; cat
+        smudge = cat
+expected:
+  outcome: >-
+    aipm refuses to run git on the repository (exit 6) before git compares or stages a file, so
+    the filter never runs during `aipm prompt` or `aipm verify` (SECURITY.md SG-1, invariant
+    I-1).
+  exit_code: 6

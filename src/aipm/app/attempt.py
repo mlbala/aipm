@@ -8,8 +8,14 @@ from pathlib import Path
 
 from aipm.config.schema import Config
 from aipm.domain.models import ChangeSet
-from aipm.execution.git import ChangeInputs, change_set, integrity_snapshot, snapshot_files
-from aipm.security.diff_checks import CheckPolicy, is_watched, needs_content
+from aipm.execution.git import (
+    MAX_CONTENT_BYTES,
+    ChangeInputs,
+    change_set,
+    integrity_snapshot,
+    snapshot_files,
+)
+from aipm.security.diff_checks import CheckPolicy, content_limit, is_watched, needs_content
 from aipm.state.attempts import AttemptSnapshot, WriteLedger, new_snapshot, save_snapshot
 
 
@@ -52,4 +58,5 @@ def changes_since(root: Path, snapshot: AttemptSnapshot, base_sha: str, cfg: Con
         home=Path.home(),
         watch_ignored=lambda p: is_watched(p, policy),
         wants_content=lambda p: needs_content(p, policy.test_roots),
+        content_limit=lambda p: content_limit(p, MAX_CONTENT_BYTES),
     )

@@ -18,7 +18,7 @@ from aipm.execution.sandbox import Runtime
 from aipm.scanners.base import ScanContext
 from aipm.scanners.registry import Fetch
 from aipm.security.diff_checks import glob_match, is_test_path
-from aipm.security.paths import SafeRelPath, safe_relpath
+from aipm.security.paths import SafeRelPath, denied_for_llm, safe_relpath
 from aipm.security.redact import Redactor
 
 MAX_WALK = 20_000
@@ -29,8 +29,12 @@ SKIP_DIRS = frozenset({".git", ".pm", "node_modules", ".venv", "__pycache__", ".
 class GateContext:
     """One attempt's gates: the work tree, the task, the config and the facts around them.
 
-    `runtime` is the `srt` path, or `None` when gates run without a sandbox. `review` asks the
-    AC reviewer (an LLM role) and `fetch` the package registries; tests replace both.
+    `runtime` is the `srt` path, or `None` when gates run without a sandbox. `fetch` asks the
+    package registries; tests replace it. `withheld` names the paths whose contents never go to
+    an LLM: the built-in deny list here, plus `.gitignore` and `.aipmignore` from `verify`
+    (SECURITY.md §7.1, red-team v0.2 RT02-5). `changed_during_gates` names the changed files
+    that a gate has changed again since the checks read them: gates run agent-written code,
+    which could copy something it read into a file the AC reviewer would send to the LLM.
     """
 
     ws: GateWorkspace
@@ -42,6 +46,8 @@ class GateContext:
     now: datetime
     runtime: Runtime | None = None
     fetch: Fetch | None = None
+    withheld: Callable[[str], bool] = denied_for_llm
+    changed_during_gates: Callable[[], list[str]] = lambda: []
     warnings: list[str] = field(default_factory=list[str])
 
     @property

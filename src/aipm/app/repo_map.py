@@ -18,16 +18,14 @@ from pathspec import GitIgnoreSpec
 
 from aipm.domain.errors import InputRejected
 from aipm.domain.models import Mode, RepoMapDoc, RepoMapFrontMatter
+from aipm.security.paths import LLM_DENY_PATTERNS
 from aipm.security.sanitize import decode_untrusted, sanitize_text
 
 MAX_ENTRIES = 300
 MAX_IGNORE_BYTES = 262_144
 MAX_IGNORE_LINES = 2000
 MAX_NAME_LENGTH = 200
-DENY_PATTERNS = (
-    ".env*", "*.pem", "*.key", "*.p12", "*.pfx", "id_*", "*credentials*", "*secret*",
-    ".npmrc", ".pypirc", ".netrc", ".git", ".pm",
-)  # fmt: skip
+DENY_PATTERNS = LLM_DENY_PATTERNS
 MANIFESTS = (
     "pyproject.toml", "uv.lock", "setup.py", "setup.cfg", "requirements.txt", "package.json",
     "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "go.mod", "Cargo.toml", "pom.xml",

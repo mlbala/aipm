@@ -16,6 +16,7 @@ refused in globs, because other matchers give them meaning. No path or glob may 
 import os
 import unicodedata
 from collections.abc import Iterable, Sequence
+from fnmatch import fnmatchcase
 from functools import cache
 from pathlib import Path
 from typing import NewType
@@ -231,6 +232,21 @@ def is_protected(relpath: str, patterns: Sequence[str] = PROTECTED_PATHS) -> boo
         for pattern in patterns
         for variant in _pattern_variants(pattern, any_depth=True)
     )
+
+
+LLM_DENY_PATTERNS: tuple[str, ...] = (
+    ".env*", "*.pem", "*.key", "*.p12", "*.pfx", "id_*", "*credentials*", "*secret*",
+    ".npmrc", ".pypirc", ".netrc", ".git", ".pm",
+)  # fmt: skip
+"""SECURITY.md §7.1: files never read for LLM context, matched as `.gitignore` lines without a
+slash (any path component), without regard to case (red-team v0.1, RT01-6)."""
+
+
+def denied_for_llm(relpath: str) -> bool:
+    """Whether any component of `relpath` matches the built-in deny list (`LLM_DENY_PATTERNS`),
+    so its contents never go to an LLM, the AC reviewer's diff included (RT02-5)."""
+    parts = [part.rstrip(" .") for part in relpath.casefold().split("/")]
+    return any(fnmatchcase(part, pattern) for part in parts for pattern in LLM_DENY_PATTERNS)
 
 
 def safe_relpath(root: Path, path: str, *, extra_protected: Iterable[str] = ()) -> SafeRelPath:

