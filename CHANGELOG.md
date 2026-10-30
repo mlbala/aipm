@@ -6,18 +6,19 @@ All notable changes to aipm are recorded here. The format follows [Keep a Change
 
 ### Security
 
-The v0.1 red-team pass ([docs/security/reviews/v0.1.md](docs/security/reviews/v0.1.md)) found six problems, all fixed:
+The v0.1 red-team pass ([docs/security/reviews/v0.1.md](docs/security/reviews/v0.1.md)) found seven problems, all fixed, and two security reviews of the fixes found ways around four of them, also fixed:
 
-- The command policy refuses a hard-denied program (a shell, `curl`, `rm`, `git`, …) at any argv position, so a wrapper such as `time`, `nice`, `timeout`, `caffeinate` or `find -exec` can no longer start one (ADR-0019). `osascript -e`, `php -r`, `lua -e`, `Rscript -e` and `julia -e` count as inline code.
-- `AIPM_*` environment variables can no longer set user-only keys such as `llm.base_url` or `llm.api_key_env` (ignored with a warning), and `AIPM_CONFIG` must be an absolute path outside the repository (exit 6). A repository `.env` loaded by pipenv or a similar tool could otherwise redirect your API key (ADR-0018).
+- The command policy refuses a hard-denied program (a shell, `curl`, `rm`, `git`, …) at any argv position, so a wrapper such as `time`, `nice`, `timeout`, `caffeinate` or `find -exec` can no longer start one (ADR-0019). It also refuses programs that run a shell string or code given as an argument (`awk`, `watch`, `flock`, `script`, `expect`, `sqlite3`) and `nscurl`, `lwp-*` and `tftp`, and it folds version suffixes from every name (`zsh-5.9`, `php8.3`). `osascript -e`, `php -r`/`--run`, `perl -M`, `lua -e`, `luajit -e`, `R -e`, `Rscript -e`, `julia -e`/`--eval`, `deno --eval` and `python -m timeit`, `-m code` or `-m http.server` count as inline code, also when `m` ends a flag cluster (`python3 -Im timeit`, `-Pm`). Without a runner, a `{paths}` value such as `cmd/env` is no longer mistaken for a program; a bare value such as `curl` still is.
+- An `AIPM_*` environment variable that sets a user-only key such as `llm.base_url` or `llm.api_key_env` makes aipm exit 6, and every `AIPM_*` relaxation of a security setting is printed as a warning. Your user config and the trust store must be outside the repository, wherever `AIPM_CONFIG`, `HOME`, `XDG_CONFIG_HOME` or `XDG_STATE_HOME` put them (compared by inode, so links, firmlinks and case variants count), and the user config must be a regular file (exit 6); no log file is written inside the repository, or through a repository link that leads out of it. The repository is the one the command works on, `-C` included. `security.extra_redact_patterns` is read from your user config file only. A repository `.env` loaded by pipenv or a similar tool could otherwise redirect your API key or ship its own trust decision (ADR-0018).
 - `http` and `https` URLs written without slashes (`https:evil.example`) are removed from context files and prompts.
-- Logging removes escape sequences before it redacts, so a secret split by an escape sequence is redacted.
+- Logging redacts, removes escape sequences, then redacts again, so neither a secret split by an escape sequence nor one that ends in a control character (or both) reaches a log line.
 - Default-ignorable characters that render as nothing (Hangul fillers, Khmer and Mongolian marks) are removed from text and refused in paths and gate argv.
 - The secrets deny list matches file names without regard to case (`Secrets.yaml`, `server.PEM`).
+- aipm reads YAML 1.2 only. A `.pm/` YAML file with another `%YAML` version, a collection as a mapping key, a date or time out of range, or an integer longer than 100 characters is a schema error (exit 2) instead of an internal error.
 
 ### Added
 
-- Corpus cases C-028 to C-034, `tests/security/test_redteam_v01.py`, red-team fuzzing in `tests/property/test_redteam_v01_props.py`, and the `ci-long` Hypothesis profile: `uv run pytest --hypothesis-profile=ci-long` runs each new property 2,000 times.
+- Corpus cases C-028 to C-037, `tests/security/test_redteam_v01.py`, red-team fuzzing in `tests/property/test_redteam_v01_props.py`, and the `ci-long` Hypothesis profile: `uv run pytest --hypothesis-profile=ci-long` runs each new property 2,000 times.
 - SECURITY.md: threat T-7 (repository content as configuration through the environment) and residual risks R-8 and R-9.
 
 ## [0.1.0] - not yet tagged
