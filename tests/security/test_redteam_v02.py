@@ -9,6 +9,7 @@ gates, and `aipm prompt` and `aipm verify` on the clinic example.
 import json
 import os
 import sys
+import time
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -204,7 +205,7 @@ def test_a_filter_in_the_global_config_is_the_user_s_own(tmp_repo: Path, home: P
         handle.write('[filter "lfs"]\n\tclean = cat\n\tsmudge = cat\n')
     git.check_repo_config(tmp_repo)
     assert git.repo_config_entries(tmp_repo)  # local settings are listed, global ones are not
-    assert all(not key.startswith("filter.") for key, _ in git.repo_config_entries(tmp_repo))
+    assert all(not e.key.startswith("filter.") for e in git.repo_config_entries(tmp_repo))
 
 
 def test_config_hooks_never_run_in_snapshots_or_commits(
@@ -363,7 +364,7 @@ def test_harmless_requirement_lines_pass() -> None:
     before = "requests==2.32.0\n"
     after = (
         "requests==2.32.0 \\\n    --hash=sha256:abc\n"
-        'idna[all]>=3 ; python_version > "3.8"\n-r requirements-dev.txt\n--pre\n'
+        'idna[all]>=3 ; python_version > "3.8"\n--pre\n--only-binary :all:\n'
     )
     deps_ = manifest_deps("requirements.txt", after)
     assert deps_ is not None and deps_.off_registry == frozenset()
@@ -443,7 +444,7 @@ def test_npm_lockfile_version_1_and_git_versions() -> None:
          "    resolution: {integrity: sha512-x}\n",
          "lockfileVersion: '9.0'\npackages:\n  lodash@4.17.21:\n"
          "    resolution: {tarball: https://evil.example/lodash.tgz}\n",
-         "lodash: resolution: {tarball: https://evil.example/lodash.tgz}"),
+         "lodash: tarball: https://evil.example/lodash.tgz"),
         ("yarn.lock",
          'lodash@^4.17.21:\n  version "4.17.21"\n'
          '  resolved "https://registry.yarnpkg.com/lodash/-/lodash-4.17.21.tgz#a"\n',
@@ -935,11 +936,12 @@ def test_lockfile_readers_skip_what_they_cannot_read() -> None:
                      "node_modules/linked": {"link": True, "resolved": "packages/ws"}},
         "dependencies": {"y": "1.0.0"}}))  # fmt: skip
     assert npm is not None and npm.names == frozenset() and npm.sources == frozenset()
-    pnpm = lock_deps("pnpm-lock.yaml", "importers:\n  .:\n    tarball: file:x\npackages:\n\n")
+    pnpm = lock_deps("pnpm-lock.yaml", "settings:\n  autoInstallPeers: true\npackages:\n\n")
     assert pnpm == lock_deps("pnpm-lock.yaml", "")
-    yarn = lock_deps("yarn.lock", '__metadata:\n  version: 6\n  resolution: "x@file:y"\n'
-                     'odd-line:\n  resolved "https://evil.example/x.tgz"\n')  # fmt: skip
+    yarn = lock_deps("yarn.lock", '__metadata:\n  version: 6\n  resolution: "x@file:y"\n')
     assert yarn is not None and yarn.names == frozenset() and yarn.sources == frozenset()
+    odd = lock_deps("yarn.lock", 'odd-line:\n  resolved "https://evil.example/x.tgz"\n')
+    assert odd is not None and odd.sources  # an entry without a version is checked, not skipped
     assert lock_deps("uv.lock", "[[package") is None
     assert lock_deps("Gemfile.lock", "x") is None
     groups = manifest_deps("pyproject.toml", "[tool.poetry.group]\nodd = 1\n")
@@ -990,3 +992,618 @@ def test_a_link_a_gate_planted_in_the_temp_dir_is_skipped(tmp_path: Path) -> Non
     (tmp_path / "semgrep").symlink_to(tmp_path / "missing")
     made = new_dir(ScanContext(repo=tmp_path, temp_dir=tmp_path), "semgrep")
     assert made == tmp_path / "semgrep-1" and made.is_dir() and not made.is_symlink()
+
+
+# ---------------------------------------------------------------- security review of the fixes
+# Each test below failed against `e367655`, the first round of fixes (review section 4.1).
+
+
+def _populated_submodule(repo: Path, tmp_path: Path, name: str) -> Path:
+    lib = tmp_path / f"src-{name}"
+    lib.mkdir()
+    run_git(lib, "init", "-q")
+    (lib / "a.txt").write_text("a\n", encoding="utf-8")
+    (lib / ".gitattributes").write_text("* filter=probe\n", encoding="utf-8")
+    run_git(lib, "add", "-A")
+    run_git(lib, "commit", "-q", "-m", "lib")
+    run_git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib), name)
+    run_git(repo, "commit", "-q", "-m", f"submodule {name}")
+    return repo / ".git" / "modules" / name / "config"
+
+
+def test_review_decoy_gitlinks_cannot_hide_a_real_submodule(
+    tmp_repo: Path, home: Path, tmp_path: Path
+) -> None:
+    config = _populated_submodule(tmp_repo, tmp_path, "zz")
+    head = git.head_sha(tmp_repo)
+    for i in range(70):  # bare index entries, sorted before the real one
+        run_git(tmp_repo, "update-index", "--add", "--cacheinfo", f"160000,{head},a{i:02d}")
+    marker = tmp_path / "filter-ran"
+    with config.open("a", encoding="utf-8") as handle:
+        handle.write(case_text("C-047").replace("<marker>", str(marker)))
+    (tmp_repo / "zz" / "a.txt").write_text("changed\n", encoding="utf-8")
+    with pytest.raises(PolicyViolation, match=r"filter\.probe\.clean"):
+        git.listing(tmp_repo, head)
+    assert not marker.exists()
+
+
+def test_review_submodule_limits_refuse_instead_of_skipping(
+    tmp_repo: Path, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _populated_submodule(tmp_repo, tmp_path, "lib")
+    monkeypatch.setattr(git, "MAX_SUBMODULES", 0)
+    with pytest.raises(PolicyViolation, match="more populated submodules"):
+        git.check_repo_config(tmp_repo)
+    monkeypatch.setattr(git, "MAX_SUBMODULES", 64)
+    monkeypatch.setattr(git, "MAX_SUBMODULE_DEPTH", 0)
+    with pytest.raises(PolicyViolation, match="deeper ones"):
+        git.check_repo_config(tmp_repo)
+
+
+def test_review_config_git_reads_from_the_work_tree_is_refused(tmp_repo: Path, home: Path) -> None:
+    """A gate's child that outlives the gate could rewrite it between the check and git."""
+    (tmp_repo / "shared.cfg").write_text("[core]\n\tautocrlf = false\n", encoding="utf-8")
+    append_config(tmp_repo, "[include]\n\tpath = ../shared.cfg\n")
+    with pytest.raises(PolicyViolation, match="config read from the work tree"):
+        git.check_repo_config(tmp_repo)
+
+
+def test_review_a_submodule_git_dir_in_the_work_tree_is_refused(tmp_repo: Path, home: Path) -> None:
+    vendor = tmp_repo / "vendor"
+    vendor.mkdir()
+    run_git(vendor, "init", "-q")
+    (vendor / "x.txt").write_text("x\n", encoding="utf-8")
+    run_git(vendor, "add", "x.txt")
+    run_git(vendor, "commit", "-q", "-m", "x")
+    oid = run_git(vendor, "rev-parse", "HEAD").strip()
+    run_git(tmp_repo, "update-index", "--add", "--cacheinfo", f"160000,{oid},vendor")
+    with pytest.raises(PolicyViolation, match="git directory inside the work tree") as info:
+        git.check_repo_config(tmp_repo)
+    assert "absorbgitdirs" in (info.value.hint or "")
+
+
+@pytest.mark.parametrize(
+    "setting",
+    ['[lfs "extension.x"]\n\tclean = true\n', '[lfs "customtransfer.x"]\n\tpath = /bin/true\n',
+     "[lfs]\n\tstandalonetransferagent = x\n"],
+)  # fmt: skip
+def test_review_git_lfs_commands_in_the_repository_config_are_refused(
+    tmp_repo: Path, home: Path, setting: str
+) -> None:
+    """git-lfs is a global filter that runs these repository settings."""
+    append_config(tmp_repo, setting)
+    with pytest.raises(PolicyViolation, match=r"lfs\."):
+        git.check_repo_config(tmp_repo)
+
+
+@pytest.mark.parametrize(
+    ("name", "text"),
+    [
+        ("package-lock.json", json.dumps({"packages": {"node_modules/left-pad": {
+            "version": "1.3.0",
+            "resolved": "https://registry.npmjs.org/evil-new/-/evil-new-0.0.1.tgz"}}})),
+        ("package-lock.json", json.dumps({"packages": {"node_modules/left-pad": {
+            "version": "1.3.0",
+            "resolved": "https://registry.npmjs.org/left-pad/-/left-pad-0.0.1.tgz"}}})),
+        ("yarn.lock", 'left-pad@^1:\n  version "1.3.0"\n'
+                      '  resolved "https://registry.yarnpkg.com/evil-new/-/evil-new-0.0.1.tgz#a"\n'),
+        ("yarn.lock", '"left-pad@^1":\n  "version" "1.3.0"\n  "resolved" "https://evil.example/x.tgz"\n'),
+        ("pnpm-lock.yaml", "packages:\n  left-pad@1.3.0:\n    resolution: {tarball: "
+                           "https://registry.npmjs.org/evil-new/-/evil-new-0.0.1.tgz}\n"),
+        ("pnpm-lock.yaml", 'packages:\n  left-pad@1.3.0:\n    resolution: {"tarball": '
+                           '"https://evil.example/x.tgz"}\n'),
+        ("pnpm-lock.yaml", "packages:\n  left-pad@1.3.0:\n    resolution:\n      tarball:\n"
+                           "        https://evil.example/x.tgz\n"),
+        ("pnpm-lock.yaml", "importers:\n  .:\n    dependencies:\n      x:\n"
+                           "        specifier: file:../x.tgz\n        version: file:../x.tgz\n"),
+        ("pnpm-lock.yaml", "importers:\n  .:\n    dependencies:\n      x:\n"
+                           "        version: link:../../outside\n"),
+        ("uv.lock", '[[package]]\nname = "requests"\nversion = "2.32.0"\nsource = { registry = '
+                    '"https://pypi.org/simple" }\nwheels = [{ url = '
+                    '"https://evil.example/requests-2.32.0-py3-none-any.whl" }]\n'),
+        ("uv.lock", '[[package]]\nname = "requests"\nversion = "2.32.0"\nsource = { registry = '
+                    '"https://pypi.org/simple" }\nsdist = { url = "https://files.pythonhosted.org/'
+                    'packages/aa/bb/evil-1.0.tar.gz" }\n'),
+        ("uv.lock", '[[package]]\nname = "x"\nversion = "1"\n'
+                    'source = { editable = "../outside" }\n'),
+        ("pylock.toml", '[[packages]]\nname = "requests"\nindex = "https://pypi.org/simple"\n'
+                        'wheels = [{ url = "https://evil.example/requests.whl" }]\n'),
+    ],
+)  # fmt: skip
+def test_review_a_lockfile_source_that_names_another_package_or_host(name: str, text: str) -> None:
+    parsed = lock_deps(name, text)
+    assert parsed is not None and parsed.sources, parsed
+
+
+def test_review_registry_files_of_the_named_package_pass() -> None:
+    npm = json.dumps({"packages": {
+        "node_modules/left-pad": {"version": "1.3.0",
+                                  "resolved": "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"},
+        "node_modules/@babel/core": {"version": "7.24.0",
+                                     "resolved": "https://registry.npmjs.org/@babel/core/-/core-7.24.0.tgz"},
+    }})  # fmt: skip
+    yarn = (
+        'left-pad@^1:\n  version "1.3.0"\n'
+        '  resolved "https://registry.yarnpkg.com/left-pad/-/left-pad-1.3.0.tgz#abc"\n'
+    )
+    uv = ('[[package]]\nname = "python-dateutil"\nversion = "2.9.0"\nsource = { registry = '
+          '"https://pypi.org/simple" }\nwheels = [{ url = "https://files.pythonhosted.org/packages/'
+          'ec/57/python_dateutil-2.9.0-py2.py3-none-any.whl" }]\n')  # fmt: skip
+    for name, text in (("package-lock.json", npm), ("yarn.lock", yarn), ("uv.lock", uv)):
+        parsed = lock_deps(name, text)
+        assert parsed is not None and parsed.sources == frozenset(), (name, parsed)
+
+
+@pytest.mark.parametrize(
+    ("line", "detail"),
+    [("--pre --extra-index-url https://evil.example/simple", "source outside the registry"),
+     ("--only-binary :all: -f ./wheels", "source outside the registry"),
+     ("--pre -e ./evil", "source outside the registry"),
+     ("requests==2 --index-url https://evil.example/simple", "source outside the registry"),
+     ("evil-1.0.tbz", "source outside the registry"),
+     ("requests>=2.whl", "source outside the registry"),  # found by ci-long fuzzing
+     ("-r https://evil.example/requirements.txt", "does not read"),
+     ("--requirement=/tmp/x/requirements.txt", "does not read"),
+     ("-r build/requirements.txt", "does not read")],
+)  # fmt: skip
+def test_review_requirement_options_and_includes(line: str, detail: str) -> None:
+    found = violations(change("requirements.txt", "a==1\n", f"a==1\n{line}\n"))
+    assert any(detail in d for _, _, d in found), found
+
+
+@pytest.mark.parametrize(
+    "after",
+    ['{"dependencies": {"left-pad": ".evil"}}',
+     '{"overrides": {"left-pad": "https://evil.example/x.tgz"}}',
+     '{"overrides": {"a": {"left-pad": "github:evil/x"}}}',
+     '{"resolutions": {"**/left-pad": "file:../x"}}',
+     '{"pnpm": {"overrides": {"left-pad": "link:../x"}}}',
+     '{"packageManager": "yarn@https://evil.example/yarn.js"}'],
+)  # fmt: skip
+def test_review_package_json_paths_overrides_and_package_manager(after: str) -> None:
+    found = violations(change("package.json", "{}", after))
+    assert any("source outside the registry" in d for _, _, d in found), found
+
+
+def test_review_legitimate_overrides_and_package_manager_pass() -> None:
+    after = json.dumps({"overrides": {"a": "^1.2", "b": {".": "1.0", "c": "$b"}},
+                        "packageManager": "pnpm@9.1.0+sha512.abc123"})  # fmt: skip
+    assert violations(change("package.json", "{}", after)) == []
+
+
+def test_review_uv_overrides_with_a_direct_reference() -> None:
+    after = (
+        PYPROJECT + '[tool.uv]\noverride-dependencies = ["requests @ https://evil.example/r.whl"]\n'
+    )
+    found = violations(change("pyproject.toml", PYPROJECT, after))
+    assert any("tool.uv.override-dependencies" in d for _, _, d in found), found
+
+
+@pytest.mark.parametrize("path", [".yarn/releases/yarn-4.1.0.cjs", ".yarn/plugins/x.cjs",
+                                  "pnpm-workspace.yaml", "UV.TOML"])  # fmt: skip
+def test_review_more_package_manager_files_are_dependency_changes(path: str) -> None:
+    found = violations(change(path, None, "x"), t=task(owns_files=[path]))
+    assert [k for k, _, _ in found] == [Kind.DEPENDENCY], found
+
+
+def test_review_lockfile_and_manifest_names_ignore_case() -> None:
+    from aipm.security.diff_checks import is_lockfile, is_manifest  # noqa: PLC0415
+
+    assert is_lockfile("UV.LOCK") and is_lockfile("sub/Package-Lock.json")
+    assert is_manifest("Package.JSON") and is_manifest("Requirements-Dev.TXT")
+    changes = ChangeSet("a" * 40, files=(change("UV.LOCK", UV_BEFORE, UV_BEFORE + (
+        '[[package]]\nname = "fresh"\nversion = "1"\n'
+        'source = { registry = "https://pypi.org/simple" }\n')),))  # fmt: skip
+    assert new_lock_packages(changes) == [("UV.LOCK", Ecosystem.PYPI, "fresh")]
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["requests" + "\t" * 20_000 + "x", "requests>=1" + " " * 20_000 + "x",
+     "requests[" + "a " * 10_000 + "x", "requests (>=1" + " " * 20_000 + "@"],
+)  # fmt: skip
+def test_review_requirement_lines_are_read_in_linear_time(line: str) -> None:
+    started = time.monotonic()
+    deps_ = manifest_deps("requirements.txt", line + "\n")
+    pyproject = manifest_deps("pyproject.toml", f"[project]\ndependencies = [{json.dumps(line)}]\n")
+    assert time.monotonic() - started < 2.0
+    assert deps_ is not None and deps_.names == frozenset()
+    assert pyproject is not None and pyproject.names == frozenset()
+
+
+def test_review_overlong_lockfile_lines_and_deep_toml_cannot_be_read() -> None:
+    assert lock_deps("pnpm-lock.yaml", "packages:\n  " + "x" * 5000 + ":\n") is None
+    assert lock_deps("yarn.lock", "a@^1:\n  resolved " + "x" * 5000 + "\n") is None
+    deep = "a = " + "[" * 5000
+    assert lock_deps("uv.lock", deep) is None
+    assert manifest_deps("pyproject.toml", deep) is None
+    t = task(deps_add=[DependencyAdd(ecosystem=Ecosystem.PYPI, name="requests")])
+    assert [d for _, _, d in violations(change("uv.lock", UV_BEFORE, deep), t=t)] == [
+        "lockfile cannot be read"
+    ]
+
+
+def test_review_quoted_paths_exec_bits_and_submodule_pointers_are_compared(
+    tmp_repo: Path, home: Path, tmp_path: Path
+) -> None:
+    quoted = '"x.py"'
+    (tmp_repo / quoted).write_text("x = 1\n", encoding="utf-8")
+    (tmp_repo / "run.sh").write_text("echo hi\n", encoding="utf-8")
+    expected = git.staged_ids(tmp_repo, [quoted, "run.sh"])
+    head = git.commit(tmp_repo, [quoted, "run.sh"], message="m", trailers=[])
+    assert git.committed_ids(tmp_repo, head, [quoted, "run.sh"]) == expected
+    (tmp_repo / "run.sh").chmod(0o755)
+    head = git.commit(tmp_repo, ["run.sh"], message="m", trailers=[])
+    assert git.committed_ids(tmp_repo, head, ["run.sh"]) != expected | {}
+    _populated_submodule(tmp_repo, tmp_path, "lib")
+    pointer = git.staged_ids(tmp_repo, ["lib"])
+    assert pointer["lib"] is not None and pointer["lib"][0] == "gitlink"
+    assert git.committed_ids(tmp_repo, git.head_sha(tmp_repo), ["lib"]) == pointer
+
+
+def test_review_config_reader_edge_cases(tmp_repo: Path, home: Path, tmp_path: Path) -> None:
+    target = tmp_path / "bom.cfg"
+    target.write_text("[core]\n", encoding="utf-8")
+    assert git.config_values(f"\ufeff[include]\n\tpath = {target}\n") == [
+        ("include", "path", str(target))
+    ]
+    assert git.config_values("[core] # a comment \\\n\tpath = x\n") == [("core", "path", "x")]
+    many = tmp_path / "many.cfg"
+    count = git.MAX_WATCHED_CONFIGS + 2
+    lines = [f"[include]\n\tpath = {tmp_path / f'c{i}.cfg'}\n" for i in range(count)]
+    many.write_text("".join(lines), encoding="utf-8")
+    with pytest.raises(PolicyViolation, match="more than"):
+        git.config_paths([many], home, tmp_repo)
+
+
+def test_review_staging_never_follows_a_planted_link(tmp_path: Path) -> None:
+    from aipm.scanners.base import _write_staged  # noqa: PLC0415 # pyright: ignore[reportPrivateUsage]
+
+    root = tmp_path / "stage"
+    root.mkdir(mode=0o700)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "src").symlink_to(outside)
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(PolicyViolation):
+            _write_staged(fd, ["src", "a.py"], b"x")
+    finally:
+        os.close(fd)
+    assert not (outside / "a.py").exists()
+
+
+def test_review_the_reviewer_reads_new_files_without_following_links(
+    tmp_repo: Path, home: Path, tmp_path: Path
+) -> None:
+    """Pins a control that held: a new file that is a link is never read through. The fix
+    reads new files straight from the tree, so nothing is re-read from the temp dir."""
+    head = git.head_sha(tmp_repo)
+    secret_file = tmp_path / "key.txt"
+    secret_file.write_text("aipm-redteam-outside-the-repo-1d7e\n", encoding="utf-8")
+    (tmp_repo / "notes.txt").symlink_to(secret_file)
+    temp = tmp_path / "attempt"
+    temp.mkdir(mode=0o700)
+    ctx = GateContext(
+        ws=GateWorkspace(root=tmp_repo, temp_dir=temp, base_sha=head), task=task(),
+        cfg=Config(), redactor=Redactor({}), home=home, now=datetime.now(UTC),
+        changes=ChangeSet(head, files=(
+            FileChange(path="notes.txt", status=ChangeStatus.ADDED, mode="120000"),)),
+    )  # fmt: skip
+    text, _ = ac_review.build_diff(ctx)
+    assert "aipm-redteam-outside-the-repo-1d7e" not in text
+
+
+def test_review_command_gates_are_held_without_a_prepare_step(tmp_path: Path) -> None:
+    ctx = _prepare_ctx(tmp_path)
+    fields = {f: getattr(ctx, f) for f in ("ws", "task", "changes", "redactor", "home", "now")}
+    cfg = Config.model_validate({"allowed_executables": [[PY, "-m", "ok"]],
+                                 "gates": {"lint": {"run": [PY, "-m", "ok"]}}})  # fmt: skip
+    run = run_gates(GateContext(**fields, cfg=cfg), hold_prepare="a refused dependency")
+    assert [(r.name, r.status, r.summary) for r in run.results] == [
+        ("lint", GateStatus.ERROR, "not run: a refused dependency")
+    ]
+
+
+def test_review_the_reviewer_waits_for_a_secrets_gate_that_did_not_run(tmp_path: Path) -> None:
+    asked: list[ACReviewInput] = []
+
+    def reviewer(inp: ACReviewInput) -> ACReview:
+        asked.append(inp)
+        return ACReview(criteria=[], injection_suspected=[])
+
+    ctx = _prepare_ctx(tmp_path)
+    fields = {f: getattr(ctx, f) for f in ("ws", "task", "changes", "redactor", "home", "now")}
+    cfg = Config.model_validate({"gates": {"secrets": {"builtin": "gitleaks"},
+                                           "ac_review": {"builtin": "ac_review"}}})  # fmt: skip
+    run = run_gates(GateContext(**fields, cfg=cfg), reviewer=reviewer, only="ac_review")
+    assert asked == []
+    assert "did not pass in this run" in run.results[0].summary
+
+
+def test_review_the_base_commit_s_gitignore_still_withholds(tmp_repo: Path, home: Path) -> None:
+    """An agent that removes a line from `.gitignore` cannot un-hide that file for the LLM."""
+    from aipm.app.repo_map import ignore_spec  # noqa: PLC0415
+    from aipm.app.verify import _base_ignores  # noqa: PLC0415 # pyright: ignore[reportPrivateUsage]
+
+    (tmp_repo / ".gitignore").write_text("config/local.py\n", encoding="utf-8")
+    run_git(tmp_repo, "add", ".gitignore")
+    run_git(tmp_repo, "commit", "-q", "-m", "ignore")
+    head = git.head_sha(tmp_repo)
+    (tmp_repo / ".gitignore").write_text("", encoding="utf-8")
+    assert not ignore_spec(tmp_repo).match_file("config/local.py")
+    assert ignore_spec(tmp_repo, also=_base_ignores(tmp_repo, head)).match_file("config/local.py")
+
+
+def test_review_reader_branches() -> None:
+    """Small inputs for each branch of the readers rewritten after the review."""
+    for line in ("requests[a", "requests[a/b]", "requests~/x"):
+        deps_ = manifest_deps("requirements.txt", f"{line}\n")
+        assert deps_ is not None and deps_.names == frozenset() and deps_.off_registry
+    nested: dict[str, Any] = {"x": "1"}
+    for _ in range(10):
+        nested = {"n": nested}
+    for doc in ({"dependencies": {"a": 1}}, {"overrides": nested}):
+        deps_ = manifest_deps("package.json", json.dumps(doc))
+        assert deps_ is not None and deps_.off_registry, doc
+    npm = lock_deps("package-lock.json", json.dumps({"packages": {
+        "node_modules/a": {"version": "1.0.0",
+                           "resolved": "https://registry.npmjs.org/a/-/a-1.0.0.tgz?x=1"},
+        "node_modules/b": {"link": True, "resolved": "../outside"}}}))  # fmt: skip
+    assert npm is not None and len(npm.sources) == 2
+    pylock = lock_deps("pylock.toml", '[[packages]]\nname = "a"\nversion = "1.0"\nindex = "https://pypi.org/simple"'
+                       '\nwheels = [{ url = "https://files.pythonhosted.org/p/a-1.0-py3-none-any'
+                       '.whl" }]\n')  # fmt: skip
+    assert pylock is not None and pylock.sources == frozenset()
+    pnpm = lock_deps("pnpm-lock.yaml", (
+        "importers:\n  .:\n    dependencies:\n      w:\n        version: link:packages/w\n"
+        "packages:\n  /lodash/4.17.21:\n    resolution: {tarball: "
+        "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz}\n  /odd/name:\n"
+    ))  # fmt: skip
+    assert pnpm is not None and pnpm.sources == frozenset()
+    assert {n for _, n in pnpm.names} == {"lodash", "odd/name"}
+    berry = lock_deps("yarn.lock", '"w@workspace:.":\n  resolution: "w@workspace:."\n')
+    assert berry is not None and berry.sources == frozenset()
+    absolute = lock_deps("uv.lock", '[[package]]\nname = "x"\nsource = { editable = "/abs/x" }\n')
+    assert absolute is not None and absolute.sources
+
+
+# ---------------------------------------------------------------- the re-review (section 4.1)
+
+PNPM_V9 = """lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      fs-extra:
+        specifier: ^11.2.0
+        version: 11.2.0
+    devDependencies:
+      typescript:
+        specifier: ~5.4.0
+        version: 5.4.5
+
+  packages/app:
+    dependencies:
+      lib:
+        specifier: workspace:*
+        version: link:../lib
+
+  packages/lib: {}
+
+packages:
+
+  '@babel/code-frame@7.24.2':
+    resolution: {integrity: sha512-y5+tLQ==}
+    engines: {node: '>=6.9.0'}
+
+  fs-extra@11.2.0:
+    resolution: {integrity: sha512-PmDi3u==}
+    engines: {node: '>=14.14'}
+
+  is-directory@0.3.1:
+    resolution: {integrity: sha512-yVChG==}
+
+  jsonfile@6.1.0:
+    resolution: {integrity: sha512-5dgnd==}
+
+  typescript@5.4.5:
+    resolution: {integrity: sha512-vcI4U==}
+    engines: {node: '>=14.17'}
+    hasBin: true
+
+snapshots:
+
+  '@babel/code-frame@7.24.2':
+    dependencies:
+      picocolors: 1.0.1
+
+  fs-extra@11.2.0:
+    dependencies:
+      graceful-fs: 4.2.11
+      jsonfile: 6.1.0
+      universalify: 2.0.1
+
+  is-directory@0.3.1: {}
+
+  jsonfile@6.1.0:
+    optionalDependencies:
+      graceful-fs: 4.2.11
+
+  typescript@5.4.5: {}
+"""
+YARN_CLASSIC = """# THIS IS AN AUTOGENERATED FILE. DO NOT EDIT THIS FILE DIRECTLY.
+# yarn lockfile v1
+
+
+"@babel/code-frame@^7.0.0", "@babel/code-frame@^7.10.4":
+  version "7.24.2"
+  resolved "https://registry.yarnpkg.com/@babel/code-frame/-/code-frame-7.24.2.tgz#5e8b47a"
+  integrity sha512-y5+tLQ==
+  dependencies:
+    picocolors "^1.0.0"
+
+"string-width-cjs@npm:string-width@^4.2.0":
+  version "4.2.3"
+  resolved "https://registry.yarnpkg.com/string-width/-/string-width-4.2.3.tgz#269c7117"
+  integrity sha512-wKyQR==
+"""
+YARN_BERRY = """# This file is generated by running "yarn install" inside your project.
+
+__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"app@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "app@workspace:."
+  languageName: unknown
+  linkType: soft
+
+"lodash@npm:^4.17.21":
+  version: 4.17.21
+  resolution: "lodash@npm:4.17.21"
+  checksum: 10c0/d8cbea
+  languageName: node
+  linkType: hard
+
+"typescript@patch:typescript@npm%3A^5.4.0#optional!builtin<compat/typescript>":
+  version: 5.4.5
+  resolution: "typescript@patch:typescript@npm%3A5.4.5#optional!builtin<compat/typescript>::version=5.4.5&hash=5adc0c"
+  languageName: node
+  linkType: hard
+"""  # noqa: E501 - a real berry patch resolution is one long line
+
+
+@pytest.mark.parametrize(
+    ("name", "text"),
+    [("pnpm-lock.yaml", PNPM_V9), ("yarn.lock", YARN_CLASSIC), ("yarn.lock", YARN_BERRY)],
+    ids=["pnpm-v9", "yarn-classic", "yarn-berry"],
+)
+def test_review_ordinary_lockfiles_pass_clean(name: str, text: str) -> None:
+    """No false positive on what pnpm and yarn write: dependencies named like fields
+    (`jsonfile`, `is-directory`), workspace links relative to their importer, `workspace:*`
+    specifiers, a classic alias, a berry built-in patch."""
+    parsed = lock_deps(name, text)
+    assert parsed is not None and parsed.sources == frozenset(), parsed
+    names = {n for _, n in parsed.names}
+    assert "app" not in names and "lib" not in names  # workspace members are not looked up
+    if name == "yarn.lock" and "string-width" in text:
+        assert "string-width" in names and "string-width-cjs" not in names
+
+
+@pytest.mark.parametrize(
+    ("name", "text"),
+    [
+        ("yarn.lock", 'lodash@^4:\n  resolved "https://registry.yarnpkg.com/lodash/-/lodash-4.17'
+                      '.21.tgz/../../../evil-new/-/evil-new-0.0.1.tgz"\n  version "4.17.21"\n'),
+        ("package-lock.json", json.dumps({"packages": {"node_modules/lodash": {
+            "resolved": "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz"}}})),
+        ("pnpm-lock.yaml", "packages:\n  lodash:\n    resolution: {tarball: "
+                           "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz}\n"),
+        ("yarn.lock", '"lodash@npm:^4.17.21":\n  version: 4.17.21\n  resolution: "lodash@npm:4.17'
+                      '.21::__archiveUrl=https%3A%2F%2Fregistry.npmjs.org%2Fevil-new%2F-%2Fevil-'
+                      'new-0.0.1.tgz"\n'),
+        ("uv.lock", '[[package]]\nname = "urllib3"\nversion = "2.0.0"\nsource = { registry = '
+                    '"https://pypi.org/simple" }\nsdist = { url = "https://files.pythonhosted.org/'
+                    'p/urllib3-evil-9.9.tar.gz" }\n'),
+        ("uv.lock", '[[package]]\nname = "urllib3"\nversion = "2.0.0"\nsource = { registry = '
+                    '"https://pypi.org/simple" }\nwheels = [{ url = "https://files.pythonhosted.org/'
+                    'p/urllib3-1.0.0-py3-none-any.whl" }]\n'),
+    ],
+    ids=["yarn-dotdot", "npm-no-version", "pnpm-no-version", "berry-archive-url",
+         "pypi-other-project", "pypi-other-version"],
+)  # fmt: skip
+def test_review_registry_files_must_be_exactly_the_locked_package(name: str, text: str) -> None:
+    parsed = lock_deps(name, text)
+    assert parsed is not None and parsed.sources, parsed
+
+
+@pytest.mark.parametrize(
+    ("name", "text"),
+    [
+        ("pnpm-lock.yaml", "settings:\n  x: &e {tarball: https://evil.example/x.tgz}\npackages:"
+                           "\n  lodash@4.17.21:\n    resolution: *e\n"),
+        ("pnpm-lock.yaml", "packages:\n  lodash@4.17.21:\n    resolution:\n      ? tarball\n"
+                           "      : https://evil.example/x.tgz\n"),
+        ("pnpm-lock.yaml", "packages:\n  evil-new@0.0.1: {resolution: {integrity: sha512-x}}\n"),
+        ("pnpm-lock.yaml", "packages:\n  lodash@4.17.21:\n\tresolution: {integrity: x}\n"),
+        ("yarn.lock", '"evil-new@npm:0.0.1": {version: 0.0.1, resolution: "evil-new@npm:0.0.1"}\n'),
+        ("yarn.lock", 'stray line\n'),
+    ],
+    ids=["pnpm-alias", "pnpm-explicit-key", "pnpm-inline-entry", "pnpm-tab", "yarn-flow",
+         "yarn-stray"],
+)  # fmt: skip
+def test_review_lockfile_forms_a_line_reader_cannot_follow_are_refused(
+    name: str, text: str
+) -> None:
+    assert lock_deps(name, text) is None
+
+
+def test_review_a_linked_or_inner_git_config_is_refused_and_watched(
+    tmp_repo: Path, home: Path, tmp_path: Path
+) -> None:
+    config = tmp_repo / ".git" / "config"
+    (tmp_repo / "tools.cfg").write_text(config.read_text(encoding="utf-8"), encoding="utf-8")
+    config.unlink()
+    config.symlink_to(tmp_repo / "tools.cfg")
+    with pytest.raises(PolicyViolation, match="config read from the work tree"):
+        git.check_repo_config(tmp_repo)
+    before = git.integrity_snapshot(tmp_repo, home)
+    with (tmp_repo / "tools.cfg").open("a", encoding="utf-8") as handle:
+        handle.write("[core]\n\tfilemode = false\n")
+    assert ".git/config" in git.compare(before, git.integrity_snapshot(tmp_repo, home))
+
+
+def test_review_a_git_dir_inside_the_work_tree_is_refused(tmp_path: Path, home: Path) -> None:
+    repo = tmp_path / "inner"
+    repo.mkdir()
+    run_git(repo, "init", "-q", "--separate-git-dir", str(repo / ".gitdir"))
+    assert (repo / ".git").is_file()
+    with pytest.raises(PolicyViolation, match="inside its work tree"):
+        git.check_repo_config(repo)
+
+
+def test_review_exec_bits_and_nested_repositories_compare_cleanly(
+    tmp_repo: Path, home: Path
+) -> None:
+    (tmp_repo / "group.sh").write_text("echo\n", encoding="utf-8")
+    (tmp_repo / "group.sh").chmod(0o654)  # group exec only: git records 100644
+    nested = tmp_repo / "nested"
+    nested.mkdir()
+    run_git(nested, "init", "-q")
+    expected = git.staged_ids(tmp_repo, ["group.sh", "nested/"])
+    assert "nested/" not in expected  # a repository with no commit has nothing to compare
+    head = git.commit(tmp_repo, ["group.sh"], message="m", trailers=[])
+    assert git.committed_ids(tmp_repo, head, ["group.sh"]) == {"group.sh": expected["group.sh"]}
+
+
+def test_review_config_lines_end_only_at_a_newline(tmp_path: Path) -> None:
+    assert git.config_values("[include]\n\tpath = a\x0cb\x85c.cfg\n") == [
+        ("include", "path", "a\x0cb\x85c.cfg")
+    ]
+
+
+def test_review_strict_reader_branches() -> None:
+    def uv_wheel(url: str) -> str:
+        return ('[[package]]\nname = "a"\nversion = "1.0"\nsource = { registry = '
+                f'"https://pypi.org/simple" }}\nwheels = [{{ url = "{url}" }}]\n')  # fmt: skip
+
+    for url in ("https://files.pythonhosted.org/p/a-1.0.whl",
+                "https://files.pythonhosted.org/p/a-1.0.exe"):  # fmt: skip
+        parsed = lock_deps("uv.lock", uv_wheel(url))
+        assert parsed is not None and parsed.sources, url
+    package = "packages:\n  a@1.0.0:\n"
+    assert lock_deps("pnpm-lock.yaml", package + "    resolution: notaflow\n") is None
+    assert lock_deps("pnpm-lock.yaml", package + "    resolution: {integrity}\n") is None
+    assert lock_deps("pnpm-lock.yaml", "settings:\n  odd line\n") is None
+    clean = lock_deps("pnpm-lock.yaml", package + "    resolution: {integrity: x, }\n"
+                      "  b@1.0.0:\n    resolution:\n      integrity: sha512-x\n"
+                      "ignoredOptionalDependencies:\n  - fsevents\n")  # fmt: skip
+    assert clean is not None and clean.sources == frozenset()
+    assert lock_deps("yarn.lock", '  resolved "https://evil.example/x.tgz"\n') is None

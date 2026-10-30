@@ -17,6 +17,7 @@ import os
 import shutil
 import stat
 from collections.abc import Iterable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -155,51 +156,96 @@ def stage_files(repo: Path, paths: Iterable[str], into: Path) -> Stage:
 
     Links, directories, special files and scanner configuration are skipped; a file over
     `MAX_FILE_BYTES` is listed in `too_large`. Paths come from git or `owns_files` and have
-    passed `safe_relpath`-style checks; each is opened with `O_NOFOLLOW` and parents are
-    re-created here, never followed.
+    passed `safe_relpath`-style checks; each is opened with `O_NOFOLLOW`. The staged tree is
+    built through directory handles opened with `O_NOFOLLOW`, so a link that a gate's child
+    plants in the temp dir is refused (exit 6), never followed (security review of RT02-9).
     """
     root = _private_dir(into)
     copied: list[str] = []
     big: list[str] = []
     total = 0
-    for rel in sorted(set(paths)):
-        parts = rel.split("/")
-        if parts[-1] in SCANNER_CONFIG_NAMES or any(p in ("", ".", "..") for p in parts):
-            continue
-        if len(copied) >= MAX_STAGE_FILES or total > MAX_STAGE_BYTES:
-            big.append(rel)
-            continue
-        data = _read_regular(repo, parts)
-        if data is None:
-            continue
-        if len(data) > MAX_FILE_BYTES:
-            big.append(rel)
-            continue
-        target = root.joinpath(*parts)
-        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-        copied.append(rel)
-        total += len(data)
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for rel in sorted(set(paths)):
+            parts = rel.split("/")
+            if parts[-1] in SCANNER_CONFIG_NAMES or any(p in ("", ".", "..") for p in parts):
+                continue
+            if len(copied) >= MAX_STAGE_FILES or total > MAX_STAGE_BYTES:
+                big.append(rel)
+                continue
+            data = _read_regular(repo, parts)
+            if data is None:
+                continue
+            if len(data) > MAX_FILE_BYTES:
+                big.append(rel)
+                continue
+            _write_staged(root_fd, parts, data)
+            copied.append(rel)
+            total += len(data)
+    finally:
+        os.close(root_fd)
     return Stage(root, tuple(copied), tuple(big))
 
 
-def _read_regular(repo: Path, parts: Sequence[str]) -> bytes | None:
-    """A regular file's bytes (up to the cap + 1), opened without following any link."""
-    current = Path(os.path.realpath(repo))
-    for part in parts[:-1]:
-        current = current / part
-        try:
-            info = os.lstat(current)
-        except OSError:
-            return None
-        if not stat.S_ISDIR(info.st_mode):
-            return None
+def _write_staged(root_fd: int, parts: Sequence[str], data: bytes) -> None:
+    """Create `parts` under the staging root, one directory handle at a time."""
+    current = os.dup(root_fd)
     try:
-        fd = os.open(current / parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        for part in parts[:-1]:
+            with suppress(FileExistsError):
+                os.mkdir(part, 0o700, dir_fd=current)
+            try:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current)
+            except OSError:
+                raise PolicyViolation(
+                    "a scanner's staging directory changed while aipm built it"
+                ) from None
+            os.close(current)
+            current = child
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        try:
+            fd = os.open(parts[-1], flags, 0o600, dir_fd=current)
+        except OSError:
+            raise PolicyViolation(
+                "a scanner's staging directory changed while aipm built it"
+            ) from None
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+    finally:
+        os.close(current)
+
+
+def read_regular(repo: Path, rel: str) -> bytes | None:
+    """A repository file's bytes (up to `MAX_FILE_BYTES` + 1) when it is a regular file reached
+    without following a link; `None` otherwise."""
+    parts = rel.split("/")
+    if any(p in ("", ".", "..") for p in parts):
+        return None
+    return _read_regular(repo, parts)
+
+
+def _read_regular(repo: Path, parts: Sequence[str]) -> bytes | None:
+    """A regular file's bytes (up to the cap + 1), reached one directory handle at a time with
+    `O_NOFOLLOW`, so no link is followed even if one appears while aipm reads."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        current = os.open(os.path.realpath(repo), flags)
     except OSError:
         return None
+    try:
+        for part in parts[:-1]:
+            try:
+                child = os.open(part, flags, dir_fd=current)
+            except OSError:
+                return None
+            os.close(current)
+            current = child
+        try:
+            fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=current)
+        except OSError:
+            return None
+    finally:
+        os.close(current)
     if not stat.S_ISREG(os.fstat(fd).st_mode):
         os.close(fd)
         return None

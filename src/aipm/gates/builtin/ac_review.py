@@ -20,7 +20,7 @@ from aipm.execution.git import diff_text
 from aipm.gates.builtin import BuiltinOutcome, outcome
 from aipm.gates.context import GateContext
 from aipm.roles.ac_reviewer import ACReview, ACReviewInput, ReviewedCriterion, Verdict
-from aipm.scanners.base import stage_files
+from aipm.scanners.base import MAX_FILE_BYTES, read_regular
 from aipm.security.untrusted import Untrusted
 
 NAME = "ac_review"
@@ -49,9 +49,11 @@ def build_diff(ctx: GateContext) -> tuple[str, bool]:
     added = [c.path for c in changed if c.status is ChangeStatus.ADDED
              and c.path not in withheld and f" b/{c.path}\n" not in text]  # fmt: skip
     if added and not cut:
-        stage = stage_files(ctx.root, added, ctx.ws.temp_dir / "ac-review-new")
-        for rel in stage.files:
-            body = stage.root.joinpath(*rel.split("/")).read_text("utf-8", errors="replace")
+        for rel in sorted(added):  # read from the tree without following a link, never staged
+            data = read_regular(ctx.root, rel)
+            if data is None or len(data) > MAX_FILE_BYTES:
+                continue
+            body = data.decode("utf-8", errors="replace")
             text += f"--- /dev/null\n+++ b/{rel}\n" + "".join(
                 f"+{line}\n" for line in body.splitlines()
             )

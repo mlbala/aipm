@@ -10,7 +10,7 @@ counted. The result is untrusted text (T2) whenever a role reads it back.
 import os
 import re
 import stat
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -128,10 +128,12 @@ class IgnoreRules:
         return self.ignored.match_file(path) or _DENY_SPEC.match_file(path.casefold())
 
 
-def ignore_spec(root: Path) -> IgnoreRules:
-    """Files never read for LLM context: `.gitignore`, `.aipmignore` and the §7.1 deny list."""
+def ignore_spec(root: Path, *, also: Iterable[str] = ()) -> IgnoreRules:
+    """Files never read for LLM context: `.gitignore`, `.aipmignore` and the §7.1 deny list.
+    `also` adds more ignore lines (the base commit's, so an agent that edits `.gitignore`
+    cannot un-ignore a file for the AC reviewer)."""
     ignore_files = [*_read_ignore(root / ".gitignore"), *_read_ignore(root / ".aipmignore")]
-    return IgnoreRules(GitIgnoreSpec.from_lines(ignore_files))
+    return IgnoreRules(GitIgnoreSpec.from_lines([*ignore_files, *list(also)[:MAX_IGNORE_LINES]]))
 
 
 def scan_repo(root: Path, *, max_input_bytes: int) -> RepoScan:

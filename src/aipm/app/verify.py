@@ -261,6 +261,15 @@ def _hashes(root: Path, changes: ChangeSet) -> dict[str, str | None]:
     }
 
 
+def _base_ignores(root: Path, base: str) -> list[str]:
+    """The `.gitignore` and `.aipmignore` lines of the base commit."""
+    lines: list[str] = []
+    for name in (".gitignore", ".aipmignore"):
+        data = git.file_at(root, base, name, max_bytes=262_144) or b""
+        lines += data.decode("utf-8", errors="replace").splitlines()
+    return lines
+
+
 def _moved(root: Path, scanned: dict[str, str | None]) -> list[str]:
     """The changed files whose contents differ from what the checks read."""
     return [path for path, digest in scanned.items() if git.hash_path(root / path) != digest]
@@ -401,7 +410,7 @@ class _Verify:
             ws=GateWorkspace(root=self.root, temp_dir=self.temp, base_sha=base),
             task=task, cfg=self.cfg, changes=changes, redactor=self.store.redactor,
             home=Path.home(), now=datetime.now(UTC), runtime=self.sandbox,
-            withheld=ignore_spec(self.root).match_file,
+            withheld=ignore_spec(self.root, also=_base_ignores(self.root, base)).match_file,
             changed_during_gates=lambda: _moved(self.root, scanned),
         )  # fmt: skip
         reviewer, unavailable = _reviewer(self.cfg, self.store, no_cache=self.options.no_cache)

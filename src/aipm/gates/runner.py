@@ -130,16 +130,15 @@ class _Attempt:
             self.run.missing_tools.append(name)
 
     def review_hold(self) -> str | None:
-        """Why the diff must not go to the AC reviewer: a secrets gate that ran and did not
-        pass (it found something, or could not scan), or a file a gate changed again."""
-        menu = self.ctx.cfg.gates
-        for result in self.run.results:
-            gate = menu.get(result.name)
-            if gate is not None and gate.builtin is BuiltinGate.GITLEAKS:
-                if result.status is not GateStatus.PASS:
-                    return (
-                        f"the {result.name} gate did not pass, so the diff is not sent to the LLM"
-                    )
+        """Why the diff must not go to the AC reviewer: a secrets gate in the menu that did not
+        pass in this run (it found something, could not scan, or did not run, as with `--gate
+        ac_review`), or a file a gate changed again."""
+        status = {r.name: r.status for r in self.run.results}
+        for name, gate in self.ctx.cfg.gates.items():
+            if gate.builtin is BuiltinGate.GITLEAKS and status.get(name) is not GateStatus.PASS:
+                return (
+                    f"the {name} gate did not pass in this run, so the diff is not sent to the LLM"
+                )
         moved = self.ctx.changed_during_gates()
         if moved:
             return f"{moved[0]} changed while the gates ran, so the diff is not sent to the LLM"
@@ -162,10 +161,15 @@ def run_gates(
     attempt = _Attempt(ctx, reviewer, reviewer_unavailable, override_ac)
     if any(n in menu and menu[n].run is not None for n in names):
         prepare = None if hold_prepare else run_prepare(ctx)
-        if hold_prepare and ctx.cfg.prepare is not None:
-            attempt.run.results.append(_error("prepare", f"not run: {hold_prepare}", required=True))
+        if hold_prepare:
+            # No command gate runs either: one such as `uv run pytest` installs on its own.
             attempt.prepare_ok = False
-            attempt.prepare_why = "the prepare step did not run"
+            attempt.prepare_why = hold_prepare
+            if ctx.cfg.prepare is not None:
+                attempt.run.results.append(
+                    _error("prepare", f"not run: {hold_prepare}", required=True)
+                )
+                attempt.prepare_why = "the prepare step did not run"
         if prepare is not None:
             attempt.run.results.append(prepare.result)
             attempt.run.outputs["prepare"] = prepare.full_output

@@ -10,29 +10,36 @@ from aipm.domain.models import GateFinding, GateStatus, Severity
 from aipm.gates.builtin import BuiltinOutcome, outcome, to_findings
 from aipm.gates.context import GateContext, changed_files
 from aipm.scanners import gitleaks
-from aipm.scanners.base import MAX_FILE_BYTES, ScanStatus, stage_files
+from aipm.scanners.base import MAX_FILE_BYTES, ScanStatus, read_regular
 from aipm.security.redact import Redactor
 
 NAME = "secrets"
 
 
 def fallback(ctx: GateContext, paths: list[str]) -> list[GateFinding]:
-    """Scan the staged files with aipm's own secret patterns."""
-    stage = stage_files(ctx.root, paths, ctx.ws.temp_dir / "secrets-fallback")
+    """Scan the changed files with aipm's own secret patterns, read straight from the tree
+    without following a link (nothing is staged in the temp dir, which gates can write)."""
     patterns = Redactor({})
     found: list[GateFinding] = []
-    for rel in stage.files:
-        text = stage.root.joinpath(*rel.split("/")).read_bytes()[:MAX_FILE_BYTES]
-        if patterns.contains_secret(text.decode("utf-8", errors="replace")):
+    for rel in sorted(set(paths)):
+        data = read_regular(ctx.root, rel)
+        if data is None:
+            continue
+        if len(data) > MAX_FILE_BYTES:
+            found.append(
+                GateFinding(
+                    tool="aipm",
+                    rule="too-large",
+                    severity=Severity.HIGH,
+                    path=rel[:512],
+                    message="too large for the built-in patterns",
+                )
+            )
+        elif patterns.contains_secret(data.decode("utf-8", errors="replace")):
             found.append(
                 GateFinding(tool="aipm", rule="secret-pattern", severity=Severity.HIGH,
                             path=rel[:512], message="matches a known secret format")
             )  # fmt: skip
-    found += [
-        GateFinding(tool="aipm", rule="too-large", severity=Severity.HIGH, path=rel[:512],
-                    message="too large for the built-in patterns")
-        for rel in stage.too_large
-    ]  # fmt: skip
     return found
 
 
