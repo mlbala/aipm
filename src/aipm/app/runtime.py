@@ -2,35 +2,54 @@
 
 from pathlib import Path
 
-from aipm.config.loader import load_config
+from aipm.app.workspace import find_repo_root
+from aipm.config.loader import user_redact_patterns
 from aipm.domain.errors import AipmError
-from aipm.observability.logging import configure_logging
+from aipm.observability.logging import configure_logging, log_dir
 from aipm.observability.redaction import process_redactor
+from aipm.security.paths import is_within
 from aipm.security.redact import Redactor
 
 _STDERR_LEVELS = ("warning", "info", "debug")
 
 
-def configure(verbose: int) -> Path | None:
+def configure(verbose: int, project: Path | None = None) -> Path | None:
     """Configure logging for one command; returns the JSON log file, if one could be opened.
 
     `-v` shows info on stderr and `-vv` debug; the file always records info and above.
+    `project` is the `-C` directory. No log file is opened when the log directory lies inside
+    that repository, as it does when a repository `.env` sets `HOME` or `XDG_STATE_HOME`.
     """
+    root = _repo_root(project)
     stderr_level = _STDERR_LEVELS[min(max(verbose, 0), len(_STDERR_LEVELS) - 1)]
     return configure_logging(
-        "info", json_lines=False, stderr_level=stderr_level, redactor=user_redactor()
+        "info",
+        json_lines=False,
+        stderr_level=stderr_level,
+        redactor=user_redactor(root),
+        file=root is None or not is_within(log_dir(), root),
     )
 
 
-def user_redactor() -> Redactor:
-    """The process redactor plus `security.extra_redact_patterns` from the user's own config.
+def _repo_root(project: Path | None) -> Path | None:
+    try:
+        return find_repo_root(project)
+    except AipmError:
+        return None
 
-    Repository patterns are not used yet: a repo-supplied regex could make redaction hang or
-    erase prompt boundaries (open question for an ADR). A user config that fails to load
-    falls back to the built-in patterns; the command itself reports the error.
+
+def user_redactor(root: Path | None = None) -> Redactor:
+    """The process redactor plus `security.extra_redact_patterns` from the user config file.
+
+    Patterns from the repository or from `AIPM_*` variables are never used: a regex that
+    backtracks without end would hang every redaction, and one that matches aipm's own sentences
+    would erase them from prompts (red-team v0.1 review). `root` is the repository the command
+    works on, which the user config must lie outside (by default, the one around the current
+    directory). A user config that fails to load or lies inside falls back to the built-in
+    patterns; the command itself reports the error.
     """
     try:
-        patterns = load_config(None).config.security.extra_redact_patterns
+        patterns = user_redact_patterns(root)
     except AipmError:
         patterns = []
     return process_redactor(patterns)

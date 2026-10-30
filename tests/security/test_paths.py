@@ -10,6 +10,7 @@ from aipm.domain.errors import ExitCode, PolicyViolation
 from aipm.security.paths import (
     PROTECTED_PATHS,
     is_protected,
+    is_within,
     normalize_glob,
     normalize_relpath,
     protected_patterns,
@@ -280,3 +281,21 @@ def test_is_protected(path: str, patterns: tuple[str, ...], expected: bool) -> N
 def test_symlink_fixture_is_what_the_tests_assume(root: Path) -> None:
     assert (root / "link_out").is_symlink()
     assert os.path.realpath(root / "src" / "pm") == os.path.realpath(root / ".pm")
+
+
+def test_is_within_compares_directories_not_spellings(root: Path, tmp_path: Path) -> None:
+    assert is_within(root, root)
+    assert is_within(root / "src" / "app.py", root)
+    assert is_within(root / ".pm" / "not" / "yet" / "there.yaml", root)
+    assert is_within(Path(str(root) + "/src/../.pm/x"), root)
+    assert is_within(root / "src" / "pm" / "x.yaml", root)  # a link that stays inside
+    assert is_within(root / "link_out" / "x.yaml", root)  # a link out: the root chose its target
+    assert not is_within(tmp_path / "outside" / "x.yaml", root)
+    assert not is_within(Path(str(root) + "-sibling") / "x.yaml", root)
+    (tmp_path / "outside" / "in").symlink_to(root / ".pm")
+    assert is_within(tmp_path / "outside" / "in" / "x.yaml", root)  # a link that enters
+
+
+def test_is_within_a_root_that_cannot_be_examined_holds_everything(tmp_path: Path) -> None:
+    # Callers refuse what lies inside, so an unknown root must fail closed.
+    assert is_within(tmp_path / "elsewhere" / "x", tmp_path / "gone")

@@ -2,15 +2,23 @@
 
 The user layer and CLI flags are the user's own (T0) and may set anything. The repo layer
 (`.pm/config.yaml`) is limited by key class: a user-only key is ignored, and a tighten-only key
-can only make the value stricter than the layers below it. `AIPM_*` variables may relax
-tighten-only keys, but never set a user-only key (SECURITY.md §6 rule 5): tools such as pipenv
-load a repository's `.env` into the environment, which would let the repository redirect the
-user's API key (ADR-0018). For the same reason `AIPM_CONFIG` must be an absolute path outside
-the repository. Each ignored key, and each tighten-only value that ends up looser than the
-built-in default, becomes a warning that the CLI prints on every run.
+can only make the value stricter than the layers below it.
+
+Tools such as pipenv load a repository's `.env` into the environment, so the environment is not
+always the user's own (ADR-0018, SECURITY.md §6 rule 5):
+
+- an `AIPM_*` variable that sets a user-only key is refused (exit 6), never applied;
+- an `AIPM_*` variable may relax a tighten-only key, with a warning naming the key;
+- the user config file, wherever `AIPM_CONFIG`, `HOME` or `XDG_CONFIG_HOME` puts it, must be an
+  absolute path outside the repository (compared by inode, so firmlinks and case variants count)
+  and a regular file (exit 6 otherwise).
+
+Each ignored key, and each tighten-only value that ends up looser than the built-in default,
+becomes a warning that the CLI prints on every run.
 """
 
 import os
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib.resources import files
@@ -23,6 +31,7 @@ from pydantic import BaseModel, ValidationError
 from aipm.config.schema import Config, KeyClass, Tighten, key_class, stricter
 from aipm.domain.errors import PolicyViolation, SchemaError
 from aipm.domain.models import SCHEMA_VERSION, ArtifactKind
+from aipm.security.paths import is_within
 from aipm.state.store import open_store
 from aipm.state.yamlio import MAX_YAML_BYTES, load_yaml
 
@@ -34,21 +43,22 @@ ENV_SOURCE = "AIPM_* environment variables"
 
 @dataclass(frozen=True, slots=True)
 class _Limits:
-    """How key classes limit one layer: user-only keys ignored, tighten-only keys tightened."""
+    """How key classes limit one layer.
+
+    `user_only` is what a user-only key gets: `allow`, `ignore` (with a warning) or `refuse`
+    (exit 6). `tighten_only` keeps a tighten-only key at least as strict as before, and
+    `warn_relaxed` lets it relax but says so.
+    """
 
     source: str = ""
-    user_only_ignored: bool = False
+    user_only: str = "allow"
     tighten_only: bool = False
-    hint: str = ""
+    warn_relaxed: bool = False
 
 
 _OWN = _Limits()
-_REPO = _Limits(REPO_SOURCE, user_only_ignored=True, tighten_only=True)
-_ENV = _Limits(
-    ENV_SOURCE,
-    user_only_ignored=True,
-    hint="; set it in your user config or with a command-line flag",
-)
+_REPO = _Limits(REPO_SOURCE, user_only="ignore", tighten_only=True)
+_ENV = _Limits(ENV_SOURCE, user_only="refuse", warn_relaxed=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,9 +166,18 @@ def _merge[M: BaseModel](
             updates[name] = merged
             continue
         rule = key_class(field.metadata)
-        if limits.user_only_ignored and rule is KeyClass.USER_ONLY:
-            warnings.append(f"{limits.source}: ignored {key}: it is a user-only key{limits.hint}")
+        if rule is KeyClass.USER_ONLY and limits.user_only == "refuse":
+            raise PolicyViolation(
+                f"{limits.source} set the user-only key {key}; aipm refuses to run, because a "
+                "repository .env file loaded by a tool such as pipenv can fill the environment",
+                hint=f"Unset the AIPM_* variable and set {key} in your user config, or pass it "
+                "as a command-line flag.",
+            )
+        if rule is KeyClass.USER_ONLY and limits.user_only == "ignore":
+            warnings.append(f"{limits.source}: ignored {key}: it is a user-only key")
             continue
+        if limits.warn_relaxed and isinstance(rule, Tighten) and stricter(rule, old, new) != new:
+            warnings.append(f"{limits.source}: relaxed {key} to {_show(new)} (was {_show(old)})")
         if limits.tighten_only and isinstance(rule, Tighten):
             tightened = stricter(rule, old, new)
             if tightened != new:
@@ -235,47 +254,79 @@ def _env_layer(env: Mapping[str, str]) -> dict[str, Any]:
     return _nested(items, "environment")
 
 
-def _inside(path: Path, root: Path) -> bool:
-    real, base = os.path.realpath(path), os.path.realpath(root)
-    return real == base or real.startswith(base.rstrip(os.sep) + os.sep)
+def _git_root(start: Path) -> Path | None:
+    """The nearest directory from `start` upwards that holds `.git`, like `find_repo_root`."""
+    current = Path(os.path.realpath(start))
+    for candidate in (current, *current.parents):
+        if os.path.lexists(candidate / ".git"):
+            return candidate
+    return None
 
 
-def _check_user_path(path: Path, environ: Mapping[str, str], project: Path | None) -> None:
-    """`AIPM_CONFIG` must be absolute and outside the repository (ADR-0018).
+def _check_user_path(path: Path, project: Path | None) -> None:
+    """The user config must be absolute and outside the repository (ADR-0018).
 
-    A relative path is read from the current directory, which may be a repository, and a file
-    inside the repository is repository content: neither may become the user config, which can
-    set user-only keys such as `llm.base_url` and `llm.api_key_env`.
+    The path comes from `AIPM_CONFIG`, `HOME` or `XDG_CONFIG_HOME`, all of which a repository
+    `.env` can set. Without a project (`aipm init`, the CLI redactor) the repository around the
+    current directory counts.
     """
-    if not environ.get(USER_CONFIG_ENV):
-        return
     if not path.is_absolute():
         raise PolicyViolation(
-            f"{USER_CONFIG_ENV} must be an absolute path, not {str(path)[:200]!r}",
+            f"the user config path must be absolute, not {str(path)[:200]!r}",
             hint="A relative path is read from the current directory, which may be a "
             "repository. Point AIPM_CONFIG at an absolute path, or `~/...`.",
         )
-    if project is not None and _inside(path, project):
+    root = project if project is not None else _git_root(Path.cwd())
+    if root is not None and is_within(path, root):
         raise PolicyViolation(
-            f"{USER_CONFIG_ENV} names a file inside the repository ({str(path)[:200]}); a "
-            "repository can never be your user config",
-            hint="Keep your user config outside the repository and point AIPM_CONFIG at it.",
+            f"the user config {str(path)[:200]} is inside the repository; a repository can "
+            "never be your user config",
+            hint="Keep your user config outside the repository. Check AIPM_CONFIG, HOME and "
+            "XDG_CONFIG_HOME, which a repository .env loaded by a tool such as pipenv can set.",
         )
 
 
 def _read_user_layer(path: Path) -> object:
+    """Read the user config: a regular file (links followed), never a FIFO or a device."""
     try:
-        with path.open("rb") as handle:
-            data = handle.read(MAX_YAML_BYTES + 1)
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     except FileNotFoundError:
         return {}
     except OSError as exc:
         raise SchemaError(f"cannot read user config {path} ({exc.strerror})") from None
+    mode = os.fstat(fd).st_mode
+    if not stat.S_ISREG(mode):
+        os.close(fd)
+        if stat.S_ISDIR(mode):
+            raise SchemaError(f"cannot read user config {path} (it is a directory)")
+        raise PolicyViolation(f"the user config {str(path)[:200]} is not a regular file")
+    with os.fdopen(fd, "rb") as handle:
+        data = handle.read(MAX_YAML_BYTES + 1)
+    if len(data) > MAX_YAML_BYTES:
+        raise SchemaError(f"user config {path} is larger than 1 MiB")
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         raise SchemaError(f"user config {path} is not valid UTF-8") from None
     return load_yaml(text, source=str(path))
+
+
+def _user_layer(path: Path, project: Path | None) -> Config:
+    _check_user_path(path, project)
+    return _validate(_read_user_layer(path), str(path))
+
+
+def user_redact_patterns(
+    project: Path | None = None, *, env: Mapping[str, str] | None = None
+) -> list[str]:
+    """`security.extra_redact_patterns` from the user config file only.
+
+    Patterns from the repository or the environment are never used: a regex that backtracks
+    without end would hang every redaction, and one that matches aipm's own sentences would erase
+    them from prompts (red-team v0.1 review).
+    """
+    path = user_config_path(os.environ if env is None else env)
+    return list(_user_layer(path, project).security.extra_redact_patterns)
 
 
 def load_config(
@@ -284,8 +335,10 @@ def load_config(
     env: Mapping[str, str] | None = None,
     flags: Mapping[str, object] | None = None,
 ) -> LoadedConfig:
-    """Merge every layer; ignore repo relaxations and user-only keys from the repo or the
-    environment, with warnings. Exit 6 for an `AIPM_CONFIG` that is relative or in the repo.
+    """Merge every layer; ignore repo relaxations and user-only repo keys, with warnings.
+
+    Exit 6 when the environment sets a user-only key, or when the user config is relative or
+    inside the repository.
 
     `project` is the repository root (None outside a repository). `flags` maps dotted keys,
     such as `dispatch.default_tool`, to values given on the command line.
@@ -296,7 +349,7 @@ def load_config(
     config = defaults()
 
     user_path = user_config_path(environ)
-    _check_user_path(user_path, environ, project)
+    _check_user_path(user_path, project)
     user_raw = _read_user_layer(user_path)
     if user_raw != {}:
         sources.append(str(user_path))

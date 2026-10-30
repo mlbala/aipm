@@ -48,6 +48,19 @@ HARD_DENIED: frozenset[str] = frozenset(
 `timeout`, `caffeinate` or `find -exec` starts the program named after it, so checking only
 `argv[0]` and the elements after a runner is not enough (red-team v0.1, RT01-1)."""
 
+ALSO_DENIED: frozenset[str] = frozenset(
+    {
+        "awk", "gawk", "nawk", "mawk", "expect", "sqlite", "watch", "flock", "script",
+        "nscurl", "lwp-request", "lwp-download", "lwp-mirror", "tftp",
+    }
+)  # fmt: skip
+"""Refused like `HARD_DENIED` (SECURITY.md §10 rule 3): programs that run a shell string or code
+given as an argument (`awk 'system(…)'`, `watch '…'`, `flock f -c`, `script -c`, `expect -c`,
+`sqlite3 '.shell …'`), and network tools that ship with macOS (red-team v0.1 review)."""
+
+DENIED_PROGRAMS: frozenset[str] = HARD_DENIED | ALSO_DENIED
+"""Every program name the policy refuses, at any argv position."""
+
 RUNNERS: tuple[Argv, ...] = (
     ("uv", "run"),
     ("uv", "tool", "run"),
@@ -85,7 +98,11 @@ _RUNNER_WORDS = frozenset({"run", "tool", "exec", "dlx", "x", "uvx"})
 _PYTHON = re.compile(r"(?:python|pypy)(?:\d+(?:\.\d+)*t?)?")
 _PERL = re.compile(r"perl\d+(?:\.\d+)*")
 _PIP = re.compile(r"pip\d*(?:\.\d+)*")
-_ATTACHED_MODULE = re.compile(r"-[bBdEiIOqsSuvx]*m(.+)")
+# A version after a name: `php8.3`, `node22`, `zsh-5.9`, `julia-1.10`, `lua5.4`.
+_VERSION_SUFFIX = re.compile(r"(?<=[a-z])[\-_]?\d+(?:\.\d+)*t?$")
+# A Python flag cluster up to its first `m`: any letters but those that take a value (`-c`,
+# `-W`, `-X`), so `-Im`, `-Pm` and `-Rm` count (the module follows, or is attached).
+_ATTACHED_MODULE = re.compile(r"-(?:(?![cWX])[A-Za-z?])*?m(.*)")
 _RUNNER_LETTERS = frozenset("ce")
 _RUNNER_LONG = ("--eval",)
 _NODE_LETTERS = frozenset("pr")
@@ -98,14 +115,20 @@ _INTERPRETERS: dict[str, tuple[frozenset[str], tuple[str, ...], frozenset[str]]]
     "nodejs": (frozenset("epr"), ("--eval", *_NODE_LONG), frozenset()),
     "bun": (frozenset("ep"), ("--eval", "--print"), frozenset()),
     "ruby": (frozenset("e"), (), frozenset()),
-    "perl": (frozenset("eE"), (), frozenset()),
-    "deno": (frozenset(), (), frozenset({"eval"})),
+    "perl": (frozenset("eEMm"), (), frozenset()),  # -M'POSIX;system(…)' runs code too
+    "deno": (frozenset(), ("--eval",), frozenset({"eval"})),
     # macOS ships osascript, whose AppleScript can `do shell script` (red-team v0.1, RT01-1).
     "osascript": (frozenset("e"), (), frozenset()),
-    "php": (frozenset("rBRE"), (), frozenset()),
+    "php": (
+        frozenset("rBRE"),
+        ("--run", "--process-begin", "--process-code", "--process-end"),
+        frozenset(),
+    ),
     "lua": (frozenset("e"), (), frozenset()),
+    "luajit": (frozenset("e"), (), frozenset()),
     "rscript": (frozenset("e"), (), frozenset()),
-    "julia": (frozenset("eE"), (), frozenset()),
+    "r": (frozenset("e"), (), frozenset()),
+    "julia": (frozenset("eE"), ("--eval", "--print"), frozenset()),
 }
 
 _NPM_INSTALL = frozenset(
@@ -123,6 +146,11 @@ _INSTALL_WORDS: dict[str, frozenset[str]] = {
     "uv": frozenset({"add", "sync"}),
 }
 _PIP_MODULES = frozenset({"pip", "pip3", "ensurepip"})
+# `python -m` modules that run code given as an argument, or serve the network.
+_CODE_MODULES = frozenset(
+    {"timeit", "code", "pdb", "runpy", "cprofile", "profile", "trace", "pydoc", "webbrowser",
+     "http.server", "smtpd"}
+)  # fmt: skip
 
 _FORBIDDEN_FLAGS: dict[ToolName, tuple[str, ...]] = {
     ToolName.CLAUDE: ("--dangerously-skip-permissions", "--allow-dangerously-skip-permissions"),
@@ -148,12 +176,14 @@ def _deny(message: str) -> PolicyViolation:
 
 
 def program_name(arg: str) -> str:
-    """The basename of an argv element, casefolded; versioned Python, pip and perl are folded."""
+    """The basename of an argv element, casefolded, with any version folded off: `python3.13t`,
+    `pypy3`, `perl5.36` and `pip3.12` name their family, and `php8.3`, `node22` or `zsh-5.9`
+    name `php`, `node` and `zsh`."""
     name = arg.rsplit("/", 1)[-1].casefold()
     for pattern, family in ((_PYTHON, "python"), (_PERL, "perl"), (_PIP, "pip")):
         if pattern.fullmatch(name):
             return family
-    return name
+    return _VERSION_SUFFIX.sub("", name)
 
 
 _program = program_name
@@ -190,7 +220,7 @@ def _check_prefix(prefix: object) -> Argv:
     checked = _check_shape(prefix, max_len=MAX_ARGV)
     if any("{" in arg or "}" in arg for arg in checked):
         raise _deny("an allowed argv prefix must not contain placeholders")
-    if _program(checked[0]) in HARD_DENIED:
+    if _program(checked[0]) in DENIED_PROGRAMS:
         raise _deny(f"{checked[0]!r} is hard-denied and cannot be allowed by any configuration")
     if _program(checked[0]) in _NEEDS_PROGRAM and not any(
         not arg.startswith("-") and arg.casefold() not in _RUNNER_WORDS for arg in checked[1:]
@@ -229,13 +259,17 @@ def _subsequence(needle: Sequence[str], hay: Sequence[str]) -> bool:
 
 
 def _normalized(argv: Argv) -> list[str]:
-    """argv casefolded; after a Python program, an attached `-m<module>` (`-mpip`, `-Impip`) is
-    split into `-m` and the module."""
+    """argv casefolded; after a Python program, a flag cluster ending in `m` is `-m`, and an
+    attached module (`-mpip`, `-Impip`) is split off: `-Im timeit` and `-Imtimeit` are both
+    `-m timeit`."""
     out: list[str] = []
     python = False
     for arg in argv:
         match = _ATTACHED_MODULE.fullmatch(arg) if python else None
-        out.extend(("-m", match.group(1).casefold()) if match else (arg.casefold(),))
+        if match is None:
+            out.append(arg.casefold())
+        else:
+            out.extend(("-m", match.group(1).casefold()) if match.group(1) else ("-m",))
         python = python or _program(arg) == "python"
     return out
 
@@ -257,10 +291,21 @@ def _flag_hit(arg: str, letters: frozenset[str], long_flags: Iterable[str]) -> b
     return arg.startswith("-") and any(ch in letters for ch in arg[1:])
 
 
+def _names(argv: Argv, values: frozenset[int]) -> list[str]:
+    """The program name of each argv element, or "" for an expanded placeholder value with a `/`.
+
+    Such a value passed `safe_relpath` and names a file in the workspace: even a wrapper would
+    run that file, never the program of the same name on `PATH`, so `cmd/env` is not `env`. A
+    bare value (`curl`) is still a program name. After a runner every value is still compared
+    (`_check_runner`, SECURITY.md §10 rule 4).
+    """
+    return ["" if i in values and "/" in arg else _program(arg) for i, arg in enumerate(argv)]
+
+
 def _check_runner(argv: Argv) -> None:
     programs = [_program(arg) for arg in argv]
     for arg, program in zip(argv[1:], programs[1:], strict=True):
-        if program in HARD_DENIED:
+        if program in DENIED_PROGRAMS:
             raise _deny(f"{arg!r} is hard-denied after a runner")
     node = any(program in ("node", "nodejs") for program in programs)
     letters = _RUNNER_LETTERS | _NODE_LETTERS if node else _RUNNER_LETTERS
@@ -270,11 +315,25 @@ def _check_runner(argv: Argv) -> None:
             raise _deny(f"inline-code flag {arg!r} after a runner")
 
 
-def _check_denied_anywhere(argv: Argv) -> None:
-    """No hard-denied program at any position: a wrapper (`time bash -c …`) would start it."""
-    for arg in argv[1:]:
-        if _program(arg) in HARD_DENIED:
+def _check_denied_anywhere(argv: Argv, values: frozenset[int]) -> None:
+    """No hard-denied program at any position: a wrapper (`time bash -c …`) would start it.
+
+    `values` are the positions of expanded placeholder values: paths that `compile_gate` has
+    already validated, which may well be named `cmd/env` or `scripts/sh` (`_names`).
+    """
+    for arg, program in zip(argv[1:], _names(argv, values)[1:], strict=True):
+        if program in DENIED_PROGRAMS:
             raise _deny(f"{arg!r} is hard-denied at any argv position; a wrapper could start it")
+
+
+def _check_code_modules(argv: Argv) -> None:
+    """`python -m timeit '…'`, `-m code` and the like run code from an argument."""
+    normalized = _normalized(argv)
+    python = False
+    for current, following in pairwise(normalized):
+        python = python or _program(current) == "python"
+        if python and current == "-m" and following in _CODE_MODULES:
+            raise _deny(f"inline code for python: -m {following}")
 
 
 def _check_interpreters(argv: Argv) -> None:
@@ -306,13 +365,21 @@ def _check_install(argv: Argv) -> None:
 
 
 def check_argv(
-    argv: Sequence[str], policy: CommandPolicy, *, stage: Stage, max_len: int = MAX_ARGV
+    argv: Sequence[str],
+    policy: CommandPolicy,
+    *,
+    stage: Stage,
+    max_len: int = MAX_ARGV,
+    values: frozenset[int] = frozenset(),
 ) -> Argv:
-    """Check a concrete argv (no placeholders) against SECURITY.md §10 rules 1-4."""
+    """Check a concrete argv (no placeholders) against SECURITY.md §10 rules 1-4.
+
+    `values` holds the positions of expanded placeholder values (`compile_gate`).
+    """
     checked = _check_shape(argv, max_len=max_len)
     if any("{" in arg or "}" in arg for arg in checked):
         raise _deny("unexpanded or partial placeholder in argv")
-    if _program(checked[0]) in HARD_DENIED:
+    if _program(checked[0]) in DENIED_PROGRAMS:
         raise _deny(f"{checked[0]!r} is hard-denied")
     fetch = _matches(FETCH_AND_RUN, checked)
     if fetch is not None:
@@ -322,7 +389,8 @@ def check_argv(
     if _runner_present(checked):
         _check_runner(checked)
     _check_interpreters(checked)
-    _check_denied_anywhere(checked)
+    _check_code_modules(checked)
+    _check_denied_anywhere(checked, values)
     if stage == "gate":
         _check_install(checked)
     return checked
@@ -370,18 +438,25 @@ def compile_gate(
     if len(values) > MAX_EXPANDED_VALUES:
         raise _deny(f"more than {MAX_EXPANDED_VALUES} paths for one gate")
     expanded: list[str] = []
+    positions: set[int] = set()
     for arg in template:
-        if arg == "{paths}":
-            expanded.extend(values)
-        elif arg == "{test_paths}":
-            expanded.extend(_test_paths(values, policy.test_roots))
+        if arg in ("{paths}", "{test_paths}"):
+            found = values if arg == "{paths}" else _test_paths(values, policy.test_roots)
+            positions.update(range(len(expanded), len(expanded) + len(found)))
+            expanded.extend(found)
         elif arg == "{report_file}":
             expanded.append(_report_value(report_file))
         elif "{" in arg or "}" in arg:
             raise _deny(f"{arg!r}: a placeholder must be a whole argv element")
         else:
             expanded.append(arg)
-    return check_argv(expanded, policy, stage="gate", max_len=MAX_ARGV + 2 * MAX_EXPANDED_VALUES)
+    return check_argv(
+        expanded,
+        policy,
+        stage="gate",
+        max_len=MAX_ARGV + 2 * MAX_EXPANDED_VALUES,
+        values=frozenset(positions),
+    )
 
 
 def compile_prepare(prepare: PrepareDef, *, policy: CommandPolicy) -> Argv:

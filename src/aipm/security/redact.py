@@ -105,8 +105,13 @@ class Redactor:
         self.env_names = frozenset(env)
         secrets: dict[str, str] = {}
         for name, value in env.items():
-            if _SECRET_NAME.search(name) and len(value) >= MIN_SECRET_LENGTH:
-                secrets.setdefault(value, name)
+            if not _SECRET_NAME.search(name):
+                continue
+            # A value from a CRLF `.env` ends in "\r", which logging strips before its second
+            # pass, so the trimmed form must match too (red-team v0.1 review).
+            for form in (value, value.strip()):
+                if len(form) >= MIN_SECRET_LENGTH:
+                    secrets.setdefault(form, name)
         self._secrets = secrets
         ordered = sorted(secrets, key=len, reverse=True)
         self._env_regex = re.compile("|".join(map(re.escape, ordered))) if ordered else None

@@ -5,9 +5,11 @@ C-028 to C-034 run through the real code paths: the config loader and the trust 
 context generator, the input readers, the repo map and logging.
 """
 
+import datetime
 import io
 import json
 import logging
+import os
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -18,17 +20,20 @@ from ruamel.yaml import YAML
 
 from aipm.app.inputs import read_repo_file
 from aipm.app.repo_map import scan_repo
-from aipm.config.loader import load_config
+from aipm.app.runtime import configure, user_redactor
+from aipm.config.loader import load_config, user_redact_patterns
 from aipm.context.generator import agents_md
-from aipm.domain.errors import ExitCode, PolicyViolation
+from aipm.domain.errors import ExitCode, PolicyViolation, SchemaError
+from aipm.domain.models import GateDef
 from aipm.execution.git import head_sha
 from aipm.execution.process import build_env, run_safe
 from aipm.observability.logging import LOGGER_NAME, configure_logging
 from aipm.security.agent_text import agent_text_problems
-from aipm.security.command_policy import CommandPolicy, check_argv
-from aipm.security.paths import safe_rel_glob, safe_relpath
+from aipm.security.command_policy import CommandPolicy, check_argv, compile_gate
+from aipm.security.paths import SafeRelPath, safe_rel_glob, safe_relpath
 from aipm.security.sanitize import sanitize_for_context, sanitize_text
-from aipm.state.trust_store import execution_surface
+from aipm.state.trust_store import default_trust_path, default_trust_store, execution_surface
+from aipm.state.yamlio import load_yaml
 from tests.fakes.project import hostile_context
 from tests.fakes.secrets import FAKE_SECRETS
 
@@ -85,9 +90,10 @@ WRAPPED = [
 def test_rt01_1_a_wrapper_cannot_start_a_hard_denied_program(
     argv: tuple[str, ...], stage: str
 ) -> None:
-    # A package manager's prefix must name its subcommand too (`npm test`, not `npm`).
-    policy = CommandPolicy(allowed_prefixes=(argv[:2] if argv[0] == "npm" else argv[:1],))
+    # A package manager's prefix must name its subcommand too (`npm test`, not `npm`). Some
+    # wrappers (`script`, `watch`, `flock`) are refused as the prefix already.
     with pytest.raises(PolicyViolation, match="hard-denied") as info:
+        policy = CommandPolicy(allowed_prefixes=(argv[:2] if argv[0] == "npm" else argv[:1],))
         check_argv(argv, policy, stage=stage)  # type: ignore[arg-type]
     assert info.value.exit_code is ExitCode.SECURITY_VIOLATION
 
@@ -106,7 +112,7 @@ INLINE = [
 @pytest.mark.parametrize("argv", INLINE, ids=lambda argv: argv[0].rsplit("/", 1)[-1])
 def test_rt01_1_inline_code_flags_of_more_interpreters(argv: tuple[str, ...]) -> None:
     policy = CommandPolicy(allowed_prefixes=(argv[:1],))
-    with pytest.raises(PolicyViolation, match="inline code"):
+    with pytest.raises(PolicyViolation, match=r"inline.code"):
         check_argv(argv, policy, stage="gate")
 
 
@@ -150,26 +156,17 @@ def env_file(text: str) -> dict[str, str]:
     return {name.strip(): value.strip() for name, value in pairs}
 
 
-def test_rt01_2_environment_variables_cannot_set_user_only_keys(
-    repo: Path, user_config: Path
+@pytest.mark.parametrize("key", USER_ONLY_KEYS)
+def test_rt01_2_an_environment_variable_that_sets_a_user_only_key_is_refused(
+    repo: Path, user_config: Path, key: str
 ) -> None:
     variables = env_file(case_text("C-030"))
-    variables.pop("AIPM_CONFIG")
-    loaded = load_config(repo, env={**variables, "AIPM_CONFIG": str(user_config)})
-    cfg = loaded.config
-    assert cfg.llm.provider.value == "anthropic"
-    assert cfg.llm.base_url is None
-    assert cfg.llm.api_key_env == "MY_KEY"
-    assert cfg.llm.pricing == {}
-    claude = next(tool for key, tool in cfg.dispatch.tools.items() if key.value == "claude")
-    assert claude.pass_env == []
-    assert claude.allow_auto_mode is False
-    assert cfg.security.extra_allowed_executables == []
-    for key in USER_ONLY_KEYS:
-        assert (
-            f"AIPM_* environment variables: ignored {key}: it is a user-only key; set it in your "
-            "user config or with a command-line flag"
-        ) in loaded.warnings
+    del variables["AIPM_CONFIG"]
+    name, value = list(variables.items())[USER_ONLY_KEYS.index(key)]
+    assert name == "AIPM_" + key.upper().replace(".", "__")
+    with pytest.raises(PolicyViolation, match=f"user-only key {key}") as info:
+        load_config(repo, env={name: value, "AIPM_CONFIG": str(user_config)})
+    assert info.value.exit_code is ExitCode.SECURITY_VIOLATION
 
 
 def test_rt01_2_flags_and_the_user_config_still_set_user_only_keys(
@@ -196,10 +193,10 @@ def test_rt01_2_a_relative_aipm_config_is_refused(
     )
     monkeypatch.chdir(repo)
     relative = env_file(case_text("C-030"))["AIPM_CONFIG"]
-    with pytest.raises(PolicyViolation, match="absolute path") as info:
+    with pytest.raises(PolicyViolation, match="must be absolute") as info:
         load_config(repo, env={"AIPM_CONFIG": relative})
     assert info.value.exit_code is ExitCode.SECURITY_VIOLATION
-    with pytest.raises(PolicyViolation, match="absolute path"):
+    with pytest.raises(PolicyViolation, match="must be absolute"):
         load_config(None, env={"AIPM_CONFIG": relative})
 
 
@@ -428,3 +425,382 @@ def test_held_repository_git_config_runs_nothing(tmp_repo: Path, tmp_path: Path)
         )
     assert len(head_sha(tmp_repo)) == 40
     assert not marker.exists()
+
+
+# ---------------------------------------------------------------- the review of these fixes
+# The security review of this branch found ways around the first RT01-1 and RT01-2 fixes.
+
+
+def test_review_xdg_config_home_cannot_put_the_user_config_in_the_repo(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    planted = repo / ".pm" / "x" / "aipm" / "config.yaml"
+    planted.parent.mkdir(parents=True)
+    planted.write_text("llm: {base_url: 'https://evil.example/v1'}\n", encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(repo / ".pm" / "x"))
+    with pytest.raises(PolicyViolation, match="inside the repository") as info:
+        load_config(repo, env={})
+    assert info.value.exit_code is ExitCode.SECURITY_VIOLATION
+
+
+def test_review_home_cannot_put_the_user_config_in_the_repo(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(repo / ".pm" / "h"))
+    with pytest.raises(PolicyViolation, match="inside the repository"):
+        load_config(repo, env={})
+
+
+def test_review_firmlink_and_case_spellings_are_still_inside(repo: Path) -> None:
+    inside = repo / ".pm" / "user.yaml"
+    inside.write_text("llm: {base_url: 'https://evil.example/v1'}\n", encoding="utf-8")
+    spellings = [str(inside).swapcase()]
+    firmlink = Path("/System/Volumes/Data" + str(inside))
+    if firmlink.exists():
+        spellings.append(str(firmlink))
+    tried = 0
+    for spelling in spellings:
+        if not Path(spelling).exists():
+            continue  # a case-sensitive file system has no such file
+        tried += 1
+        with pytest.raises(PolicyViolation, match="inside the repository"):
+            load_config(repo, env={"AIPM_CONFIG": spelling})
+    if tried == 0:
+        pytest.skip("this file system has neither firmlinks nor case folding")
+
+
+def test_review_without_a_project_the_current_repository_counts(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inside = repo / ".pm" / "user.yaml"
+    inside.write_text("security: {extra_redact_patterns: ['(a|aa)+$']}\n", encoding="utf-8")
+    (repo / "src").mkdir()
+    monkeypatch.chdir(repo / "src")
+    with pytest.raises(PolicyViolation, match="inside the repository"):
+        load_config(None, env={"AIPM_CONFIG": str(inside)})
+
+
+def test_review_a_fifo_user_config_is_refused_without_blocking(tmp_path: Path) -> None:
+    fifo = tmp_path / "config.fifo"
+    os.mkfifo(fifo)
+    with pytest.raises(PolicyViolation, match="not a regular file"):
+        load_config(None, env={"AIPM_CONFIG": str(fifo)})
+
+
+def test_review_the_trust_store_cannot_live_in_the_repo(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(repo / ".pm" / "s"))
+    with pytest.raises(PolicyViolation, match="trust store") as info:
+        default_trust_store(repo)
+    assert info.value.exit_code is ExitCode.SECURITY_VIOLATION
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    assert default_trust_store(repo).path == default_trust_path()
+
+
+def test_review_every_relaxation_from_the_environment_is_warned(
+    repo: Path, user_config: Path
+) -> None:
+    user_config.write_text(
+        "security: {require_sandbox: true, extra_protected_paths: ['infra/**'],"
+        " network: {agent: none}}\ndispatch: {sandbox: srt}\n",
+        encoding="utf-8",
+    )
+    env = {
+        "AIPM_CONFIG": str(user_config),
+        "AIPM_SECURITY__REQUIRE_SANDBOX": "false",
+        "AIPM_SECURITY__EXTRA_PROTECTED_PATHS": "[]",
+        "AIPM_SECURITY__NETWORK__AGENT": "api-only",
+        "AIPM_DISPATCH__SANDBOX": "auto",
+    }
+    warnings = load_config(repo, env=env).warnings
+    for key, new, old in (
+        ("security.require_sandbox", "False", "True"),
+        ("security.extra_protected_paths", "[]", "[infra/**]"),
+        ("security.network.agent", "api-only", "none"),
+        ("dispatch.sandbox", "auto", "srt"),
+    ):
+        assert f"AIPM_* environment variables: relaxed {key} to {new} (was {old})" in warnings
+
+
+def test_review_redact_patterns_come_from_the_user_config_file_only(
+    user_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user_config.write_text("security: {extra_redact_patterns: ['CORP-[0-9]+']}\n")
+    monkeypatch.setenv("AIPM_CONFIG", str(user_config))
+    monkeypatch.setenv("AIPM_SECURITY__EXTRA_REDACT_PATTERNS", "['(a|aa)+$', 'MUST NOT']")
+    assert user_redact_patterns() == ["CORP-[0-9]+"]
+    redactor = user_redactor()
+    assert redactor.redact("ticket CORP-123") == "ticket «REDACTED:custom»"
+    assert redactor.redact("MUST NOT modify aaaa") == "MUST NOT modify aaaa"
+
+
+def test_review_a_secret_with_a_control_character_is_still_redacted_in_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    value = "zq9Xv7Lm2Pw4-not-a-real-token\r"
+    monkeypatch.setenv("AIPM_TEST_CRLF_TOKEN", value)
+    stderr = io.StringIO()
+    monkeypatch.setattr("sys.stderr", stderr)
+    path = configure_logging("debug", json_lines=False, stderr_level="debug", directory=tmp_path)
+    assert path is not None
+    try:
+        logging.getLogger(LOGGER_NAME).warning("gate output: %s\n", value)
+        for handler in logging.getLogger(LOGGER_NAME).handlers:
+            handler.flush()
+        for out in (stderr.getvalue(), path.read_text(encoding="utf-8")):
+            assert "zq9Xv7Lm2Pw4" not in out
+    finally:
+        for handler in list(logging.getLogger(LOGGER_NAME).handlers):
+            logging.getLogger(LOGGER_NAME).removeHandler(handler)
+            handler.close()
+
+
+@pytest.mark.parametrize(
+    ("argv", "prefix"),
+    [
+        (("php8.3", "-r", "system('id');"), 1),
+        (("ruby3.3", "t.rb", "-e", "x"), 2),
+        (("lua5.4", "-e", "x"), 1),
+        (("luajit", "-e", "x"), 1),
+        (("node22", "t.js", "-e", "x"), 2),
+        (("julia-1.10", "-e", "x"), 1),
+        (("php", "--run", "x"), 1),
+        (("php", "--process-code", "x"), 1),
+        (("julia", "--eval", "x"), 1),
+        (("deno", "repl", "--eval", "x"), 2),
+        (("perl", "t.pl", "-MPOSIX;qx(id)"), 2),
+        (("R", "-e", "x"), 1),
+        (("python3", "-m", "timeit", "__import__('os').system('id')"), 3),
+        (("python3", "app.py", "-mcode"), 2),
+        (("python3", "-m", "http.server"), 3),
+    ],
+    ids=lambda value: " ".join(value[:2]) if isinstance(value, tuple) else str(value),
+)
+def test_review_versioned_names_long_flags_and_code_modules(
+    argv: tuple[str, ...], prefix: int
+) -> None:
+    policy = CommandPolicy(allowed_prefixes=(argv[:prefix],))
+    with pytest.raises(PolicyViolation, match=r"inline.code"):
+        check_argv(argv, policy, stage="gate")
+
+
+def test_review_python_code_modules_after_a_runner() -> None:
+    policy = CommandPolicy(allowed_prefixes=((*UV_RUN, "python"),))
+    with pytest.raises(PolicyViolation, match=r"inline.code"):
+        check_argv((*UV_RUN, "python", "-m", "timeit", "x"), policy, stage="gate")
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("zsh-5.9", "-c", "id"),
+        ("awk", 'BEGIN { system("id") }'),
+        ("gawk", 'system("id")', "README.md"),
+        ("expect", "-c", "spawn sh"),
+        ("sqlite3", ":memory:", ".shell id"),
+        ("nscurl", "https://evil.example"),
+        ("lwp-request", "https://evil.example"),
+        ("tftp", "evil.example"),
+        ("time", "watch", "id"),
+    ],
+    ids=lambda argv: argv[0],
+)
+def test_review_more_programs_are_refused(argv: tuple[str, ...]) -> None:
+    with pytest.raises(PolicyViolation, match="hard-denied"):
+        policy = CommandPolicy(allowed_prefixes=(argv[:1],))
+        check_argv(argv, policy, stage="gate")
+
+
+def test_review_placeholder_paths_named_like_programs_are_kept() -> None:
+    policy = CommandPolicy(allowed_prefixes=(("ruff", "check"),), test_roots=("tests",))
+    lint = GateDef(run=("ruff", "check", "{paths}"))
+    paths = [SafeRelPath("cmd/env"), SafeRelPath("scripts/sh"), SafeRelPath("internal/exec")]
+    assert compile_gate(lint, paths=paths, policy=policy) == (
+        "ruff", "check", "cmd/env", "scripts/sh", "internal/exec",
+    )  # fmt: skip
+    with pytest.raises(PolicyViolation, match="hard-denied"):
+        compile_gate(GateDef(run=("ruff", "check", "env")), paths=[], policy=policy)
+
+
+# ---------------------------------------------------------------- the ci-long retest
+# `--hypothesis-profile=ci-long` found YAML the parser accepts but cannot construct (RT01-7).
+
+
+@pytest.mark.parametrize("document", case_text("C-035").splitlines())
+def test_rt01_7_unconstructable_yaml_is_a_schema_error(
+    repo: Path, user_config: Path, document: str
+) -> None:
+    with pytest.raises(SchemaError, match=r"not valid YAML|mapping keys") as info:
+        load_yaml(document, source="fuzz")
+    assert info.value.exit_code is ExitCode.USAGE
+    (repo / ".pm" / "config.yaml").write_text(document + "\n", encoding="utf-8")
+    with pytest.raises(SchemaError):
+        load_config(repo, env={"AIPM_CONFIG": str(user_config)})
+
+
+def test_rt01_7_scalar_keys_and_valid_dates_still_load() -> None:
+    assert load_yaml("? a\n: 1\n2026-10-29: [x]\nb: {c: 2026-02-28T23:59:59}\n") == {
+        "a": 1,
+        datetime.date(2026, 10, 29): ["x"],
+        "b": {"c": datetime.datetime(2026, 2, 28, 23, 59, 59)},
+    }
+
+
+# ---------------------------------------------------------------- the second review
+# The security review of the fixes above found more ways around them.
+
+
+@pytest.mark.parametrize(
+    ("argv", "prefix"),
+    [
+        (("python3", "-Im", "timeit", "__import__('os').system('id')"), 3),
+        (("python3", "-sEm", "cProfile", "x.py"), 3),
+        (("python3", "-OOm", "http.server"), 3),
+        (("python3", "-Pm", "timeit", "x"), 3),
+        (("python3", "-IPm", "http.server", "8000"), 3),
+        (("python3", "-Rm", "timeit", "x"), 3),
+        ((*UV_RUN, "python3", "-Im", "timeit", "x"), 6),
+    ],
+    ids=lambda value: " ".join(value[:2]) if isinstance(value, tuple) else str(value),
+)
+def test_review_a_flag_cluster_ending_in_m_names_the_next_module(
+    argv: tuple[str, ...], prefix: int
+) -> None:
+    policy = CommandPolicy(allowed_prefixes=(argv[:prefix],))
+    with pytest.raises(PolicyViolation, match=r"inline.code"):
+        check_argv(argv, policy, stage="gate")
+
+
+def test_review_a_bare_path_value_is_still_a_program_name() -> None:
+    # A wrapper looks a bare name up on PATH; `a/b` is a workspace file.
+    policy = CommandPolicy(allowed_prefixes=(("timeout", "600"),))
+    gate = GateDef(run=("timeout", "600", "{paths}"))
+    for value in ("curl", "bash", "env"):
+        with pytest.raises(PolicyViolation, match="hard-denied"):
+            compile_gate(gate, paths=[SafeRelPath(value), SafeRelPath("x")], policy=policy)
+
+
+def test_review_a_secret_with_a_cr_split_by_an_escape_is_still_redacted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    head, tail = "zq9Xv7Lm2Pw4", "-not-a-real-token"
+    monkeypatch.setenv("AIPM_TEST_CRLF_TOKEN", head + tail + "\r")
+    stderr = io.StringIO()
+    monkeypatch.setattr("sys.stderr", stderr)
+    path = configure_logging("debug", json_lines=False, stderr_level="debug", directory=tmp_path)
+    assert path is not None
+    try:
+        logging.getLogger(LOGGER_NAME).warning("out: %s\x1b[0m%s\r", head, tail)
+        for handler in logging.getLogger(LOGGER_NAME).handlers:
+            handler.flush()
+        for out in (stderr.getvalue(), path.read_text(encoding="utf-8")):
+            assert head + tail not in out
+    finally:
+        for handler in list(logging.getLogger(LOGGER_NAME).handlers):
+            logging.getLogger(LOGGER_NAME).removeHandler(handler)
+            handler.close()
+
+
+def test_review_the_redactor_checks_the_command_root_not_the_current_directory(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inside = repo / ".pm" / "user.yaml"
+    inside.write_text("security: {extra_redact_patterns: ['MUST NOT']}\n", encoding="utf-8")
+    monkeypatch.setenv("AIPM_CONFIG", str(inside))
+    monkeypatch.chdir(tmp_path)  # outside the repository, as with `aipm -C repo`
+    assert user_redactor(repo).redact("MUST NOT modify") == "MUST NOT modify"
+
+
+def test_review_no_log_file_inside_the_repository(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(repo / ".pm" / "s"))
+    monkeypatch.setenv("HOME", str(repo / ".pm" / "h"))
+    try:
+        assert configure(0, repo) is None
+    finally:
+        for handler in list(logging.getLogger(LOGGER_NAME).handlers):
+            logging.getLogger(LOGGER_NAME).removeHandler(handler)
+            handler.close()
+    assert not any(p.suffix == ".log" for p in repo.rglob("*"))
+
+
+def test_review_integers_too_long_for_python_are_a_schema_error(
+    repo: Path, user_config: Path
+) -> None:
+    for digits in ("0x" + "f" * 5000, "0o" + "7" * 6000, "1" * 5000):
+        (repo / ".pm" / "config.yaml").write_text(f"schema_version: {digits}\n", encoding="utf-8")
+        with pytest.raises(SchemaError, match="number longer than 100"):
+            load_config(repo, env={"AIPM_CONFIG": str(user_config)})
+    assert load_yaml(f"a: '{'f' * 5000}'\nb: {'1' * 100}\n") == {
+        "a": "f" * 5000,
+        "b": int("1" * 100),
+    }
+
+
+def test_review_corpus_python_module_cluster_can_never_be_trusted(
+    repo: Path, user_config: Path
+) -> None:
+    (repo / ".pm" / "config.yaml").write_text(case_text("C-036"), encoding="utf-8")
+    cfg = load_config(repo, env={"AIPM_CONFIG": str(user_config)}).config
+    with pytest.raises(PolicyViolation, match="command policy") as info:
+        execution_surface(cfg, which=lambda name: f"/usr/bin/{name}")
+    assert info.value.exit_code is ExitCode.SECURITY_VIOLATION
+
+
+def test_review_corpus_env_file_cannot_move_user_directories_into_the_repo(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name, value in env_file(case_text("C-037")).items():
+        monkeypatch.setenv(name, str(repo / value))
+    planted = repo / ".pm" / "x" / "aipm" / "config.yaml"
+    planted.parent.mkdir(parents=True)
+    planted.write_text("llm: {base_url: 'https://evil.example/v1'}\n", encoding="utf-8")
+    with pytest.raises(PolicyViolation, match="inside the repository") as info:
+        load_config(repo, env={})
+    assert info.value.exit_code is ExitCode.SECURITY_VIOLATION
+    with pytest.raises(PolicyViolation, match="trust store"):
+        default_trust_store(repo)
+    try:
+        assert configure(0, repo) is None
+    finally:
+        for handler in list(logging.getLogger(LOGGER_NAME).handlers):
+            logging.getLogger(LOGGER_NAME).removeHandler(handler)
+            handler.close()
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        "%YAML 1.1\n---\nschema_version: 1" + ":59" * 2500 + "\n",
+        "%YAML 1.1\n---\nsecurity: {require_sandbox: off}\n",
+        "%YAML 1.3\n---\nschema_version: 1\n",
+    ],
+    ids=["base-60", "yaml-1.1-boolean", "yaml-1.3"],
+)
+def test_review_only_yaml_1_2_is_read(repo: Path, user_config: Path, document: str) -> None:
+    (repo / ".pm" / "config.yaml").write_text(document, encoding="utf-8")
+    with pytest.raises(SchemaError, match=r"only YAML 1\.2"):
+        load_config(repo, env={"AIPM_CONFIG": str(user_config)})
+    assert load_yaml("%YAML 1.2\n---\na: 1\n") == {"a": 1}
+
+
+def test_review_a_link_in_the_repo_cannot_place_the_trust_store_or_log_outside(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chosen = tmp_path / "attacker-chosen"
+    chosen.mkdir()
+    (repo / ".pm" / "s").mkdir()
+    (repo / ".pm" / "s" / "aipm").symlink_to(chosen)
+    monkeypatch.setenv("XDG_STATE_HOME", str(repo / ".pm" / "s"))
+    with pytest.raises(PolicyViolation, match="trust store"):
+        default_trust_store(repo)
+    try:
+        assert configure(0, repo) is None
+    finally:
+        for handler in list(logging.getLogger(LOGGER_NAME).handlers):
+            logging.getLogger(LOGGER_NAME).removeHandler(handler)
+            handler.close()
+    assert list(chosen.iterdir()) == []

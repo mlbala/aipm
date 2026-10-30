@@ -105,8 +105,8 @@ def _lock(root: Path) -> dict[str, object]:
 
 
 def _trust(root: Path, config: Config) -> dict[str, object]:
-    store = default_trust_store()
     try:
+        store = default_trust_store(root)
         digest = hash_surface(store.surface(config))
         trusted = store.is_trusted(repo_id(root), digest)
     except AipmError as exc:

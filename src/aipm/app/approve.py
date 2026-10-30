@@ -129,7 +129,7 @@ class PrdReview:
 def _store(project: Path | None) -> FileStateStore:
     root = find_repo_root(project)
     require_initialized(root)
-    return open_store(root, redactor=runtime.user_redactor())
+    return open_store(root, redactor=runtime.user_redactor(root))
 
 
 def _review(store: FileStateStore) -> PrdReview:

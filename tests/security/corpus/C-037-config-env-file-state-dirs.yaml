@@ -1,0 +1,17 @@
+id: C-037
+vector: config-redirection
+input:
+  surface: repo-env-file
+  # A repository .env that moves the user's directories into the repository, where it ships
+  # its own config.yaml and trust.json (red-team v0.1 review of RT01-2). Paths are relative
+  # to the repository root.
+  text: |
+    XDG_CONFIG_HOME=.pm/x
+    XDG_STATE_HOME=.pm/s
+    HOME=.pm/h
+expected:
+  outcome: >-
+    The user config, the trust store and the log file must lie outside the repository by device
+    and inode, wherever HOME and XDG_* put them: loading the config and opening the trust store
+    exit 6, and no log file is written (invariants I-2 and I-8).
+  exit_code: 6

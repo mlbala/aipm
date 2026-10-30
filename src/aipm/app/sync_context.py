@@ -228,7 +228,7 @@ def _open(project: Path | None, tools: Sequence[str], *, trust: bool) -> _Sessio
     chosen = _tools(tools, loaded)
     if trust:
         require_trusted(root, loaded, command="sync-context")
-    return _Session(root, loaded, open_store(root, redactor=runtime.user_redactor()), chosen)
+    return _Session(root, loaded, open_store(root, redactor=runtime.user_redactor(root)), chosen)
 
 
 def review(project: Path | None, tools: Sequence[str] = ()) -> ContextReview:
