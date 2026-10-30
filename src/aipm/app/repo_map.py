@@ -110,11 +110,29 @@ def _children(directory: Path) -> Iterator[os.DirEntry[str]]:
     return iter(entries)
 
 
-def ignore_spec(root: Path) -> GitIgnoreSpec:
+_DENY_SPEC = GitIgnoreSpec.from_lines(DENY_PATTERNS)
+
+
+@dataclass(frozen=True, slots=True)
+class IgnoreRules:
+    """Files never read for LLM context (SECURITY.md §7.1).
+
+    `.gitignore` and `.aipmignore` are matched as git matches them. The built-in deny list is
+    matched without regard to case: on a case-insensitive file system `Secrets.yaml`,
+    `server.PEM` or `.NETRC` name the same kinds of file (red-team v0.1, RT01-6).
+    """
+
+    ignored: GitIgnoreSpec
+
+    def match_file(self, path: str) -> bool:
+        """Whether `path` (relative, `/`-separated, a trailing `/` for a directory) is excluded."""
+        return self.ignored.match_file(path) or _DENY_SPEC.match_file(path.casefold())
+
+
+def ignore_spec(root: Path) -> IgnoreRules:
     """Files never read for LLM context: `.gitignore`, `.aipmignore` and the §7.1 deny list."""
-    return GitIgnoreSpec.from_lines(
-        [*_read_ignore(root / ".gitignore"), *_read_ignore(root / ".aipmignore"), *DENY_PATTERNS]
-    )
+    ignore_files = [*_read_ignore(root / ".gitignore"), *_read_ignore(root / ".aipmignore")]
+    return IgnoreRules(GitIgnoreSpec.from_lines(ignore_files))
 
 
 def scan_repo(root: Path, *, max_input_bytes: int) -> RepoScan:

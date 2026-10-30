@@ -133,7 +133,7 @@ def run(project: Path | None, *, options: PlanOptions, prompter: PlanPrompter | 
     require_initialized(root)
     max_tasks = _max_tasks(options.max_tasks)
     loaded = load_config(root)
-    store = open_store(root, redactor=runtime.user_redactor())
+    store = open_store(root, redactor=runtime.user_redactor(root))
     with store.lock():
         snapshot, _ = read_snapshot(
             store, coverage_threshold=loaded.config.discover.coverage_threshold, trusted=False

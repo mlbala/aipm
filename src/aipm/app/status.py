@@ -68,7 +68,7 @@ def run(
     """Run the use case."""
     root = find_repo_root(project)
     require_initialized(root)
-    store = open_store(root, redactor=runtime.user_redactor())
+    store = open_store(root, redactor=runtime.user_redactor(root))
     if ack is not None:
         return _ack(store, ack)
     if task_id is not None and not is_valid_id("task", task_id):

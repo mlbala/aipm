@@ -1,7 +1,8 @@
 """Path validation: `safe_relpath` and `safe_rel_glob` (SECURITY.md §7.4, §9.2, §10 rule 5).
 
-The only L0 module allowed read-only filesystem calls (`realpath`), to detect symlinks that
-escape the workspace or land on a protected path (ARCHITECTURE §5.1).
+The only L0 module allowed read-only filesystem calls (`realpath`, `stat`): to detect symlinks
+that escape the workspace or land on a protected path, and to tell whether a path lies inside a
+directory (ARCHITECTURE §5.1).
 
 Protected patterns are matched case-insensitively (macOS file systems are), at any depth, and
 after trailing dots and spaces are dropped from each component. A glob is rejected when it
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import NewType
 
 from aipm.domain.errors import PolicyViolation
+from aipm.security.sanitize import is_ignorable
 
 SafeRelPath = NewType("SafeRelPath", str)
 """A relative path inside the workspace: no `..`, no leading `-`, no NUL, no escaping link."""
@@ -55,7 +57,7 @@ def _reject(value: str, reason: str) -> PolicyViolation:
 
 def _bad_char(ch: str) -> bool:
     category = unicodedata.category(ch)
-    if category[0] == "C" or category in ("Zl", "Zp"):
+    if category[0] == "C" or category in ("Zl", "Zp") or is_ignorable(ch):
         return True
     return category == "Zs" and ch != " "
 
@@ -269,3 +271,30 @@ def safe_rel_glob(glob: str, *, extra_protected: Iterable[str] = ()) -> SafeRelG
     if is_protected(rel, patterns):
         raise _reject(glob, "names a protected path")
     return SafeRelGlob(rel)
+
+
+def is_within(path: Path, root: Path) -> bool:
+    """Whether `path` is `root` or lies anywhere under it, with links followed or as written.
+    Read-only.
+
+    Directories are compared by device and inode, not by spelling, so a path through a macOS
+    firmlink (`/System/Volumes/Data/...`), a case variant on a case-insensitive file system or
+    a symbolic link into `root` counts as inside, and so does a path under `root` through a
+    link that leads out of it, whose target `root` chose (red-team v0.1 review). `path` need
+    not exist. A root that cannot be examined counts as holding every path, so a caller that
+    refuses what lies inside fails closed.
+    """
+    try:
+        target = Path(root).stat()
+    except OSError:
+        return True
+    resolved = Path(os.path.realpath(path))
+    written = Path(os.path.normpath(path if path.is_absolute() else Path.cwd() / path))
+    for candidate in (resolved, *resolved.parents, written, *written.parents):
+        try:
+            info = candidate.stat()
+        except OSError:
+            continue
+        if (info.st_dev, info.st_ino) == (target.st_dev, target.st_ino):
+            return True
+    return False

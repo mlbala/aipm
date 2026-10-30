@@ -199,7 +199,7 @@ def run(project: Path | None, options: PromptOptions) -> PromptResult:
     tool = parse_tool(options.tool, cfg.dispatch.default_tool)
     adapter = get_adapter(tool)
     require_trusted(root, loaded, command="prompt")
-    store = open_store(root, redactor=runtime.user_redactor())
+    store = open_store(root, redactor=runtime.user_redactor(root))
     with store.lock():
         snapshot, _ = read_snapshot(
             store, coverage_threshold=cfg.discover.coverage_threshold, trusted=True

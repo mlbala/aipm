@@ -13,11 +13,17 @@ from pathlib import Path
 
 import pytest
 import pytest_socket
+from hypothesis import settings
 
 from aipm.llm.fake import FakeLLM
 from tests.fakes.secrets import FAKE_SECRETS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# `pytest --hypothesis-profile=ci-long` runs every property that does not set its own example
+# count at least 2,000 times (build prompt 09, the red-team fuzzing). The default profile keeps
+# the normal run fast.
+settings.register_profile("ci-long", max_examples=2000, deadline=None)
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

@@ -21,6 +21,8 @@ One file per decision, using the template below. A new ADR is proposed in a pull
 | [ADR-0015](0015-python-3-13-or-later.md) | Python 3.13 or later; CI tests 3.13 and 3.14 | Accepted |
 | [ADR-0016](0016-g3-pins-the-plan-not-progress.md) | G3 pins the plan, not task progress | Accepted |
 | [ADR-0017](0017-gate-commands-as-agents-see-them.md) | Gate commands as agents see them; `sync-context --check` without trust | Accepted |
+| [ADR-0018](0018-environment-cannot-set-user-only-keys.md) | `AIPM_*` variables cannot set user-only keys; `AIPM_CONFIG` stays outside the repository | Accepted |
+| [ADR-0019](0019-hard-denied-programs-at-any-argv-position.md) | Hard-denied programs are refused at any argv position | Accepted |
 
 ## Template
 

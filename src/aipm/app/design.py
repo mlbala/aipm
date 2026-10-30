@@ -115,7 +115,7 @@ def run(
     root = find_repo_root(project)
     require_initialized(root)
     loaded = load_config(root)
-    redactor = runtime.user_redactor()
+    redactor = runtime.user_redactor(root)
     store = open_store(root, redactor=redactor)
     with store.lock():
         snapshot, _ = read_snapshot(

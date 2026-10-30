@@ -302,7 +302,7 @@ def run(
     require_initialized(root)
     cfg = load_config(root)
     threshold, max_rounds = _check_limits(cfg.config, options)
-    redactor = runtime.user_redactor()
+    redactor = runtime.user_redactor(root)
     store = open_store(root, redactor=redactor)
     max_bytes = cfg.config.security.max_input_kib * 1024
     answers: tuple[AnswersFile, Source] | None = None

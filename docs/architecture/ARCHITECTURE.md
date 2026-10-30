@@ -320,7 +320,7 @@ class TrustStore(Protocol):
 ### 6.2 Format rules (determinism)
 
 - **YAML:** written with `ruamel.yaml`. Keys are written in schema order, lists keep their semantic order, there is a trailing newline, and lines are wrapped at 100 characters.
-  - YAML anchors, aliases and custom tags are rejected on load.
+  - YAML anchors, aliases and custom tags are rejected on load, and so are `%YAML` versions other than 1.2, collections as mapping keys and integers longer than 100 characters; a value that cannot be constructed (a date out of range) is a schema error too.
   - Files larger than 1 MiB are rejected on load.
 - **Front matter:** Markdown artifacts carry YAML front matter between `---` lines; the body is free Markdown.
 - **IDs:** stable and never reused. `F-001` (feature), `C-01` (component), `TM-01` (threat), `T-001` (task), `AC-T001-1` (acceptance criterion), `Q-001` (question), `A-001` (assumption), `ADR-0001`.
@@ -937,7 +937,7 @@ git: {integration_branch: aipm/integration}
 logging: {level: info, json: false}
 ```
 
-**Environment variables:** `AIPM_CONFIG`, `AIPM_NO_COLOR`, `AIPM_NON_INTERACTIVE`, `AIPM_LOG_LEVEL`, and `AIPM_LLM__MODELS__DEFAULT` (the `__` separator selects a nested key). aipm has no telemetry, so there is no telemetry setting.
+**Environment variables:** `AIPM_CONFIG`, `AIPM_NO_COLOR`, `AIPM_NON_INTERACTIVE`, `AIPM_LOG_LEVEL`, and `AIPM_LLM__MODELS__DEFAULT` (the `__` separator selects a nested key). An `AIPM_*` variable that sets a user-only key makes aipm exit 6, and each `AIPM_*` relaxation of a tighten-only key is printed as a warning. The user config (wherever `AIPM_CONFIG`, `HOME` or `XDG_CONFIG_HOME` puts it) must be an absolute path to a regular file outside the repository, and the trust store (wherever `HOME` or `XDG_STATE_HOME` puts it) must be outside the repository (exit 6; the log file is then not written), because tools such as pipenv load a repository's `.env` into the environment ([ADR-0018](adr/0018-environment-cannot-set-user-only-keys.md)). aipm has no telemetry, so there is no telemetry setting.
 
 ## 16. CLI specification
 

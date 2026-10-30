@@ -113,7 +113,8 @@ def handled(ctx: typer.Context, command: str) -> Generator[None]:
     """
     from aipm.app.runtime import configure
 
-    log_file = configure(global_options(ctx).verbose)
+    opts = global_options(ctx)
+    log_file = configure(opts.verbose, opts.project)
     try:
         yield
     except AipmError as error:

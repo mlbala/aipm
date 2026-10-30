@@ -1,0 +1,21 @@
+id: C-035
+vector: structural
+input:
+  surface: repo-config
+  # Each line is a whole .pm/ file: a collection as a mapping key, and dates and times out of
+  # range. The parser accepts them; constructing them raised TypeError or ValueError (RT01-7).
+  text: |
+    ? - a: 1
+    ? -
+    {[a]: 1}
+    created: 2026-13-45
+    created: 2026-02-30
+    created: 0000-01-01
+    created: 2026-10-29T25:00:00
+    created: 2026-10-29t10:00:00+99:99
+expected:
+  outcome: >-
+    The YAML loader refuses a collection as a mapping key while scanning events, and reports a
+    date or time out of range as invalid YAML, so a hostile .pm/ file is a schema error with
+    exit 2, never an internal error (ARCHITECTURE §6.2).
+  exit_code: 2

@@ -96,7 +96,7 @@ def run(
     notes = _check_flags(provider, tool)
     if stack is not None:
         load_stack(stack)  # an unknown name exits 2 here, before anything is written
-    store = open_store(root, redactor=runtime.user_redactor())
+    store = open_store(root, redactor=runtime.user_redactor(root))
     if store.root.exists() and not force:
         raise UsageError(
             f"{store.root} already exists", hint="Use `aipm init --force` to re-initialize."

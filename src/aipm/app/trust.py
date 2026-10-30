@@ -83,7 +83,7 @@ def inspect(context: TrustContext, *, store: FileTrustStore | None = None) -> Tr
 
     Raises `PolicyViolation` (exit 6) if the surface fails the command policy.
     """
-    trust_store = store if store is not None else default_trust_store()
+    trust_store = store if store is not None else default_trust_store(context.root)
     surface = trust_store.surface(context.loaded.config)
     digest = hash_surface(surface)
     rid = repo_id(context.root)
@@ -107,8 +107,9 @@ def confirm(
     passes the full hash of the surface it showed, so a surface that changed in between, even
     one crafted to share a prefix, is refused.
     """
-    trust_store = store if store is not None else default_trust_store()
-    report = inspect(load(project), store=trust_store)
+    context = load(project)
+    trust_store = store if store is not None else default_trust_store(context.root)
+    report = inspect(context, store=trust_store)
     given = value.strip().lower()
     if not _HASH_PREFIX.fullmatch(given):
         raise PolicyViolation(
@@ -127,7 +128,7 @@ def confirm(
 def revoke(project: Path | None, *, store: FileTrustStore | None = None) -> bool:
     """Remove this user's trust for the repository; returns whether there was any."""
     root = find_repo_root(project)
-    trust_store = store if store is not None else default_trust_store()
+    trust_store = store if store is not None else default_trust_store(root)
     return trust_store.revoke(repo_id(root))
 
 

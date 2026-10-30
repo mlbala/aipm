@@ -34,13 +34,14 @@ from aipm.domain.models import GateDef, PrepareDef, RepoId, StrictModel
 from aipm.domain.models.base import Sha256, Str200, Str500
 from aipm.observability.redaction import process_redactor
 from aipm.security.command_policy import (
-    HARD_DENIED,
+    DENIED_PROGRAMS,
     CommandPolicy,
     check_argv,
     compile_gate,
     compile_prepare,
     program_name,
 )
+from aipm.security.paths import is_within
 from aipm.security.sanitize import sanitize_text
 
 SURFACE_VERSION = 1
@@ -141,7 +142,7 @@ def _resolver(which: Which) -> Which:
         if found is None:
             return None
         real = os.path.realpath(found)
-        if program_name(real) in HARD_DENIED:
+        if program_name(real) in DENIED_PROGRAMS:
             raise PolicyViolation(
                 f"{name!r} resolves to the hard-denied program {real!r}",
                 hint="Fix your PATH or the argv prefix; this surface can never be trusted.",
@@ -355,6 +356,19 @@ class FileTrustStore:
         return True
 
 
-def default_trust_store() -> FileTrustStore:
-    """Return the store at `<user_state_dir>/aipm/trust.json` (mode 0600)."""
-    return FileTrustStore(default_trust_path())
+def default_trust_store(repo_root: Path | None = None) -> FileTrustStore:
+    """Return the store at `<user_state_dir>/aipm/trust.json` (mode 0600).
+
+    `HOME` and `XDG_STATE_HOME` decide where that is, and a repository `.env` loaded by a tool
+    such as pipenv can set both. A trust store inside `repo_root` could be one the repository
+    shipped, trusting its own surface, so it is refused (exit 6; red-team v0.1 review).
+    """
+    path = default_trust_path()
+    if repo_root is not None and is_within(path, repo_root):
+        raise PolicyViolation(
+            f"the trust store {str(path)[:200]} is inside the repository; a repository can "
+            "never hold your trust decisions",
+            hint="Check HOME and XDG_STATE_HOME, which a repository .env loaded by a tool such "
+            "as pipenv can set.",
+        )
+    return FileTrustStore(path)
