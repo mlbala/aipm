@@ -8,7 +8,8 @@ refused, and so is one whose dependencies are not finished, unless `--force` (ex
 The prompt is compiled without an LLM (`aipm.adapters.compiler`), written to
 `.pm/prompts/<T-ID>.<tool>.md` through the state store (redacted), and the task becomes
 `in_progress` with `base_sha` set to HEAD (kept if the task was already in progress). What is
-printed, written to `--out` or copied is exactly the text the store wrote.
+printed, written to `--out` or copied is exactly the text the store wrote. When the task starts,
+its attempt snapshot is taken outside the repository, for `verify` (ADR-0021).
 
 `--fix` adds the failing output of the last verify. `verify` arrives in v0.2, so for now the
 saved gate report is named with `--report FILE`.
@@ -25,6 +26,7 @@ from aipm.adapters.compiler import compile_task_spec, render_within_budget
 from aipm.adapters.registry import get_adapter, parse_tool
 from aipm.app import runtime
 from aipm.app.approve import require_inputs
+from aipm.app.attempt import take_snapshot
 from aipm.app.inputs import read_repo_file
 from aipm.app.project_context import build_context
 from aipm.app.snapshot import read_snapshot
@@ -39,8 +41,9 @@ from aipm.execution.clipboard import copy_text
 from aipm.execution.git import head_sha
 from aipm.reporting.worksheet import WORKSHEET_FILE, render_worksheet
 from aipm.security.paths import safe_relpath
+from aipm.state.attempts import load_snapshot
 from aipm.state.repo_files import read_repo_bytes, write_repo_bytes
-from aipm.state.store import FileStateStore, open_store
+from aipm.state.store import FileStateStore
 from aipm.state.yamlio import load_yaml
 
 _FINISHED = frozenset({TaskStatus.DONE, TaskStatus.SKIPPED})
@@ -199,7 +202,7 @@ def run(project: Path | None, options: PromptOptions) -> PromptResult:
     tool = parse_tool(options.tool, cfg.dispatch.default_tool)
     adapter = get_adapter(tool)
     require_trusted(root, loaded, command="prompt")
-    store = open_store(root, redactor=runtime.user_redactor(root))
+    store = runtime.open_repo_store(root)
     with store.lock():
         snapshot, _ = read_snapshot(
             store, coverage_threshold=cfg.discover.coverage_threshold, trusted=True
@@ -227,6 +230,13 @@ def run(project: Path | None, options: PromptOptions) -> PromptResult:
             task.id, tool.value, rendered.text, allowed_url_domains=ctx.allowed_url_domains
         )
         _record_start(store, tasks, task, base_sha)
+        if not keep:
+            take_snapshot(root, task.id, base_sha, cfg)
+        elif load_snapshot(root, task.id) is None:
+            warnings.append(
+                f"{task.id} started before aipm kept attempt snapshots, so `aipm verify` will "
+                f"refuse it: run `aipm task reset {task.id}`, then `aipm prompt {task.id}`"
+            )
     out = (
         write_out(root, options.out, text, extra_protected=cfg.security.extra_protected_paths)
         if options.out is not None

@@ -102,6 +102,13 @@ _TEST_CONFIG = (
     "osv-scanner.toml", ".pre-commit-config.yaml",
 )  # fmt: skip
 """Test-runner, gate and scanner configuration (ARCHITECTURE §13.3): owning one is shown at G3."""
+TEST_FILE_PATTERNS = _TEST_FILES
+TEST_CONFIG_PATTERNS = _TEST_CONFIG
+JS_TEST_RUNNER_CONFIG = (
+    *_named("jest.config", _CONFIG_JS), *_named("vitest.config", _CONFIG_JS),
+    *_named("karma.conf", _CONFIG_JS), *(f".mocharc{ext}" for ext in _RC),
+)  # fmt: skip
+"""The test-runner configuration files of the node stacks, protected unless owned (§13.3)."""
 
 
 class IssueCode(StrEnum):
