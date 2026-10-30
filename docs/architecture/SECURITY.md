@@ -44,7 +44,7 @@ It also launches programs that write and run code. Any of those texts can carry 
 | Asset | Where it lives | Why it matters |
 |---|---|---|
 | LLM and agent API keys | Environment or OS keychain | Financial abuse, data access |
-| Developer credentials | `~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.kube`, `~/.docker`, `~/.netrc`, `~/.git-credentials`, `~/.config/gh`, keychains, browser profiles | Lateral movement |
+| Developer credentials | `~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.kube`, `~/.docker`, `~/.netrc`, `~/.git-credentials`, `~/.config/gh`, `~/.npmrc`, `~/.pypirc`, `~/.cargo/credentials`, `~/.azure`, `~/.config/op`, keychains, browser profiles | Lateral movement |
 | Source code and `.pm/` | Target repository | Integrity of the product; confidentiality of private code |
 | The user's git branches and remote | `.git/` | Integrity, supply chain |
 | Execution trust decisions | User state dir (`trust.json`) | Gatekeeper for all command execution |
@@ -481,6 +481,8 @@ In v0.2 (manual mode, no dispatch) each scenario is applied to the working tree 
 | R-8 | `AIPM_*` variables may relax tighten-only keys, and a tool that loads a repository's `.env` (pipenv) hands that to the repository | The environment is the user's own way to change settings for one shell, and the behaviour is relied on (ADR-0018) | Do not load repository `.env` files into the shell that runs aipm; every relaxation is printed as a warning on every run |
 | R-9 | Trust covers the argv, not the code it loads: `pytest` imports `conftest.py`, and a repo-relative executable can change after `git pull` without changing the surface hash | Gates must run the project's own code | Review changes to test configuration and scripts after pulling; run gates in the sandbox (v0.2) |
 | R-10 | In manual mode `verify` cannot tell the user's changes from the agent's: anything changed after `aipm prompt` counts. Answering Claude Code's "always allow" writes `.claude/settings.local.json`, a protected path, and blocks the task | aipm does not run the agent in manual mode (ARCHITECTURE §12.7) | Review the blocked task with `aipm status`, then `aipm task unblock` or `reset` (each is recorded) |
+| R-11 | `verify` does not look inside directories git ignores as a whole (`.venv/`, `node_modules/`), so a changed test runner or `.pth` file there goes unseen; and in manual mode, an agent's edit to a `.pm/` file is carried into the ledger when a later aipm command loads and rewrites that file (a changed plan then shows as stale, exit 2) | Tool directories are rebuilt by the package manager; the ledger records aipm's writes, and some writes start from the file on disk | Run `prepare` from a clean tool directory (`npm ci` replaces `node_modules`); never pass `--accept-stale` to `verify` without reviewing what changed in the plan |
+| R-12 | A gate without a test report passes on exit 0, and under `srt` a command killed by SIGTERM exits 0; lint and type gates honour configuration files and suppression comments (`ruff.toml`, `# noqa`) inside the paths a task owns | Only report gates can be judged on their content (ADR-0020); a task may own its package's tool config | Give every gate that runs project code a `{report_file}`; review owned tool config at G3 and before `aipm merge` |
 
 ## 16. Vulnerability disclosure (root `SECURITY.md`)
 

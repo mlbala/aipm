@@ -422,3 +422,54 @@ def test_a_typosquatted_declared_dependency_fails_the_deps_gate(
     assert deps["status"] == "fail"
     assert "reqeusts is one edit from requests" in json.dumps(deps["findings"])
     assert registry == ["https://pypi.org/simple/reqeusts/"]
+
+
+# ---------------------------------------------------------------- hiding changes from git (review)
+
+
+def test_an_assume_unchanged_flag_cannot_hide_an_edited_test(clinic: Path) -> None:
+    install(FIXTURE / "T-002", clinic)
+    (clinic / "tests" / "api" / "test_otp.py").write_text("def test_x():\n    pass\n", "utf-8")
+    run_git(clinic, "update-index", "--assume-unchanged", "tests/api/test_otp.py")
+    code, env = verify(clinic)
+    _blocked(clinic, env, code, "test_not_owned")
+
+
+def test_a_skip_worktree_flag_cannot_hide_test_configuration(clinic: Path) -> None:
+    install(FIXTURE / "T-002", clinic)
+    path = clinic / "pyproject.toml"
+    path.write_text(path.read_text("utf-8") + '\n[tool.coverage.run]\nomit = ["src/*"]\n', "utf-8")
+    run_git(clinic, "update-index", "--skip-worktree", "pyproject.toml")
+    code, env = verify(clinic)
+    _blocked(clinic, env, code, "test_config")
+
+
+def test_a_replace_ref_cannot_forge_the_base_commit(clinic: Path) -> None:
+    install(FIXTURE / "T-002", clinic)
+    base = run_git(clinic, "rev-parse", "HEAD").strip()
+    (clinic / "tests" / "api" / "test_otp.py").write_text("def test_x():\n    pass\n", "utf-8")
+    run_git(clinic, "add", "tests/api/test_otp.py")
+    run_git(clinic, "commit", "-q", "-m", "forged")
+    forged = run_git(clinic, "rev-parse", "HEAD").strip()
+    run_git(clinic, "reset", "-q", "--soft", base)
+    run_git(clinic, "replace", base, forged)
+    code, env = verify(clinic)
+    assert code == 6, env
+    assert {"git_integrity"} <= _kinds(env)
+
+
+def test_a_file_changed_while_the_gates_run_fails_the_attempt(clinic: Path) -> None:
+    """Test code that rewrites an owned file after secrets and lint saw it (review)."""
+    install(FIXTURE / "T-002", clinic)
+    sneaky = clinic / "tests" / "booking" / "test_sneaky.py"
+    sneaky.write_text(
+        "from pathlib import Path\n\n\ndef test_rewrite() -> None:\n"
+        "    target = Path('src/clinic/booking/service.py')\n"
+        "    target.write_text(target.read_text() + '# changed\\n')\n"
+        "    assert target.exists()\n",
+        encoding="utf-8",
+    )
+    code, env = verify(clinic, "--commit")
+    assert code == 3, env
+    assert "changed_during_gates" in _kinds(env)
+    assert run_git(clinic, "log", "-1", "--format=%s").strip() == "base"

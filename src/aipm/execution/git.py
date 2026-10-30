@@ -5,10 +5,12 @@ an output cap. The `-c` options come first, so a repository's own `.git/config` 
 hook directory or an fsmonitor program for git to run; diffs also get `--no-ext-diff` and
 `--no-textconv`, pathspecs are literal (`GIT_LITERAL_PATHSPECS`), and every path list is `-z`.
 
-Git still reads `.git/config`, the files it includes, `.git/info/attributes` and the user's
-global config, where clean filters live. So `change_set` compares their hashes with the attempt
-snapshot first, without running git at all: a changed one is a severe violation, and git is not
-started on it (ADR-0021).
+Change sets are listed against a fresh index of the base commit, never the user's own (where a
+file can be flagged assume-unchanged or skip-worktree), and `GIT_NO_REPLACE_OBJECTS` is set on
+every call, so a replace ref cannot swap in a forged base. Git still reads `.git/config`, the
+files it includes, `.git/info/attributes` and the user's global config, where clean filters
+live. So `change_set` compares their hashes with the attempt snapshot first, without running git
+at all: a changed one is a severe violation, and git is not started on it (ADR-0021).
 
 `commit` runs `git commit --no-verify` with signing taken from the user's global config, never
 the repository's (`gpg.program`, `gpg.ssh.program`, `gpg.x509.program`, `gpg.format`,
@@ -20,7 +22,9 @@ import os
 import re
 import shutil
 import stat
-from collections.abc import Callable, Mapping, Sequence
+import tempfile
+from collections.abc import Callable, Generator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -28,7 +32,7 @@ from typing import Protocol
 from aipm.domain.errors import MissingCapability, PolicyViolation, UsageError
 from aipm.domain.models import GITLINK_MODE, SYMLINK_MODE, ChangeSet, ChangeStatus, FileChange
 from aipm.execution.process import ProcessResult, build_env, is_inside, run_safe
-from aipm.security.paths import is_protected, protected_patterns
+from aipm.security.paths import is_protected, is_within, protected_patterns
 
 GIT_TIMEOUT_S = 30.0
 COMMIT_TIMEOUT_S = 120.0
@@ -44,6 +48,7 @@ GIT_ENV: dict[str, str] = {
     "GIT_TERMINAL_PROMPT": "0",
     "GIT_OPTIONAL_LOCKS": "0",
     "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_NO_REPLACE_OBJECTS": "1",
 }
 _LITERAL = {"GIT_LITERAL_PATHSPECS": "1"}
 _SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
@@ -105,11 +110,12 @@ def _run(
     max_output: int = 1_048_576,
     timeout: float = GIT_TIMEOUT_S,
     stdin: bytes | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> ProcessResult:
     return run_safe(
         git_argv(repo, *args),
         cwd=repo,
-        env=build_env(extra={**GIT_ENV, **_LITERAL}),
+        env=build_env(extra={**GIT_ENV, **_LITERAL, **(env or {})}),
         timeout_s=timeout,
         stdin=stdin,
         max_output_bytes=max_output,
@@ -252,11 +258,34 @@ def parse_name_status(data: bytes) -> list[tuple[ChangeStatus, str | None]]:
     ]  # fmt: skip
 
 
-def diff_names(repo: Path, base: str) -> list[tuple[ChangeStatus, str | None]]:
+@contextmanager
+def base_index(repo: Path, base: str) -> Generator[dict[str, str]]:
+    """A fresh index holding exactly the tree of `base`, in a private temp dir.
+
+    Change sets never trust the user's own index, where an agent can flag a changed file
+    assume-unchanged or skip-worktree to hide it (step 06 security review). Yields the
+    environment that points git at it (`GIT_INDEX_FILE`).
+    """
+    tmp = Path(tempfile.mkdtemp(prefix="aipm-index-"))
+    try:
+        if is_within(tmp, repo):
+            raise PolicyViolation(
+                "the temporary directory is inside the repository", hint="Check TMPDIR."
+            )
+        env = {"GIT_INDEX_FILE": str(tmp / "index")}
+        _checked(_run(repo, "read-tree", base, env=env, max_output=65_536), "read-tree")
+        yield env
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def diff_names(
+    repo: Path, base: str, *, env: Mapping[str, str] | None = None
+) -> list[tuple[ChangeStatus, str | None]]:
     """Tracked paths that differ between `base` and the work tree."""
     out = _checked(
         _run(repo, "diff", *_DIFF_FLAGS, "--name-status", "-z", base, "--",
-             max_output=MAX_LIST_BYTES),
+             max_output=MAX_LIST_BYTES, env=env),
         "diff",
     )  # fmt: skip
     return parse_name_status(out)
@@ -297,28 +326,29 @@ def diff_text(repo: Path, base: str, paths: Sequence[str], *, max_bytes: int) ->
     """The unified diff of `paths` from `base` to the work tree (T2), and whether it was cut."""
     if not paths:
         return "", False
-    result = _run(repo, "diff", *_DIFF_FLAGS, "--no-color", base, "--", *paths,
-                  max_output=max_bytes)  # fmt: skip
+    with base_index(repo, base) as env:
+        result = _run(repo, "diff", *_DIFF_FLAGS, "--no-color", base, "--", *paths,
+                      max_output=max_bytes, env=env)  # fmt: skip
     if result.returncode != 0 or result.timed_out:
         raise UsageError("git diff failed")
     return result.stdout.decode("utf-8", errors="replace"), result.truncated
 
 
-def untracked(repo: Path) -> list[str | None]:
+def untracked(repo: Path, *, env: Mapping[str, str] | None = None) -> list[str | None]:
     """Untracked files that are not ignored, one by one."""
     out = _checked(
         _run(repo, "ls-files", "-z", "--others", "--exclude-standard",
-             max_output=MAX_LIST_BYTES),
+             max_output=MAX_LIST_BYTES, env=env),
         "ls-files",
     )  # fmt: skip
     return [_decode(item) for item in _fields(out)]
 
 
-def ignored(repo: Path) -> list[str | None]:
+def ignored(repo: Path, *, env: Mapping[str, str] | None = None) -> list[str | None]:
     """Ignored files; an ignored directory is listed once, with a trailing `/`, not entered."""
     out = _checked(
         _run(repo, "ls-files", "-z", "--others", "--ignored", "--exclude-standard",
-             "--directory", max_output=MAX_LIST_BYTES),
+             "--directory", max_output=MAX_LIST_BYTES, env=env),
         "ls-files",
     )  # fmt: skip
     return [_decode(item) for item in _fields(out)]
@@ -589,6 +619,9 @@ def integrity_snapshot(repo: Path, home: Path) -> dict[str, str | None]:
         ".git/info/attributes": dirs.common_dir / "info" / "attributes",
         ".git/info/exclude": dirs.common_dir / "info" / "exclude",
         ".git/hooks": dirs.common_dir / "hooks",
+        ".git/refs/replace": dirs.common_dir / "refs" / "replace",
+        ".git/info/grafts": dirs.common_dir / "info" / "grafts",
+        ".git/objects/info/alternates": dirs.common_dir / "objects" / "info" / "alternates",
     }
     if dirs.dotgit_file is not None:
         watched[".git (work tree file)"] = dirs.dotgit_file
@@ -631,13 +664,16 @@ def _bytecode(path: str | None) -> bool:
 
 
 def listing(repo: Path, base: str) -> Listing:
-    """Tracked changes since `base`, untracked files, and ignored files (not directories)."""
+    """Tracked changes since `base`, untracked files, and ignored files (not directories),
+    all against a fresh index of `base`, never the user's own index."""
+    with base_index(repo, base) as env:
+        tracked = diff_names(repo, base, env=env)
+        others = untracked(repo, env=env)
+        skipped = ignored(repo, env=env)
     return Listing(
-        tracked=[(s, p) for s, p in diff_names(repo, base) if not _bytecode(p)],
-        untracked=[p for p in untracked(repo) if not _bytecode(p)],
-        ignored_files=[
-            p for p in ignored(repo) if p is None or not (p.endswith("/") or _bytecode(p))
-        ],
+        tracked=[(s, p) for s, p in tracked if not _bytecode(p)],
+        untracked=[p for p in others if not _bytecode(p)],
+        ignored_files=[p for p in skipped if p is None or not (p.endswith("/") or _bytecode(p))],
     )
 
 

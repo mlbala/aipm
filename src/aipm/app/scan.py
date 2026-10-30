@@ -152,7 +152,7 @@ def run(project: Path | None, options: ScanOptions) -> ScanReport:
         report = ScanReport(str(root), fail_on, warnings=list(loaded.warnings))
         if sandbox.warning:
             report.warnings.append(sandbox.warning)
-        ctx = ScanContext(repo=root, temp_dir=temp, runtime=sandbox.runtime,
+        ctx = ScanContext(repo=root, temp_dir=temp, runtime=sandbox.launcher,
                           redactor=user_redactor(root))  # fmt: skip
         files = _files(root)
         for name in names:

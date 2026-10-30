@@ -32,5 +32,6 @@ Use `srt`, with these rules (`aipm.execution.sandbox`, `aipm.gates.command_gate`
 ## Consequences
 
 - Gate argv with quotes, `$` or backslashes cannot run under the sandbox; the error names the element. File names with those characters in owned paths are refused the same way.
-- A forged report written by test code while the gate runs is still possible; that is residual risk R-1/R-5.
+- A forged report written by test code while the gate runs is still possible; that is residual risk R-1/R-5. A gate without a report is judged on its exit code alone, so under `srt` it passes when its code kills its runner (R-12).
+- **The interpreter.** `srt` 0.0.81 starts with `#!/usr/bin/env node`. aipm reads that line, resolves `node` on PATH skipping relative and repository entries, and starts `node srt …` itself, so a `node` planted in an active `.venv/bin` never runs. Any other `env` line exits 8; an absolute interpreter inside the repository exits 6.
 - If a later `srt` execs argv directly or reports signals faithfully, these rules can be relaxed in a new ADR.

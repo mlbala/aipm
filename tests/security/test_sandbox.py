@@ -17,6 +17,7 @@ from aipm.execution.sandbox import (
     ProfilePaths,
     SandboxStatus,
     check_shell_safe,
+    launcher_for,
     profile_for,
     resolve_sandbox,
     settings_document,
@@ -438,3 +439,72 @@ def test_an_srt_inside_the_repository_is_refused(
     monkeypatch.setenv("PATH", f"{repo / 'bin'}:/usr/bin:/bin")
     with pytest.raises(PolicyViolation, match="inside the repository"):
         _resolve(tmp_path)
+
+
+# ---------------------------------------------------------------- srt's interpreter (review)
+
+
+def _env_node_srt(where: Path) -> Path:
+    """A copy of the stub srt whose first line asks env for node, like the real one."""
+    body = (STUB_BIN / "srt").read_text(encoding="utf-8").split("\n", 1)[1]
+    return _write_exe_raw(where / "srt", "#!/usr/bin/env node\n" + body)
+
+
+def _write_exe_raw(path: Path, text: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def test_srt_s_interpreter_is_never_taken_from_the_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    marker = tmp_path / "planted-node-ran"
+    planted = _write_exe_raw(repo / ".venv" / "bin" / "node",
+                             f"#!/bin/sh\necho ran > '{marker}'\nexit 0\n")  # fmt: skip
+    good_dir = tmp_path / "tools"
+    good = _write_exe_raw(
+        good_dir / "node", '#!/bin/sh\nscript="$1"; shift\nexec /bin/sh "$script" "$@"\n'
+    )
+    srt = _env_node_srt(tmp_path / "srt-bin")
+    monkeypatch.setenv("PATH", f"{planted.parent}:{srt.parent}:{good_dir}:/usr/bin:/bin")
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    status = resolve_sandbox(mode="srt", require=True, repo=repo, temp_dir=temp)
+    assert status.launcher == (str(good), str(srt))
+    assert not marker.exists(), "the node planted in the repository ran"
+    profile = profile_for(ProcessKind.GATE, NONE, _paths(tmp_path), runtime=status.launcher)
+    assert wrap(["ruff"], profile)[:2] == (str(good), str(srt))
+
+
+def test_srt_needs_its_interpreter_outside_the_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    planted = _write_exe_raw(repo / ".venv" / "bin" / "node", "#!/bin/sh\nexit 0\n")
+    srt = _env_node_srt(tmp_path / "srt-bin")
+    monkeypatch.setenv("PATH", f"{planted.parent}:/usr/bin:/bin")
+    with pytest.raises(MissingCapability, match="not on PATH outside the repository"):
+        launcher_for(str(srt), repo)
+
+
+@pytest.mark.parametrize("first", ["#!/usr/bin/env -S node --x", "#!/usr/bin/env", "#!"])
+def test_a_first_line_aipm_cannot_read_exits_8(tmp_path: Path, first: str) -> None:
+    srt = _write_exe_raw(tmp_path / "srt", f"{first}\n")
+    with pytest.raises(MissingCapability):
+        launcher_for(str(srt), tmp_path / "repo")
+
+
+def test_an_absolute_interpreter_inside_the_repository_is_refused(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    interp = _write_exe_raw(repo / "bin" / "node", "#!/bin/sh\n")
+    srt = _write_exe_raw(tmp_path / "srt", f"#!{interp}\n")
+    with pytest.raises(PolicyViolation, match="inside the repository"):
+        launcher_for(str(srt), repo)
+    native = tmp_path / "srt-native"
+    native.write_bytes(b"\x7fELF\x02\x01")
+    assert launcher_for(str(native), repo) == (str(native),)
+    with pytest.raises(MissingCapability):
+        launcher_for(str(tmp_path / "missing"), repo)

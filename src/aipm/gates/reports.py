@@ -100,6 +100,10 @@ def _junit_case(element: ET.Element) -> TestCase:
 
 def parse_junit(data: bytes) -> TestReport:
     """A JUnit XML report (pytest `--junitxml`)."""
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ReportError("the test report is not UTF-8") from None
     if _DTD.search(data):
         raise ReportError("the test report declares a DOCTYPE or an entity")
     try:

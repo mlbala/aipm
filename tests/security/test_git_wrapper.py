@@ -69,14 +69,15 @@ def test_every_call_is_hardened(
 
     monkeypatch.setattr(git, "run_safe", fake_run)
     call(tmp_repo)  # type: ignore[operator]
-    argv = seen[0]["argv"]
+    argv = seen[-1]["argv"]
     assert isinstance(argv, list)
     assert argv[1:10] == HARDENED
     for word in needle:
         assert word in argv
-    env = seen[0]["env"]
+    env = seen[-1]["env"]
     assert isinstance(env, dict)
     assert env["GIT_LITERAL_PATHSPECS"] == "1"
+    assert env["GIT_NO_REPLACE_OBJECTS"] == "1"
     assert env["GIT_CONFIG_NOSYSTEM"] == "1"
     fake_secrets.assert_absent(repr(env))
 
@@ -481,7 +482,7 @@ def test_a_snapshot_with_too_many_files_is_refused(
 def test_a_snapshot_refuses_names_it_cannot_read(
     tmp_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(git, "untracked", lambda _repo: [None])
+    monkeypatch.setattr(git, "untracked", lambda _repo, **_kw: [None])
     with pytest.raises(UsageError, match="cannot read"):
         git.snapshot_files(tmp_repo, git.head_sha(tmp_repo), watch_ignored=lambda _: True)
 

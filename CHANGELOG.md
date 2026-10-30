@@ -23,6 +23,13 @@ All notable changes to aipm are recorded here. The format follows [Keep a Change
 
 ### Security
 
+Fixes from the step 06 security review:
+
+- `verify` lists changes against a fresh index of the base commit, never your own index, and turns off git replace refs, so an `assume-unchanged` or `skip-worktree` flag or a forged base commit cannot hide an edited test or protected file. Replace refs, grafts and object alternates are part of the integrity hashes.
+- `srt`'s interpreter (`node`) is resolved outside the repository and started by aipm, so a `node` planted in an active `.venv/bin` cannot run instead of the sandbox.
+- LLM cache entries and saved verify reports are read only when aipm wrote those exact bytes, so a planted or shipped `.pm/cache/` entry cannot turn off the AC reviewer's veto, and a planted report cannot reach `prompt --fix`.
+- A changed file that changes again while the gates run fails the attempt; `--base` is resolved only after the integrity check; gate output is cleaned before it is redacted; semgrep scans `tests/` and `vendor/` too; JUnit reports must be UTF-8; gates may not read `~/.npmrc`, `~/.pypirc`, `~/.cargo/credentials`, `~/.azure` or `~/.config/op`. Residual risks R-11 and R-12 record what remains.
+
 The v0.1 red-team pass ([docs/security/reviews/v0.1.md](docs/security/reviews/v0.1.md)) found seven problems, all fixed, and two security reviews of the fixes found ways around four of them, also fixed:
 
 - The command policy refuses a hard-denied program (a shell, `curl`, `rm`, `git`, …) at any argv position, so a wrapper such as `time`, `nice`, `timeout`, `caffeinate` or `find -exec` can no longer start one (ADR-0019). It also refuses programs that run a shell string or code given as an argument (`awk`, `watch`, `flock`, `script`, `expect`, `sqlite3`) and `nscurl`, `lwp-*` and `tftp`, and it folds version suffixes from every name (`zsh-5.9`, `php8.3`). `osascript -e`, `php -r`/`--run`, `perl -M`, `lua -e`, `luajit -e`, `R -e`, `Rscript -e`, `julia -e`/`--eval`, `deno --eval` and `python -m timeit`, `-m code` or `-m http.server` count as inline code, also when `m` ends a flag cluster (`python3 -Im timeit`, `-Pm`). Without a runner, a `{paths}` value such as `cmd/env` is no longer mistaken for a program; a bare value such as `curl` still is.

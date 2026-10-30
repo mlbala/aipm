@@ -32,5 +32,7 @@ Two private files (mode 0600, written atomically, never through a link, refused 
 
 - An agent cannot whitelist its own changes or forge aipm's `.pm/` writes.
 - Changes the user makes between `prompt` and `verify` count too; in manual mode aipm cannot tell the user from the agent. Answering Claude Code's "always allow" writes `.claude/settings.local.json`, a protected path, and blocks the task until `aipm task unblock`.
-- Ignored directories are not entered (`node_modules/`, `.venv/`); an ignored file on a protected or test path is watched. Python bytecode caches are left out because gates never read them from the tree (`PYTHONPYCACHEPREFIX`).
+- The listing is made against a fresh index of the base commit, never the user's index (where `assume-unchanged` and `skip-worktree` flags could hide a file), with replace refs off (`GIT_NO_REPLACE_OBJECTS`).
+- An ignored file on a protected or test path is watched, but a directory git ignores as a whole (`node_modules/`, `.venv/`, `.pm/cache/`, `.pm/runs/`) is not entered (residual risk R-11). aipm reads `.pm/cache/` and `.pm/runs/` only where the ledger shows aipm wrote those exact bytes. Python bytecode caches are left out because gates never read them from the tree (`PYTHONPYCACHEPREFIX`).
+- A changed file that changes again while the gates run fails the attempt, so what is scanned is what is committed.
 - At most 20,000 changed or untracked files at the start of a task; more exits 2.

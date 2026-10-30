@@ -8,8 +8,9 @@ finding is a `Violation`, classified as in §12.4:
   own (SECURITY.md §9.2), symbolic links that leave the workspace or land on a protected path,
   watched files changed behind `.gitignore`, and a change set aipm could not read whole;
 - **minor** (the attempt fails, nothing is reverted in manual mode): edits outside `owns_files`,
-  dependencies not declared in `deps_add`, and tamper signs on owned tests (skip, xfail or
-  focus markers added, test functions removed, fewer assertions).
+  dependencies not declared in `deps_add`, tamper signs on owned tests (skip, xfail or focus
+  markers added, test functions removed, fewer assertions), and a changed file that changed
+  again while the gates ran (`aipm.app.verify` checks that one).
 
 Contents are T2: the parsers here read them as data only and never fail open. A manifest that
 cannot be parsed counts as a violation.
@@ -50,6 +51,7 @@ class Kind(StrEnum):
     OUT_OF_SCOPE = "out_of_scope"
     TEST_TAMPER = "test_tamper"
     DEPENDENCY = "dependency"
+    CHANGED_DURING_GATES = "changed_during_gates"
 
 
 _SEVERE = frozenset(

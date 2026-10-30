@@ -52,6 +52,7 @@ from aipm.domain.models import (
     BlockedReason,
     BuiltinGate,
     ChangeSet,
+    ChangeStatus,
     Done,
     GateFinding,
     GateReport,
@@ -70,7 +71,7 @@ from aipm.domain.models import (
 from aipm.domain.models.snapshot import StateSnapshot
 from aipm.domain.phase import prompt_inputs
 from aipm.execution import git
-from aipm.execution.sandbox import resolve_sandbox
+from aipm.execution.sandbox import Runtime, resolve_sandbox
 from aipm.gates.builtin.ac_review import Reviewer
 from aipm.gates.context import GateContext
 from aipm.gates.runner import GateRun, run_gates
@@ -78,7 +79,7 @@ from aipm.llm.gateway import TokenBudget, open_gateway
 from aipm.reporting.worksheet import WORKSHEET_FILE, render_worksheet
 from aipm.roles import ac_reviewer
 from aipm.roles.ac_reviewer import ACReview, ACReviewInput
-from aipm.security.diff_checks import Level, Violation, check_changes, severe
+from aipm.security.diff_checks import Kind, Level, Violation, check_changes, severe
 from aipm.security.paths import is_within
 from aipm.security.sanitize import sanitize_text
 from aipm.state.attempts import AttemptSnapshot, load_snapshot
@@ -237,6 +238,16 @@ def _reviewer(cfg: Config, store: FileStateStore, *, no_cache: bool) -> tuple[Re
     return review, ""
 
 
+def _hashes(root: Path, changes: ChangeSet) -> dict[str, str | None]:
+    """The task's changed files as the gates are about to see them: what is scanned and linted
+    must be what is saved and committed (step 06 security review)."""
+    return {
+        c.path: git.hash_path(root / c.path)
+        for c in changes.files
+        if c.status is not ChangeStatus.DELETED and not c.path.startswith(".pm/")
+    }
+
+
 def _save_tasks(store: FileStateStore, tasks: TasksDoc, task: Task) -> None:
     doc = tasks.model_copy(update={"tasks": [task if t.id == task.id else t for t in tasks.tasks]})
     store.save(doc)
@@ -313,7 +324,7 @@ class _Verify:
     store: FileStateStore
     options: VerifyOptions
     temp: Path
-    sandbox: str | None
+    sandbox: Runtime | None
     warnings: list[str]
 
     def _task(self) -> tuple[TasksDoc, Task, AttemptSnapshot, StateSnapshot]:
@@ -337,10 +348,12 @@ class _Verify:
 
     def run(self) -> VerifyResult:
         tasks, task, snapshot, state = self._task()
-        # The base comes from the snapshot outside the repository, never from tasks.yaml.
+        # The base comes from the snapshot outside the repository, never from tasks.yaml, and
+        # `--base` is resolved only once the integrity hashes allow git to run (SECURITY §11).
+        moved = git.compare(snapshot.integrity, git.integrity_snapshot(self.root, Path.home()))
         base = (
             git.resolve_commit(self.root, self.options.base)
-            if self.options.base
+            if self.options.base and not moved
             else snapshot.base_sha
         )
         policy = check_policy(self.cfg)
@@ -363,6 +376,7 @@ class _Verify:
             home=Path.home(), now=datetime.now(UTC), runtime=self.sandbox,
         )  # fmt: skip
         reviewer, unavailable = _reviewer(self.cfg, self.store, no_cache=self.options.no_cache)
+        scanned = _hashes(self.root, changes)
         gate_run = run_gates(
             ctx,
             reviewer=reviewer,
@@ -375,6 +389,12 @@ class _Verify:
         late = [v for v in severe(after) if v not in violations]
         if late:
             self._block(tasks, task, result, [*violations, *late], gate_run)
+        moved = [
+            Violation(Kind.CHANGED_DURING_GATES, path, "changed while the gates ran")
+            for path, digest in scanned.items()
+            if git.hash_path(self.root / path) != digest
+        ]
+        result.violations = [*violations, *moved]
         return self._finish(tasks, task, result, gate_run, changes)
 
     def _block(
@@ -531,6 +551,6 @@ def run(project: Path | None, options: VerifyOptions) -> VerifyResult:
         )
         warnings = [*loaded.warnings, *([sandbox.warning] if sandbox.warning else [])]
         with store.lock():
-            return _Verify(root, cfg, store, options, temp, sandbox.runtime, warnings).run()
+            return _Verify(root, cfg, store, options, temp, sandbox.launcher, warnings).run()
     finally:
         shutil.rmtree(temp, ignore_errors=True)

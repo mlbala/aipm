@@ -60,6 +60,7 @@ def test_junit_cases_and_statuses() -> None:
         (b"{nope", "not valid JSON"),
         (b'{"numTotalTests": 1}', "not a jest or vitest report"),
         (b"[1]", "not valid XML"),
+        ("<testsuites/>".encode("utf-16"), "not UTF-8"),
     ],
 )
 def test_bad_reports_are_refused(data: bytes, message: str) -> None:

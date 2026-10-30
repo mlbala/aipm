@@ -27,7 +27,7 @@ from aipm.gates.reports import ReportError, TestReport, load_report
 from aipm.security.command_policy import compile_gate, compile_prepare
 from aipm.security.network import NetworkPolicy, parse_network
 from aipm.security.paths import SafeRelPath
-from aipm.security.sanitize import head_tail, strip_terminal_escapes
+from aipm.security.sanitize import head_tail, sanitize_text, strip_terminal_escapes
 
 GATE_TIMEOUT_S = 600.0
 MAX_OUTPUT_BYTES = 2_000_000
@@ -85,8 +85,10 @@ def sandbox_for(
 
 
 def _output(result: ProcessResult, ctx: GateContext) -> str:
+    """Decoded, cleaned, then redacted, so a secret split by an escape or an invisible character
+    is whole when the redactor sees it (SECURITY.md §8)."""
     raw = (result.stdout + b"\n" + result.stderr).decode("utf-8", errors="replace")
-    return ctx.redactor.redact(raw)
+    return ctx.redactor.redact(sanitize_text(raw, source="gate output").text)
 
 
 def _last_line(text: str) -> str:

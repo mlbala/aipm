@@ -43,7 +43,8 @@ INSTALL_HINT = (
 
 CREDENTIAL_PATHS: tuple[str, ...] = (
     ".ssh", ".aws", ".config/gcloud", ".kube", ".docker", ".netrc", ".git-credentials", ".gnupg",
-    ".config/gh", "Library/Keychains", ".local/share/keyrings",
+    ".config/gh", ".npmrc", ".pypirc", ".cargo/credentials", ".cargo/credentials.toml",
+    ".azure", ".config/op", "Library/Keychains", ".local/share/keyrings",
     "Library/Application Support/Google/Chrome", "Library/Application Support/Firefox",
     "Library/Application Support/BraveSoftware", "Library/Safari",
     ".config/google-chrome", ".config/chromium", ".mozilla",
@@ -105,22 +106,30 @@ class SandboxProfile:
     """Filesystem and network rules for one process, and where to write its settings.
 
     `deny_write_patterns` are glob patterns (macOS only); every other path is literal.
+    `launcher` is how `srt` is started: its interpreter, resolved outside the repository, then
+    `srt` itself (`runtime`); just `srt` when it needs no interpreter from PATH.
     """
 
     kind: ProcessKind
     network: NetworkPolicy
     runtime: str
     settings_dir: Path
+    launcher: tuple[str, ...] = ()
     allow_write: tuple[Path, ...] = ()
     deny_read: tuple[Path, ...] = ()
     deny_write: tuple[Path, ...] = field(default_factory=tuple[Path, ...])
     deny_write_patterns: tuple[str, ...] = ()
 
 
+type Runtime = str | tuple[str, ...]
+"""`srt`'s path, or its launcher (interpreter, then `srt`) from `resolve_sandbox`."""
+
+
 def profile_for(
-    kind: ProcessKind, network: NetworkPolicy, paths: ProfilePaths, *, runtime: str
+    kind: ProcessKind, network: NetworkPolicy, paths: ProfilePaths, *, runtime: Runtime
 ) -> SandboxProfile:
     """The profile for one process, from the table in SECURITY.md §9.1."""
+    launcher = (runtime,) if isinstance(runtime, str) else tuple(runtime)
     home = paths.home
     deny_read = [home / rel for rel in CREDENTIAL_PATHS]
     if kind is ProcessKind.AGENT:
@@ -145,7 +154,8 @@ def profile_for(
     return SandboxProfile(
         kind=kind,
         network=network,
-        runtime=runtime,
+        runtime=launcher[-1],
+        launcher=launcher,
         settings_dir=paths.temp_dir,
         allow_write=tuple(allow),
         deny_read=tuple(deny_read),
@@ -210,7 +220,8 @@ def wrap(argv: Sequence[str], profile: SandboxProfile) -> tuple[str, ...]:
     A runtime that is gone raises `MissingCapability` (exit 8): nothing runs unsandboxed because
     a profile could not be applied.
     """
-    if not os.access(profile.runtime, os.X_OK):
+    launcher = profile.launcher or (profile.runtime,)
+    if not os.access(launcher[0], os.X_OK) or not os.access(profile.runtime, os.R_OK):
         raise MissingCapability(
             f"the sandbox runtime {profile.runtime} cannot be run", hint=INSTALL_HINT
         )
@@ -223,18 +234,71 @@ def wrap(argv: Sequence[str], profile: SandboxProfile) -> tuple[str, ...]:
     fd = os.open(target, flags, 0o600)
     with os.fdopen(fd, "wb") as handle:
         handle.write(data)
-    return (profile.runtime, "--settings", str(target), "--", *argv)
+    return (*launcher, "--settings", str(target), "--", *argv)
 
 
 @dataclass(frozen=True, slots=True)
 class SandboxStatus:
-    """Whether processes can run under a sandbox, and the warning to print on every use if not."""
+    """Whether processes can run under a sandbox, and the warning to print on every use if not.
+
+    `launcher` is what to pass on as the runtime: `srt`, or its interpreter and `srt`.
+    """
 
     runtime: str | None
     warning: str | None = None
+    launcher: tuple[str, ...] | None = None
 
 
-def _probe(runtime: str, temp_dir: Path) -> str | None:
+def which_outside(name: str, repo: Path) -> str | None:
+    """`name` on PATH, skipping relative entries and every entry inside the repository."""
+    from aipm.execution.process import is_inside  # noqa: PLC0415 - process imports us
+
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry or not Path(entry).is_absolute() or is_inside(entry, repo):
+            continue
+        candidate = Path(entry) / name
+        usable = candidate.is_file() and os.access(candidate, os.X_OK)
+        if usable and not is_inside(str(candidate), repo):
+            return str(candidate)
+    return None
+
+
+def launcher_for(srt: str, repo: Path) -> tuple[str, ...]:
+    """How to start `srt` without trusting PATH for its interpreter (step 06 review).
+
+    `srt` is a `#!/usr/bin/env node` script: the kernel would look `node` up on the PATH aipm
+    passes on, where a repository-local entry (an active `.venv/bin`) could come first. So the
+    interpreter is resolved here, outside the repository, and started explicitly. An absolute
+    interpreter inside the repository exits 6; a first line aipm cannot read exits 8.
+    """
+    from aipm.execution.process import is_inside  # noqa: PLC0415 - process imports us
+
+    try:
+        with Path(srt).open("rb") as handle:
+            first = handle.read(256).split(b"\n", 1)[0]
+    except OSError:
+        raise MissingCapability(f"cannot read {srt}", hint=INSTALL_HINT) from None
+    if not first.startswith(b"#!"):
+        return (srt,)
+    words = first[2:].decode("utf-8", errors="replace").split()
+    if not words:
+        raise MissingCapability(f"cannot tell how to start {srt}", hint=INSTALL_HINT)
+    if Path(words[0]).name == "env":
+        if len(words) != 2 or words[1].startswith("-"):
+            raise MissingCapability(f"cannot tell how to start {srt}: {first[:80]!r}")
+        found = which_outside(words[1], repo)
+        if found is None:
+            raise MissingCapability(
+                f"srt needs {words[1]}, which is not on PATH outside the repository",
+                hint=INSTALL_HINT,
+            )
+        return (found, srt)
+    if is_inside(words[0], repo):
+        raise PolicyViolation(f"srt's interpreter {words[0]} is inside the repository")
+    return (srt,)
+
+
+def _probe(runtime: Runtime, temp_dir: Path) -> str | None:
     """Run a harmless program under a no-network profile; returns why it failed, if it did."""
     from aipm.execution.process import build_env, run_safe  # noqa: PLC0415 - process imports us
 
@@ -284,9 +348,10 @@ def resolve_sandbox(
     runtime = None if mode == "none" else _runtime(repo)
     reason = "dispatch.sandbox is none" if mode == "none" else "srt is not installed"
     if runtime is not None:
-        failure = _probe(runtime, temp_dir)
+        launcher = launcher_for(runtime, repo)
+        failure = _probe(launcher, temp_dir)
         if failure is None:
-            return SandboxStatus(runtime)
+            return SandboxStatus(runtime, launcher=launcher)
         reason = f"srt could not start a sandbox ({failure})"
     if require or mode == "srt":
         raise MissingCapability(

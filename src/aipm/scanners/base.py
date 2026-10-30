@@ -25,7 +25,7 @@ from typing import Any
 from aipm.domain.errors import PolicyViolation
 from aipm.domain.models import Severity
 from aipm.execution.process import ProcessResult, build_env, is_inside, run_safe
-from aipm.execution.sandbox import ProcessKind, ProfilePaths, profile_for
+from aipm.execution.sandbox import ProcessKind, ProfilePaths, Runtime, profile_for
 from aipm.security.network import NetworkPolicy, parse_network
 from aipm.security.redact import Redactor
 
@@ -98,7 +98,7 @@ class ScanContext:
 
     repo: Path
     temp_dir: Path
-    runtime: str | None = None
+    runtime: Runtime | None = None
     redactor: Redactor = field(default_factory=lambda: Redactor({}))
 
 

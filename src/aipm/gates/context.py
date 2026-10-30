@@ -14,6 +14,7 @@ from pathlib import Path
 
 from aipm.config.schema import Config
 from aipm.domain.models import ChangeSet, ChangeStatus, GateWorkspace, Task
+from aipm.execution.sandbox import Runtime
 from aipm.scanners.base import ScanContext
 from aipm.scanners.registry import Fetch
 from aipm.security.diff_checks import glob_match, is_test_path
@@ -39,7 +40,7 @@ class GateContext:
     redactor: Redactor
     home: Path
     now: datetime
-    runtime: str | None = None
+    runtime: Runtime | None = None
     fetch: Fetch | None = None
     warnings: list[str] = field(default_factory=list[str])
 

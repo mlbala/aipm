@@ -76,6 +76,9 @@ def scan(ctx: ScanContext, paths: Sequence[str], *, configs: Sequence[str]) -> S
     stage = stage_files(ctx.repo, paths, work / "stage")
     if not stage.files:
         return ScanResult(TOOL.name, ScanStatus.OK, reason="no files to scan")
+    # An empty ignore file of aipm's own: semgrep's default ignore list (tests/, vendor/, ...)
+    # would otherwise apply to the staged copy, and the repository's is never staged.
+    (stage.root / ".semgrepignore").write_bytes(b"")
     report = work / "semgrep.json"
     args = ["scan", "--json", "--output", str(report), "--metrics", "off",
             "--disable-version-check", "--disable-nosem", "--quiet"]  # fmt: skip

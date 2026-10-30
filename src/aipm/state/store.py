@@ -589,14 +589,27 @@ class FileStateStore:
             raise UsageError("not a cache key")
         return f"{CACHE_DIR}/{key}.json"
 
+    def _ours(self, name: str, data: bytes) -> bool:
+        """Whether `data` is what aipm itself last wrote to `.pm/<name>`, by the write ledger.
+
+        `.pm/cache/` and `.pm/runs/` are ignored by git and never in a change set, so a file an
+        agent planted there, or a cloned repository shipped, is read only if aipm wrote it.
+        """
+        if self.ledger is None:
+            return False
+        return self.ledger.load().get(f".pm/{name}") == hashlib.sha256(data).hexdigest()
+
     def cache_get(self, key: str) -> str | None:
-        """A cached LLM reply (T2: the caller validates it again), or `None` (ARCHITECTURE §14)."""
+        """A cached LLM reply (T2: the caller validates it again), or `None` (ARCHITECTURE §14).
+
+        Only an entry this store wrote counts (the write ledger); anything else is a miss.
+        """
         name = self._cache_name(key)
         try:
             data = self._read(name, limit=MAX_CACHE_BYTES)
         except (PolicyViolation, UsageError):
             return None
-        if data is None:
+        if data is None or not self._ours(name, data):
             return None
         try:
             entry: object = json.loads(data)
@@ -632,23 +645,26 @@ class FileStateStore:
         """The text of the newest `verify` gate report of a task, or `None` (`prompt --fix`).
 
         Reports live in `.pm/runs/<run-id>/gates/<T-ID>/<attempt>/report.yaml`; links and
-        anything but real directories and files are skipped.
+        anything but real directories and files are skipped, and so is a report aipm did not
+        write itself (the write ledger).
         """
         if not is_valid_id("task", task_id):
             raise UsageError(f"not a task ID: {task_id!r}")
         runs = self.root / RUNS_DIR
-        best: tuple[str, int, str] | None = None
+        found: list[tuple[str, int, str]] = []
         for run_id in _real_children(runs):
             if not is_valid_id("run", run_id):
                 continue
             task_dir = runs / run_id / "gates" / task_id
             for attempt in _real_children(task_dir):
-                if attempt.isdigit() and (best is None or (run_id, int(attempt)) > best[:2]):
-                    best = (run_id, int(attempt), f"{RUNS_DIR}/{run_id}/gates/{task_id}/{attempt}")
-        if best is None:
-            return None
-        data = self._read(f"{best[2]}/report.yaml", limit=MAX_YAML_BYTES)
-        return None if data is None else data.decode("utf-8", errors="replace")
+                if attempt.isdigit() and len(attempt) <= 3:
+                    name = f"{RUNS_DIR}/{run_id}/gates/{task_id}/{attempt}/report.yaml"
+                    found.append((run_id, int(attempt), name))
+        for _, _, name in sorted(found, reverse=True):
+            data = self._read(name, limit=MAX_YAML_BYTES)
+            if data is not None and self._ours(name, data):
+                return data.decode("utf-8", errors="replace")
+        return None
 
     def save_prompt(
         self, task_id: str, tool: str, text: str, *, allowed_url_domains: Sequence[str] = ()

@@ -29,8 +29,8 @@ from aipm.state.private_files import read_private, remove_private, state_dir, wr
 
 MAX_SNAPSHOT_FILES = 20_000
 MAX_SNAPSHOT_BYTES = 16 * 1_048_576
-MAX_LEDGER_FILES = 5_000
-MAX_LEDGER_BYTES = 4 * 1_048_576
+MAX_LEDGER_FILES = 20_000
+MAX_LEDGER_BYTES = 8 * 1_048_576
 
 SnapshotPath = Annotated[str, StringConstraints(min_length=1, max_length=4096)]
 Label = Annotated[str, StringConstraints(min_length=1, max_length=4200)]
