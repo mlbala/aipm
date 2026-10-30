@@ -9,11 +9,16 @@ the post-change checks. Then:
   event, exit 6. No gate runs;
 - otherwise the gates run (no fail-fast), then the checks run again, because gates execute code
   the agent wrote: a new severe violation blocks the task (exit 6). The attempt is counted and
-  its report, logs and journal are saved in `.pm/runs/<run-id>/`.
+  its report, logs and journal are saved in `.pm/runs/<run-id>/`. A dependency the checks
+  refused is never installed: the prepare step (and so every command gate) does not run then
+  (red-team v0.2, RT02-4).
 
 The task is `done` only if every required gate (the menu's, and every gate the task names)
 passed, the AC reviewer vetoed nothing, there was no minor violation and `--gate` was not given.
-`--commit` then commits the task's changes through the hardened git wrapper, with trailers.
+`--commit` then commits the task's changes through the hardened git wrapper, with trailers, and
+checks that the commit holds exactly what the checks and gates saw: a gate's child that left
+its process group could swap a file in between (RT02-8). If it does not, the task is blocked
+(exit 6) and the commit is named for review.
 Otherwise exit 3; or 8 when a required scanner is missing; or 4 when the AC reviewer reported
 suspected prompt injection and `--accept-risk` was not given. Manual verify never reverts
 anything in your tree.
@@ -32,6 +37,7 @@ from pydantic import JsonValue
 from aipm.app import runtime
 from aipm.app.approve import approver, load_approvals, require_inputs
 from aipm.app.attempt import changes_since, check_policy
+from aipm.app.repo_map import ignore_spec
 from aipm.app.snapshot import read_snapshot
 from aipm.app.trust import require_trusted
 from aipm.app.workspace import find_repo_root, require_initialized
@@ -79,7 +85,14 @@ from aipm.llm.gateway import TokenBudget, open_gateway
 from aipm.reporting.worksheet import WORKSHEET_FILE, render_worksheet
 from aipm.roles import ac_reviewer
 from aipm.roles.ac_reviewer import ACReview, ACReviewInput
-from aipm.security.diff_checks import Kind, Level, Violation, check_changes, severe
+from aipm.security.diff_checks import (
+    Kind,
+    Level,
+    Violation,
+    check_changes,
+    is_dependency_path,
+    severe,
+)
 from aipm.security.paths import is_within
 from aipm.security.sanitize import sanitize_text
 from aipm.state.attempts import AttemptSnapshot, load_snapshot
@@ -248,6 +261,20 @@ def _hashes(root: Path, changes: ChangeSet) -> dict[str, str | None]:
     }
 
 
+def _base_ignores(root: Path, base: str) -> list[str]:
+    """The `.gitignore` and `.aipmignore` lines of the base commit."""
+    lines: list[str] = []
+    for name in (".gitignore", ".aipmignore"):
+        data = git.file_at(root, base, name, max_bytes=262_144) or b""
+        lines += data.decode("utf-8", errors="replace").splitlines()
+    return lines
+
+
+def _moved(root: Path, scanned: dict[str, str | None]) -> list[str]:
+    """The changed files whose contents differ from what the checks read."""
+    return [path for path, digest in scanned.items() if git.hash_path(root / path) != digest]
+
+
 def _save_tasks(store: FileStateStore, tasks: TasksDoc, task: Task) -> None:
     doc = tasks.model_copy(update={"tasks": [task if t.id == task.id else t for t in tasks.tasks]})
     store.save(doc)
@@ -280,6 +307,14 @@ def _save_run(
     document = result.report.model_dump(mode="json")
     result.saved = store.save_run_text(result.run_id, [*base, "report.yaml"], dump_yaml(document))
     store.save_run_text(result.run_id, ["journal.jsonl"], _journal(result, events))
+
+
+def _prepare_hold(violations: Sequence[Violation]) -> str | None:
+    """Why the prepare step must not run: it would install a dependency the checks refused."""
+    for v in violations:
+        if v.kind is Kind.DEPENDENCY or is_dependency_path(v.path):
+            return f"the post-change checks refused a dependency change in {v.path}"
+    return None
 
 
 def _record_violations(store: FileStateStore, task: Task, violations: Sequence[Violation]) -> None:
@@ -370,19 +405,24 @@ class _Verify:
         self.warnings += require_inputs(
             self.store, "verify", prompt_inputs(state), accept_stale=self.options.accept_stale
         )
+        scanned = _hashes(self.root, changes)
         ctx = GateContext(
             ws=GateWorkspace(root=self.root, temp_dir=self.temp, base_sha=base),
             task=task, cfg=self.cfg, changes=changes, redactor=self.store.redactor,
             home=Path.home(), now=datetime.now(UTC), runtime=self.sandbox,
+            withheld=ignore_spec(self.root, also=_base_ignores(self.root, base)).match_file,
+            changed_during_gates=lambda: _moved(self.root, scanned),
         )  # fmt: skip
         reviewer, unavailable = _reviewer(self.cfg, self.store, no_cache=self.options.no_cache)
-        scanned = _hashes(self.root, changes)
+        commit_paths = [c.path for c in changes.files if not c.path.startswith(".pm/")]
+        expected = git.staged_ids(self.root, commit_paths) if self.options.commit else None
         gate_run = run_gates(
             ctx,
             reviewer=reviewer,
             reviewer_unavailable=unavailable,
             only=self.options.gate,
             override_ac=self.options.override_ac,
+            hold_prepare=_prepare_hold(violations),
         )
         self.warnings += ctx.warnings
         after = check_changes(changes_since(self.root, snapshot, base, self.cfg), task, policy)
@@ -391,11 +431,10 @@ class _Verify:
             self._block(tasks, task, result, [*violations, *late], gate_run)
         moved = [
             Violation(Kind.CHANGED_DURING_GATES, path, "changed while the gates ran")
-            for path, digest in scanned.items()
-            if git.hash_path(self.root / path) != digest
+            for path in _moved(self.root, scanned)
         ]
         result.violations = [*violations, *moved]
-        return self._finish(tasks, task, result, gate_run, changes)
+        return self._finish(tasks, task, result, gate_run, changes, expected)
 
     def _block(
         self,
@@ -404,6 +443,7 @@ class _Verify:
         result: VerifyResult,
         violations: list[Violation],
         gate_run: GateRun | None,
+        hint: str | None = None,
     ) -> None:
         result.outcome = "blocked"
         result.violations = violations
@@ -424,10 +464,12 @@ class _Verify:
                 ),
             }
         )
-        events: Events = [
-            (JournalEventType.POLICY_VIOLATION, {"kind": v.kind.value, "path": v.path[:512]})
-            for v in severe(violations)[:MAX_EVENTS]
-        ]
+        events: Events = []
+        if result.commit:
+            events.append((JournalEventType.TASK_COMMITTED, {"commit": result.commit}))
+        for v in severe(violations)[:MAX_EVENTS]:
+            data: dict[str, JsonValue] = {"kind": v.kind.value, "path": v.path[:512]}
+            events.append((JournalEventType.POLICY_VIOLATION, data))
         events.append(
             (JournalEventType.TASK_BLOCKED,
              {"reason": "policy_violation", "after_gates": gate_run is not None})
@@ -440,7 +482,8 @@ class _Verify:
             PolicyViolation,
             f"{task.id} is blocked: {count} severe post-change violation(s), the first "
             f"{first.kind.value} at {first.path}",
-            f"Review the changes and `aipm status`, then `aipm task unblock {task.id}` or "
+            hint
+            or f"Review the changes and `aipm status`, then `aipm task unblock {task.id}` or "
             f"`aipm task reset {task.id}`.",
         )
 
@@ -451,6 +494,7 @@ class _Verify:
         result: VerifyResult,
         gate_run: GateRun,
         changes: ChangeSet,
+        expected: dict[str, git.StagedId] | None = None,
     ) -> VerifyResult:
         options = self.options
         minor = result.violations
@@ -479,6 +523,7 @@ class _Verify:
         if done:
             if options.commit:
                 result.commit = self._commit(task, result, changes)
+                self._check_commit(tasks, task, result, gate_run, expected)
                 events.append((JournalEventType.TASK_COMMITTED, {"commit": result.commit}))
             result.outcome = "done"
             finished = Done(commit=result.commit, run_id=result.run_id, at=datetime.now(UTC))
@@ -518,6 +563,31 @@ class _Verify:
             reason,
             f"Fix it, for example with `aipm prompt {task.id} --fix`, then verify again.",
         )
+
+    def _check_commit(
+        self,
+        tasks: TasksDoc,
+        task: Task,
+        result: VerifyResult,
+        gate_run: GateRun,
+        expected: dict[str, git.StagedId] | None,
+    ) -> None:
+        """Block the task if the commit does not hold what the checks and gates saw (RT02-8)."""
+        if expected is None or result.commit is None:
+            return
+        got = git.committed_ids(self.root, result.commit, list(expected))
+        wrong = [
+            Violation(Kind.COMMIT_MISMATCH, path, "the commit does not hold what was verified")
+            for path in sorted(expected)
+            if got.get(path) != expected[path]
+        ]
+        if wrong:
+            hint = (
+                f"Something changed {wrong[0].path} between the checks and the commit. Review "
+                f"commit {result.commit[:12]} (`git show {result.commit[:12]}`) before you keep "
+                f"it; `git reset --soft HEAD~1` undoes it."
+            )
+            self._block(tasks, task, result, [*result.violations, *wrong], gate_run, hint)
 
     def _commit(self, task: Task, result: VerifyResult, changes: ChangeSet) -> str:
         paths = [c.path for c in changes.files if not c.path.startswith(".pm/")]

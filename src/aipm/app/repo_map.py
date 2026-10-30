@@ -10,7 +10,7 @@ counted. The result is untrusted text (T2) whenever a role reads it back.
 import os
 import re
 import stat
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,16 +18,14 @@ from pathspec import GitIgnoreSpec
 
 from aipm.domain.errors import InputRejected
 from aipm.domain.models import Mode, RepoMapDoc, RepoMapFrontMatter
+from aipm.security.paths import LLM_DENY_PATTERNS
 from aipm.security.sanitize import decode_untrusted, sanitize_text
 
 MAX_ENTRIES = 300
 MAX_IGNORE_BYTES = 262_144
 MAX_IGNORE_LINES = 2000
 MAX_NAME_LENGTH = 200
-DENY_PATTERNS = (
-    ".env*", "*.pem", "*.key", "*.p12", "*.pfx", "id_*", "*credentials*", "*secret*",
-    ".npmrc", ".pypirc", ".netrc", ".git", ".pm",
-)  # fmt: skip
+DENY_PATTERNS = LLM_DENY_PATTERNS
 MANIFESTS = (
     "pyproject.toml", "uv.lock", "setup.py", "setup.cfg", "requirements.txt", "package.json",
     "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "go.mod", "Cargo.toml", "pom.xml",
@@ -130,10 +128,12 @@ class IgnoreRules:
         return self.ignored.match_file(path) or _DENY_SPEC.match_file(path.casefold())
 
 
-def ignore_spec(root: Path) -> IgnoreRules:
-    """Files never read for LLM context: `.gitignore`, `.aipmignore` and the §7.1 deny list."""
+def ignore_spec(root: Path, *, also: Iterable[str] = ()) -> IgnoreRules:
+    """Files never read for LLM context: `.gitignore`, `.aipmignore` and the §7.1 deny list.
+    `also` adds more ignore lines (the base commit's, so an agent that edits `.gitignore`
+    cannot un-ignore a file for the AC reviewer)."""
     ignore_files = [*_read_ignore(root / ".gitignore"), *_read_ignore(root / ".aipmignore")]
-    return IgnoreRules(GitIgnoreSpec.from_lines(ignore_files))
+    return IgnoreRules(GitIgnoreSpec.from_lines([*ignore_files, *list(also)[:MAX_IGNORE_LINES]]))
 
 
 def scan_repo(root: Path, *, max_input_bytes: int) -> RepoScan:

