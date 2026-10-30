@@ -17,7 +17,7 @@ from aipm.domain.ids import is_valid_id
 from aipm.domain.models import SecurityEventKind, Task
 from aipm.domain.phase import derive_phase
 from aipm.reporting.status import StatusView, build_status, render_status, render_task
-from aipm.state.store import FileStateStore, open_store
+from aipm.state.store import FileStateStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,7 +68,7 @@ def run(
     """Run the use case."""
     root = find_repo_root(project)
     require_initialized(root)
-    store = open_store(root, redactor=runtime.user_redactor(root))
+    store = runtime.open_repo_store(root)
     if ack is not None:
         return _ack(store, ack)
     if task_id is not None and not is_valid_id("task", task_id):

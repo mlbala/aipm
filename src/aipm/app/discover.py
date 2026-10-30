@@ -62,7 +62,7 @@ from aipm.roles.prd_writer import PrdDraft, build_prd
 from aipm.security.sanitize import decode_untrusted
 from aipm.security.untrusted import Untrusted
 from aipm.state.layout import artifact_name
-from aipm.state.store import FileStateStore, open_store
+from aipm.state.store import FileStateStore
 from aipm.state.yamlio import dump_yaml
 
 DESCRIBE_QUESTION = (
@@ -303,7 +303,7 @@ def run(
     cfg = load_config(root)
     threshold, max_rounds = _check_limits(cfg.config, options)
     redactor = runtime.user_redactor(root)
-    store = open_store(root, redactor=redactor)
+    store = runtime.open_repo_store(root, redactor=redactor)
     max_bytes = cfg.config.security.max_input_kib * 1024
     answers: tuple[AnswersFile, Source] | None = None
     if options.answers is not None:

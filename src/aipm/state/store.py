@@ -7,6 +7,9 @@ directory inside the repository, and no file in it is read or written through a 
 cloned repo cannot point aipm's reads or writes elsewhere.
 
 Security events are appended to `.pm/events.jsonl` through the store as well (§6.1).
+
+A store opened with a `WriteLedger` records the sha256 of everything it writes or removes, so
+`verify` can tell aipm's own `.pm/` writes from anyone else's (ADR-0021).
 """
 
 import hashlib
@@ -19,7 +22,7 @@ from collections.abc import Generator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from filelock import FileLock, Timeout
 from pydantic import JsonValue, ValidationError
@@ -61,6 +64,9 @@ from aipm.state.layout import (
     pm_root,
 )
 from aipm.state.yamlio import MAX_YAML_BYTES, dump_yaml, load_yaml
+
+if TYPE_CHECKING:
+    from aipm.state.attempts import WriteLedger
 
 MAX_EVENTS_BYTES = 16 * 1_048_576
 MAX_ADR_FILES = 100
@@ -166,10 +172,22 @@ def _describe(exc: ValidationError, source: str, text: str, *, offset: int) -> s
 class FileStateStore:
     """`StateStore` over the files in `<repo>/.pm`."""
 
-    def __init__(self, repo_root: Path, *, redactor: Redactor | None = None) -> None:
+    def __init__(
+        self,
+        repo_root: Path,
+        *,
+        redactor: Redactor | None = None,
+        ledger: "WriteLedger | None" = None,
+    ) -> None:
         self.repo_root = Path(os.path.realpath(repo_root))
         self.root = pm_root(self.repo_root)
         self.redactor = redactor if redactor is not None else process_redactor()
+        self.ledger = ledger
+
+    def _record(self, name: str, data: bytes | None) -> None:
+        if self.ledger is not None:
+            digest = None if data is None else hashlib.sha256(data).hexdigest()
+            self.ledger.record(f".pm/{name}", digest)
 
     # ------------------------------------------------------------ directory and file safety
 
@@ -227,6 +245,7 @@ class FileStateStore:
             os.fsync(dir_fd)
         finally:
             os.close(dir_fd)
+        self._record(name, data)
 
     # ------------------------------------------------------------ cleaning
 
@@ -440,6 +459,7 @@ class FileStateStore:
             except OSError as exc:
                 message = f".pm/{ADR_DIR}/{old} cannot be removed ({exc.strerror})"
                 raise PolicyViolation(message) from None
+            self._record(f"{ADR_DIR}/{old}", None)
         return self.adr_sha256()
 
     def read_text(self, kind: ArtifactKind) -> str | None:
@@ -602,6 +622,8 @@ class FileStateStore:
             os.fsync(fd)
         finally:
             os.close(fd)
+        if self.ledger is not None:
+            self._record(EVENTS_FILE, self._read(EVENTS_FILE, limit=MAX_EVENTS_BYTES))
         return event
 
     def read_events(self) -> list[SecurityEvent]:
@@ -636,6 +658,11 @@ def _holder(path: Path) -> str:
     return f"PID {match.group(1)}, since {match.group(2)}"
 
 
-def open_store(repo_root: Path, *, redactor: Redactor | None = None) -> FileStateStore:
-    """Return the store for `<repo_root>/.pm`, with a redactor built from the full environment."""
-    return FileStateStore(repo_root, redactor=redactor)
+def open_store(
+    repo_root: Path, *, redactor: Redactor | None = None, ledger: "WriteLedger | None" = None
+) -> FileStateStore:
+    """Return the store for `<repo_root>/.pm`, with a redactor built from the full environment.
+
+    Commands pass the repository's `WriteLedger` (`aipm.app.runtime.open_repo_store`).
+    """
+    return FileStateStore(repo_root, redactor=redactor, ledger=ledger)

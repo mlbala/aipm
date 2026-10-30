@@ -11,7 +11,6 @@ from aipm.app import runtime
 from aipm.app.snapshot import load_state
 from aipm.app.workspace import find_repo_root
 from aipm.domain.phase import PhaseReport, derive_phase
-from aipm.state.store import open_store
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,5 +39,5 @@ class PhaseView:
 def run(project: Path | None) -> PhaseView:
     """Derive the phase of the repository at (or above) `project`."""
     root = find_repo_root(project)
-    state = load_state(open_store(root, redactor=runtime.user_redactor(root)))
+    state = load_state(runtime.open_repo_store(root))
     return PhaseView(str(root), derive_phase(state.snapshot), state.warnings)

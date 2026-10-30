@@ -40,7 +40,7 @@ from aipm.domain.errors import (
 from aipm.domain.models import ApprovalGate, GeneratedFile, ToolName
 from aipm.domain.phase import InputState, plan_inputs
 from aipm.state.repo_files import read_repo_bytes, write_repo_bytes
-from aipm.state.store import FileStateStore, normalized_sha256, open_store
+from aipm.state.store import FileStateStore, normalized_sha256
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,7 +228,7 @@ def _open(project: Path | None, tools: Sequence[str], *, trust: bool) -> _Sessio
     chosen = _tools(tools, loaded)
     if trust:
         require_trusted(root, loaded, command="sync-context")
-    return _Session(root, loaded, open_store(root, redactor=runtime.user_redactor(root)), chosen)
+    return _Session(root, loaded, runtime.open_repo_store(root), chosen)
 
 
 def review(project: Path | None, tools: Sequence[str] = ()) -> ContextReview:
