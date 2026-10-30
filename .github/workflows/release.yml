@@ -1,8 +1,11 @@
 name: Release
 
 # Stub until build prompt 08 adds the real pipeline: uv build, a CycloneDX SBOM, build
-# provenance attestation, checksums and a GitHub Release (ARCHITECTURE §21). Until then a
-# tag push fails here, so nothing is ever released by accident.
+# provenance attestation, checksums and a GitHub Release (ARCHITECTURE §21). Until then a tag
+# push builds and publishes nothing: the job has no permissions and no build or publish step,
+# so nothing is ever released by accident. It passes with a notice rather than failing,
+# because the run order (docs/prompts/README.md) tags v0.1.0 to v0.3.0 before prompt 08, and
+# a milestone tag is not a failed release.
 
 on:
   push:
@@ -20,7 +23,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions: {}
     steps:
-      - name: Refuse to release
+      - name: Publish nothing
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
-          echo "::error::The release pipeline arrives in build prompt 08."
-          exit 1
+          message="No release was built for ${TAG}: the release pipeline arrives in build prompt 08. Nothing was published."
+          echo "::notice::${message}"
+          echo "${message}" >> "${GITHUB_STEP_SUMMARY}"
