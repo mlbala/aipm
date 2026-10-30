@@ -773,7 +773,9 @@ sequenceDiagram
 - `aipm prompt T-007` sets `status: in_progress` and `base_sha: HEAD`, then prints the prompt. With `--copy` it also copies the prompt using `pbcopy`, `wl-copy` or `xclip`, if one is present.
 - The user runs their agent in their own working tree.
 - `aipm verify T-007` runs the same post-change checks and gates (§12.4 steps 3–4) against the diff from `base_sha` to the working tree.
-- `--commit` commits the result with the same trailers. Without it, verify only updates the task status.
+- **Attempt snapshot (§12.4 step 1).** The `aipm prompt` that starts a task records, outside the repository, the integrity hashes of git's and the agents' configuration and the hash of every file that already differed from `base_sha` or was untracked; aipm's own `.pm/` writes are recorded in a write ledger. `verify` compares the integrity hashes before git runs, takes `base_sha` from the snapshot, and counts only what changed since; tampering is judged before the G3 check ([ADR-0021](adr/0021-attempt-snapshot-and-pm-write-ledger.md)). A task without a snapshot exits 2.
+- **Outcome.** A severe violation blocks the task (exit 6). Otherwise the gates run, then the checks again. The task is `done` only if every required gate passed (the menu's, and every gate the task names), `ac_review` vetoed nothing, there was no minor violation and `--gate` was not given; else exit 3, or 8 when a required scanner is missing, or 4 when the AC reviewer reported suspected injection without `--accept-risk`. Manual verify never reverts files: a minor violation fails the attempt. The report, the gate logs and the journal are saved in `runs/<run-id>/`, and `prompt --fix` reads the newest report.
+- `--commit` commits the result with the same trailers. Without it, verify only updates the task status (`done.commit` stays empty).
 - In manual mode the sandbox applies to gates only. aipm does not control the agent the user runs.
 
 ## 13. Gates
@@ -816,7 +818,7 @@ Each placeholder must be a whole argv element, and each expanded value is its ow
 | Stack | Milestone |
 |---|---|
 | `python-uv` | v0.1 |
-| `python-pip`, `node-npm`, `node-pnpm` | v0.2 |
+| `python-pip`, `node-npm`, `node-pnpm` | v0.2 (node tools run as `node node_modules/<tool>/…`; `prepare` installs from the lockfile with install scripts off) |
 | `go`, `rust-cargo` | v0.4 |
 | `java-maven` | Later |
 
@@ -833,9 +835,9 @@ Each placeholder must be a whole argv element, and each expanded value is its ow
 |---|---|
 | `ac_trace` | Every `AC-…` ID of the task appears in at least one test file in the diff or in owned test paths, and those tests ran in `unit`. aipm reads the run's report only from `{report_file}` (pytest: `--junitxml {report_file}`; jest and vitest: the JSON reporter writing to `{report_file}`). Deleting the file before the gate runs stops a report planted in advance. Agent-written test code that forges the report while the gate runs is not stopped; that is residual risk R-1/R-5 ([SECURITY.md §15](SECURITY.md#15-residual-risks)). |
 | `ac_review` | An LLM gets the acceptance criteria and the diff (untrusted) and returns `met`, `not_met` or `unclear` per criterion. Any `not_met` fails the task (veto). All `met` adds nothing (P-6). `unclear` produces a warning. Override with `aipm verify --override-ac <ID> --reason "…"`, which is logged. |
-| `secrets` | `gitleaks` on the diff (`--log-opts` range) in v0.2; built-in regex fallback when gitleaks is absent (with a warning) |
+| `secrets` | `gitleaks` on the changed files in v0.2; built-in regex fallback when gitleaks is absent (with a warning) |
 | `sast` | `semgrep` in v0.2, with the rule packs pinned in `scanners.semgrep.configs` (§15) and `--metrics off`. Runs on owned paths. `--config auto` is never used. |
-| `deps` | `osv-scanner` on lockfiles. Every new dependency is checked for existence and first-release age in its registry (default minimum 30 days) and against `deps_add`. Typosquat warning when within edit distance 1 of a top package name. |
+| `deps` | `osv-scanner` on the changed lockfiles. Every new dependency is checked for existence and first-release age in its registry (default minimum 30 days) and against `deps_add`. A name within edit distance 1 of a popular package name (a swap counts as one edit) fails the gate, as [SECURITY.md §14.3](SECURITY.md#143-malicious-stub-agents-v02) requires. With no manifest or lockfile changed, the gate passes with "no dependency changes". |
 | Tamper heuristics (post-change check, not a gate) | On tests the task does not own: any change is a violation. On owned tests: added skip/xfail markers (`pytest.mark.skip`, `xfail`, `it.skip`, `describe.skip`, `t.Skip`), deleted test functions, or a falling assertion count. Changes to test configuration (`pytest.ini`, `[tool.pytest]`, `jest.config.*`, coverage omit lists) count as protected unless the task owns them. |
 | `container` (v0.4) | `trivy fs` / `trivy config` when a Dockerfile or IaC exists |
 
@@ -854,7 +856,10 @@ Each placeholder must be a whole argv element, and each expanded value is its ow
 - **No sampling parameters.** The gateway never sends `temperature`, `top_p` or `top_k` to any provider, and the config has no key for them. Anthropic API version `2026-10-21` returns a 400 for any of them on every model, even at default values. The `anthropic` provider requires `anthropic>=2.0.0`, the first Python SDK release that sends `2026-10-21` by default, and sets no `anthropic-version` header of its own.
 - **Cache (v0.2):**
   - Key: `sha256(provider, model, role, template_version, rendered_prompt, schema_json)`.
-  - Stored under `.pm/cache/llm/`. Disable with `--no-cache`. Its determinism rule is defined when the cache arrives in v0.2.
+  - Stored under `.pm/cache/llm/` through the state store (redacted). Disable with `--no-cache`, which neither reads nor writes.
+  - In the rendered prompt, each untrusted block's random nonce is replaced by its ordinal before hashing, so an unchanged prompt keys the same; the prompt that is sent keeps its random nonces.
+  - **Determinism rule.** The gateway sends no sampling parameters, so the model is not deterministic: the cache is what makes a rerun on unchanged input repeatable. Only callers that pass a template version read and write it; in v0.2 that is the AC reviewer, so the same diff gets the same verdict. A rerun of `discover`, `design` or `plan` asks for a new answer and never reads the cache.
+  - A cached reply is T2 like any other model output: it is validated against the role's schema again on every read and goes through the role's `postprocess`; one that fails is deleted and fetched again.
 - **Limits:** per call, `max_output_tokens` (8,000) and a request timeout (120 s). Per run, the token budget.
 - **Cost:** token usage comes from the provider. USD is computed only when `llm.pricing` defines prices for the model; aipm ships no prices, so they cannot go stale. Costs are recorded per role and per task in `runs/<id>/cost.json`.
 - **Offline:** `provider: openai-compatible` with `base_url: http://localhost:11434/v1` uses Ollama. No network calls are made except to `base_url`.
@@ -925,7 +930,7 @@ scanners:                             # v0.2
   extra: {}                           # config-defined scanners {name: {run: [argv]}}; part of the execution surface
 security:                             # tighten-only
   require_sandbox: false              # true = refuse to run agents or gates without a sandbox
-  network: {agent: api-only, gates: none, prepare: registries}
+  network: {agent: api-only, gates: none, prepare: registries}   # none | api-only | registries | open
   allow_new_dependencies: ask         # ask | allow | deny
   min_dependency_age_days: 30
   extra_protected_paths: []
@@ -938,6 +943,8 @@ logging: {level: info, json: false}
 ```
 
 **Environment variables:** `AIPM_CONFIG`, `AIPM_NO_COLOR`, `AIPM_NON_INTERACTIVE`, `AIPM_LOG_LEVEL`, and `AIPM_LLM__MODELS__DEFAULT` (the `__` separator selects a nested key). An `AIPM_*` variable that sets a user-only key makes aipm exit 6, and each `AIPM_*` relaxation of a tighten-only key is printed as a warning. The user config (wherever `AIPM_CONFIG`, `HOME` or `XDG_CONFIG_HOME` puts it) must be an absolute path to a regular file outside the repository, and the trust store (wherever `HOME` or `XDG_STATE_HOME` puts it) must be outside the repository (exit 6; the log file is then not written), because tools such as pipenv load a repository's `.env` into the environment ([ADR-0018](adr/0018-environment-cannot-set-user-only-keys.md)). aipm has no telemetry, so there is no telemetry setting.
+
+**The `open` network profile** (v0.2) is honoured only when the user config file itself sets it; a repository value can never relax `security.network.*`, and an `AIPM_*` variable that opens it exits 6, because a repository `.env` can fill the environment (R-8). `srt` has no allowlist entry for every domain, so a process whose profile is `open` exits 8 under `srt`; `dispatch.sandbox: none` in the user config is the explicit way to run without the sandbox ([ADR-0020](adr/0020-srt-runs-commands-through-a-shell.md)).
 
 ## 16. CLI specification
 

@@ -44,7 +44,7 @@ It also launches programs that write and run code. Any of those texts can carry 
 | Asset | Where it lives | Why it matters |
 |---|---|---|
 | LLM and agent API keys | Environment or OS keychain | Financial abuse, data access |
-| Developer credentials | `~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.kube`, `~/.docker`, `~/.netrc`, `~/.git-credentials`, keychains, browser profiles | Lateral movement |
+| Developer credentials | `~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.kube`, `~/.docker`, `~/.netrc`, `~/.git-credentials`, `~/.config/gh`, `~/.npmrc`, `~/.pypirc`, `~/.cargo/credentials`, `~/.azure`, `~/.config/op`, keychains, browser profiles | Lateral movement |
 | Source code and `.pm/` | Target repository | Integrity of the product; confidentiality of private code |
 | The user's git branches and remote | `.git/` | Integrity, supply chain |
 | Execution trust decisions | User state dir (`trust.json`) | Gatekeeper for all command execution |
@@ -276,6 +276,10 @@ The coding agent and gate processes run in the sandbox (§9), with a scrubbed en
 
   `denyWrite` always includes `.git/` (except git internals that aipm itself manages) and the agent's global settings, hooks, plugins and skills files.
 
+  In manual mode the agent's config home is the user's own, so gates may not read `~/.claude`, `~/.codex`, `~/.gemini` or `~/.copilot` (some hold login tokens).
+
+- **How aipm drives `srt` 0.0.81** ([ADR-0020](adr/0020-srt-runs-commands-through-a-shell.md)). The settings file is written with mode 0600 in the per-attempt temp dir. Every path in it is literal (`{"path": …, "literal": true}`), `strictAllowlist` is set, and argv elements that `srt`'s shell could read as more than one word are refused (exit 6). A probe runs before `srt` is relied on. `open` cannot be expressed in `srt`'s allowlist and exits 8 under it. `srt` exits 0 when its command dies of SIGTERM, so a gate with a test report passes only when the report shows tests ran and none failed.
+
 - **Isolated config home.** Agents run with a per-run config home when the tool supports relocation: `CLAUDE_CONFIG_DIR` for Claude Code and `CODEX_HOME` for Codex. Verify these names at implementation time. This prevents an injected agent from writing persistent hooks or settings into the user's global agent config. When relocation is not supported, aipm adds the global config files to `denyWrite` and hashes them before and after each attempt; any change is a severe violation.
 
 ### 9.2 Protected paths
@@ -334,11 +338,11 @@ Each adapter builds its argv in code from fixed fragments. The policy rejects an
 ## 11. Git safety
 
 - **Hardened invocation.** aipm runs every git command as `git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c diff.external= -c core.pager=cat --no-pager …`. Diff commands also get `--no-ext-diff` and `--no-textconv`.
-- **Integrity snapshots.** Before and after each agent attempt, aipm hashes `.git/config`, `.git/config.worktree`, `.git/info/attributes`, `.git/hooks/` and the worktree's `.git` file. Any difference is a severe violation.
+- **Integrity snapshots.** Before and after each agent attempt, aipm hashes `.git/config`, `.git/config.worktree`, `.git/info/attributes`, `.git/info/exclude`, `.git/hooks/`, the worktree's `.git` file, the files those configs include, the user's global git config and the agents' global settings, hooks and skills. Any difference is a severe violation. The hashes are compared before any git command runs, because git reads these files (a clean filter or an fsmonitor named there would run). In manual mode the "before" hashes are the attempt snapshot outside the repository ([ADR-0021](adr/0021-attempt-snapshot-and-pm-write-ledger.md)).
 - **What aipm never does:** push, fetch, change remotes, update submodules, rewrite the user's branches, or force-update any ref other than its own `aipm/task/*` branches.
 - **Commits.**
-  - Commits are authored with the user's git identity and carry `Aipm-*` trailers.
-  - Signing follows the user's global git config. Repo-local `gpg.program` and `commit.gpgsign` overrides are ignored: aipm passes `-c gpg.program=<value from user global config>`.
+  - Commits are authored with the user's git identity and carry `Aipm-*` trailers. They run with `--no-verify` and `core.hooksPath=/dev/null`, so no hook runs, and they commit exactly the task's paths (literal pathspecs).
+  - Signing follows the user's global git config. Repo-local `commit.gpgsign`, `gpg.format`, `gpg.program`, `gpg.ssh.program` and `gpg.x509.program` are ignored: aipm passes `-c <key>=<value from the user's global config, else git's default>`.
 - **`aipm merge`** fast-forwards only, after showing `git log --oneline <user-branch>..aipm/integration` and asking for confirmation.
 
 ## 12. Supply chain
@@ -456,6 +460,8 @@ Fake `claude`/`codex`/`copilot`/`gemini` binaries placed on `PATH`. Each scenari
 | Emits 50 MB of output | Capped |
 | Modifies its global config file | Severe violation (when there is no isolated config home) |
 
+In v0.2 (manual mode, no dispatch) each scenario is applied to the working tree and checked with `aipm verify` (`tests/integration/test_verify_cli.py`); the timeout, daemon and output scenarios run as gates (`tests/security/test_gates.py`). "Prints `AIPM-DONE`" needs dispatch and arrives with build prompt 07.
+
 ### 14.4 Other testing
 
 - **Property tests:** hypothesis on `safe_relpath`, `safe_rel_glob`, the command policy, the sanitizer and the redactor.
@@ -474,6 +480,9 @@ Fake `claude`/`codex`/`copilot`/`gemini` binaries placed on `PATH`. Each scenari
 | R-7 | macOS `sandbox-exec` is deprecated by Apple | Platform | Track `srt` updates; fail closed under `require_sandbox` |
 | R-8 | `AIPM_*` variables may relax tighten-only keys, and a tool that loads a repository's `.env` (pipenv) hands that to the repository | The environment is the user's own way to change settings for one shell, and the behaviour is relied on (ADR-0018) | Do not load repository `.env` files into the shell that runs aipm; every relaxation is printed as a warning on every run |
 | R-9 | Trust covers the argv, not the code it loads: `pytest` imports `conftest.py`, and a repo-relative executable can change after `git pull` without changing the surface hash | Gates must run the project's own code | Review changes to test configuration and scripts after pulling; run gates in the sandbox (v0.2) |
+| R-10 | In manual mode `verify` cannot tell the user's changes from the agent's: anything changed after `aipm prompt` counts. Answering Claude Code's "always allow" writes `.claude/settings.local.json`, a protected path, and blocks the task | aipm does not run the agent in manual mode (ARCHITECTURE §12.7) | Review the blocked task with `aipm status`, then `aipm task unblock` or `reset` (each is recorded) |
+| R-11 | `verify` does not look inside directories git ignores as a whole (`.venv/`, `node_modules/`), so a changed test runner or `.pth` file there goes unseen; and in manual mode, an agent's edit to a `.pm/` file is carried into the ledger when a later aipm command loads and rewrites that file (a changed plan then shows as stale, exit 2) | Tool directories are rebuilt by the package manager; the ledger records aipm's writes, and some writes start from the file on disk | Run `prepare` from a clean tool directory (`npm ci` replaces `node_modules`); never pass `--accept-stale` to `verify` without reviewing what changed in the plan |
+| R-12 | A gate without a test report passes on exit 0, and under `srt` a command killed by SIGTERM exits 0; lint and type gates honour configuration files and suppression comments (`ruff.toml`, `# noqa`) inside the paths a task owns | Only report gates can be judged on their content (ADR-0020); a task may own its package's tool config | Give every gate that runs project code a `{report_file}`; review owned tool config at G3 and before `aipm merge` |
 
 ## 16. Vulnerability disclosure (root `SECURITY.md`)
 

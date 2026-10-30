@@ -59,7 +59,7 @@ MAX = Tighten("max")
 MIN_DURATION = Tighten("min-duration")
 UNION = Tighten("union")
 INTERSECTION = Tighten("intersection")
-NETWORK_RANK = Tighten("rank", ("none", "api-only", "registries"))
+NETWORK_RANK = Tighten("rank", ("none", "api-only", "registries", "open"))
 
 
 def _as_value_error[T](check: Callable[[Any], T], value: object) -> T:

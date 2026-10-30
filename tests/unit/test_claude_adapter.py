@@ -87,9 +87,17 @@ def test_dispatch_arrives_in_v03() -> None:
         adapter.parse_result(ProcessResult(("x",), 0, b"", b"", False, False, 0.0))
 
 
-def test_context_files_are_agents_md_and_claude_md() -> None:
+def test_context_files_are_agents_md_claude_md_and_the_v02_extras() -> None:
+    """v0.2 adds aipm's subagents and skills (review 01, D-3)."""
     files = claude_code.create().context_files(clinic_context())
-    assert [f.path for f in files] == ["AGENTS.md", "CLAUDE.md"]
+    assert [f.path for f in files] == [
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".claude/agents/aipm-test-writer.md",
+        ".claude/agents/aipm-reviewer.md",
+        ".claude/skills/aipm-task-protocol/SKILL.md",
+        ".claude/skills/aipm-run-checks/SKILL.md",
+    ]
     assert files[1].block.startswith("@AGENTS.md\n")
 
 

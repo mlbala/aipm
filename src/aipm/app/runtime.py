@@ -5,10 +5,13 @@ from pathlib import Path
 from aipm.app.workspace import find_repo_root
 from aipm.config.loader import user_redact_patterns
 from aipm.domain.errors import AipmError
+from aipm.llm.cache import ResponseCache
 from aipm.observability.logging import configure_logging, log_dir
 from aipm.observability.redaction import process_redactor
 from aipm.security.paths import is_within
 from aipm.security.redact import Redactor
+from aipm.state.attempts import WriteLedger
+from aipm.state.store import FileStateStore, open_store
 
 _STDERR_LEVELS = ("warning", "info", "debug")
 
@@ -53,3 +56,18 @@ def user_redactor(root: Path | None = None) -> Redactor:
     except AipmError:
         patterns = []
     return process_redactor(patterns)
+
+
+def open_repo_store(root: Path, *, redactor: Redactor | None = None) -> FileStateStore:
+    """The repository's `.pm/` store for a command: the user's redactor, and the write ledger
+    that lets `verify` tell aipm's own `.pm/` writes from anyone else's (ADR-0021)."""
+    return open_store(
+        root,
+        redactor=redactor if redactor is not None else user_redactor(root),
+        ledger=WriteLedger(root),
+    )
+
+
+def llm_cache(store: FileStateStore) -> ResponseCache:
+    """The LLM response cache in `.pm/cache/llm/` (ARCHITECTURE §14)."""
+    return store

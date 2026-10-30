@@ -53,7 +53,7 @@ from aipm.reporting.worksheet import WORKSHEET_FILE, render_worksheet
 from aipm.roles import planner
 from aipm.roles.planner import MenuGate, PlanDraft
 from aipm.security.untrusted import Untrusted
-from aipm.state.store import FileStateStore, normalized_sha256, open_store
+from aipm.state.store import FileStateStore, normalized_sha256
 from aipm.state.yamlio import dump_yaml
 
 _MEDIUM_UP = frozenset({Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL})
@@ -133,7 +133,7 @@ def run(project: Path | None, *, options: PlanOptions, prompter: PlanPrompter | 
     require_initialized(root)
     max_tasks = _max_tasks(options.max_tasks)
     loaded = load_config(root)
-    store = open_store(root, redactor=runtime.user_redactor(root))
+    store = runtime.open_repo_store(root)
     with store.lock():
         snapshot, _ = read_snapshot(
             store, coverage_threshold=loaded.config.discover.coverage_threshold, trusted=False

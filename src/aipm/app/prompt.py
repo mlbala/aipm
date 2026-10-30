@@ -8,10 +8,11 @@ refused, and so is one whose dependencies are not finished, unless `--force` (ex
 The prompt is compiled without an LLM (`aipm.adapters.compiler`), written to
 `.pm/prompts/<T-ID>.<tool>.md` through the state store (redacted), and the task becomes
 `in_progress` with `base_sha` set to HEAD (kept if the task was already in progress). What is
-printed, written to `--out` or copied is exactly the text the store wrote.
+printed, written to `--out` or copied is exactly the text the store wrote. When the task starts,
+its attempt snapshot is taken outside the repository, for `verify` (ADR-0021).
 
-`--fix` adds the failing output of the last verify. `verify` arrives in v0.2, so for now the
-saved gate report is named with `--report FILE`.
+`--fix` adds the failing output of the last verify: the newest report `aipm verify` saved in
+`.pm/runs/`, or the gate report named with `--report FILE`.
 """
 
 import os
@@ -25,6 +26,7 @@ from aipm.adapters.compiler import compile_task_spec, render_within_budget
 from aipm.adapters.registry import get_adapter, parse_tool
 from aipm.app import runtime
 from aipm.app.approve import require_inputs
+from aipm.app.attempt import take_snapshot
 from aipm.app.inputs import read_repo_file
 from aipm.app.project_context import build_context
 from aipm.app.snapshot import read_snapshot
@@ -39,8 +41,9 @@ from aipm.execution.clipboard import copy_text
 from aipm.execution.git import head_sha
 from aipm.reporting.worksheet import WORKSHEET_FILE, render_worksheet
 from aipm.security.paths import safe_relpath
+from aipm.state.attempts import load_snapshot
 from aipm.state.repo_files import read_repo_bytes, write_repo_bytes
-from aipm.state.store import FileStateStore, open_store
+from aipm.state.store import FileStateStore
 from aipm.state.yamlio import load_yaml
 
 _FINISHED = frozenset({TaskStatus.DONE, TaskStatus.SKIPPED})
@@ -101,11 +104,6 @@ def _check_options(options: PromptOptions) -> None:
         raise UsageError(f"{options.task_id!r} is not a task ID such as T-007")
     if options.report is not None and not options.fix:
         raise UsageError("--report goes with --fix")
-    if options.fix and options.report is None:
-        raise UsageError(
-            "--fix needs the failing checks: `aipm verify` saves them from v0.2 on",
-            hint="For now, pass a saved gate report with --report FILE.",
-        )
 
 
 def _check_task(task: Task, tasks: TasksDoc, options: PromptOptions) -> list[str]:
@@ -136,6 +134,22 @@ def _check_task(task: Task, tasks: TasksDoc, options: PromptOptions) -> list[str
     return [f"--force: {task.id} started before {', '.join(unfinished)} finished"]
 
 
+def parse_report(text: str, relpath: str, task_id: str) -> GateReport:
+    """A gate report (YAML or JSON), checked against the task; all of it is T2."""
+    raw = load_yaml(text, source=relpath)
+    try:
+        report = GateReport.model_validate(raw if raw is not None else {})
+    except ValidationError as exc:
+        first = exc.errors()[0]
+        where = ".".join(str(p) for p in first["loc"]) or "(file)"
+        raise SchemaError(f"{relpath} is not a gate report: {where}: {first['msg']}") from None
+    if report.task != task_id:
+        raise UsageError(f"{relpath} is the report of {report.task}, not {task_id}")
+    if not report.failures():
+        raise UsageError(f"{relpath} shows no failing check; there is nothing to fix")
+    return report
+
+
 def load_report(root: Path, given: Path, task_id: str, *, max_bytes: int) -> GateReport:
     """Read a saved gate report (YAML or JSON) from inside the repository; all of it is T2."""
     file = read_repo_file(root, given, max_bytes=max_bytes, what="--report")
@@ -143,18 +157,19 @@ def load_report(root: Path, given: Path, task_id: str, *, max_bytes: int) -> Gat
         text = file.data.decode("utf-8")
     except UnicodeDecodeError:
         raise InputRejected(f"--report {file.relpath} is not valid UTF-8") from None
-    raw = load_yaml(text, source=file.relpath)
-    try:
-        report = GateReport.model_validate(raw if raw is not None else {})
-    except ValidationError as exc:
-        first = exc.errors()[0]
-        where = ".".join(str(p) for p in first["loc"]) or "(file)"
-        raise SchemaError(f"{file.relpath} is not a gate report: {where}: {first['msg']}") from None
-    if report.task != task_id:
-        raise UsageError(f"{file.relpath} is the report of {report.task}, not {task_id}")
-    if not report.failures():
-        raise UsageError(f"{file.relpath} shows no failing check; there is nothing to fix")
-    return report
+    return parse_report(text, file.relpath, task_id)
+
+
+def latest_report(store: FileStateStore, task_id: str) -> GateReport:
+    """The newest report `aipm verify` saved for the task (`--fix` without `--report`)."""
+    text = store.latest_report(task_id)
+    if text is None:
+        raise UsageError(
+            f"--fix needs the failing checks, and {task_id} has no saved verify report",
+            hint=f"Run `aipm verify {task_id}` first, or pass a saved gate report with "
+            "--report FILE.",
+        )
+    return parse_report(text, f"the latest verify report of {task_id}", task_id)
 
 
 def write_out(root: Path, given: Path, text: str, *, extra_protected: Sequence[str] = ()) -> str:
@@ -199,7 +214,7 @@ def run(project: Path | None, options: PromptOptions) -> PromptResult:
     tool = parse_tool(options.tool, cfg.dispatch.default_tool)
     adapter = get_adapter(tool)
     require_trusted(root, loaded, command="prompt")
-    store = open_store(root, redactor=runtime.user_redactor(root))
+    store = runtime.open_repo_store(root)
     with store.lock():
         snapshot, _ = read_snapshot(
             store, coverage_threshold=cfg.discover.coverage_threshold, trusted=True
@@ -212,11 +227,12 @@ def run(project: Path | None, options: PromptOptions) -> PromptResult:
         task = next((t for t in tasks.tasks if t.id == options.task_id), None) if tasks else None
         if tasks is None or task is None:
             raise UsageError(f"there is no task {options.task_id} in .pm/tasks.yaml")
+        saved = latest_report(store, task.id) if options.fix and options.report is None else None
         warnings += _check_task(task, tasks, options)
         report = (
             load_report(root, options.report, task.id, max_bytes=cfg.security.max_input_kib * 1024)
             if options.report is not None
-            else None
+            else saved
         )
         keep = task.status is TaskStatus.IN_PROGRESS and task.base_sha is not None
         base_sha = task.base_sha if keep and task.base_sha is not None else head_sha(root)
@@ -227,6 +243,13 @@ def run(project: Path | None, options: PromptOptions) -> PromptResult:
             task.id, tool.value, rendered.text, allowed_url_domains=ctx.allowed_url_domains
         )
         _record_start(store, tasks, task, base_sha)
+        if not keep:
+            take_snapshot(root, task.id, base_sha, cfg)
+        elif load_snapshot(root, task.id) is None:
+            warnings.append(
+                f"{task.id} started before aipm kept attempt snapshots, so `aipm verify` will "
+                f"refuse it: run `aipm task reset {task.id}`, then `aipm prompt {task.id}`"
+            )
     out = (
         write_out(root, options.out, text, extra_protected=cfg.security.extra_protected_paths)
         if options.out is not None

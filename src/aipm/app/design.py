@@ -48,7 +48,7 @@ from aipm.roles import architect, threat_modeler
 from aipm.roles.architect import ArchitectureDraft
 from aipm.roles.threat_modeler import ThreatModelDraft
 from aipm.security.untrusted import Untrusted
-from aipm.state.store import FileStateStore, normalized_sha256, open_store
+from aipm.state.store import FileStateStore, normalized_sha256
 
 
 class DesignRejected(AipmError):
@@ -116,7 +116,7 @@ def run(
     require_initialized(root)
     loaded = load_config(root)
     redactor = runtime.user_redactor(root)
-    store = open_store(root, redactor=redactor)
+    store = runtime.open_repo_store(root, redactor=redactor)
     with store.lock():
         snapshot, _ = read_snapshot(
             store, coverage_threshold=loaded.config.discover.coverage_threshold, trusted=False

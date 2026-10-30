@@ -1,0 +1,15 @@
+#!/bin/sh
+# Stub osv-scanner (build prompt 06): `osv-scanner scan source --format json --output FILE
+# -L <lockfile>...`. Reports a critical advisory for a lockfile that names vulnerable-pkg.
+if [ "$1" = "--version" ]; then echo "osv-scanner version: 2.7.0"; exit 0; fi
+[ "$1 $2" = "scan source" ] || { echo "stub osv-scanner: unsupported: $*" >&2; exit 2; }
+out=""; prev=""; hit=""
+for arg in "$@"; do
+  [ "$prev" = "--output" ] && out="$arg"
+  if [ "$prev" = "-L" ] && grep -q "vulnerable-pkg" "$arg" 2>/dev/null; then hit="$arg"; fi
+  prev="$arg"
+done
+if [ -z "$hit" ]; then printf '{"results":[]}\n' > "$out"; exit 0; fi
+printf '{"results":[{"source":{"path":"%s","type":"lockfile"},"packages":[{"package":{"name":"vulnerable-pkg","version":"1.0.0","ecosystem":"PyPI"},"vulnerabilities":[{"id":"GHSA-fake-0001","summary":"Remote code execution"}],"groups":[{"ids":["GHSA-fake-0001"],"max_severity":"9.8"}]}]}]}\n' \
+  "$hit" > "$out"
+exit 1

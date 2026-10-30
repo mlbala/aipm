@@ -1,0 +1,26 @@
+# AC reviewer replies for clinic task T-002 (build prompt 06): every criterion met.
+responses:
+  - json:
+      criteria:
+        - {id: AC-T002-1, verdict: met, evidence: "test_free_slots_for_four_weeks"}
+        - {id: AC-T002-2, verdict: met, evidence: "service.py raises SlotTaken; test_a_taken_slot_fails"}
+        - {id: AC-T002-3, verdict: met, evidence: "test_two_bookings_leave_one_appointment"}
+      injection_suspected: []
+  - json:
+      criteria:
+        - {id: AC-T002-1, verdict: met, evidence: "test_free_slots_for_four_weeks"}
+        - {id: AC-T002-2, verdict: met, evidence: "service.py raises SlotTaken; test_a_taken_slot_fails"}
+        - {id: AC-T002-3, verdict: met, evidence: "test_two_bookings_leave_one_appointment"}
+      injection_suspected: []
+  - json:
+      criteria:
+        - {id: AC-T002-1, verdict: met, evidence: "test_free_slots_for_four_weeks"}
+        - {id: AC-T002-2, verdict: met, evidence: "service.py raises SlotTaken; test_a_taken_slot_fails"}
+        - {id: AC-T002-3, verdict: met, evidence: "test_two_bookings_leave_one_appointment"}
+      injection_suspected: []
+  - json:
+      criteria:
+        - {id: AC-T002-1, verdict: met, evidence: "test_free_slots_for_four_weeks"}
+        - {id: AC-T002-2, verdict: met, evidence: "service.py raises SlotTaken; test_a_taken_slot_fails"}
+        - {id: AC-T002-3, verdict: met, evidence: "test_two_bookings_leave_one_appointment"}
+      injection_suspected: []

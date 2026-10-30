@@ -21,6 +21,10 @@ MAX_REPO_FILE_BYTES = 1_048_576
 _TMP_MARK = ".aipm-tmp-"
 
 
+class _MissingDir(UsageError):
+    """A directory on the way to a repository file does not exist."""
+
+
 def _parent(root: Path, relpath: str) -> Path:
     """The real parent directory of `relpath` under `root`; no component may be a link."""
     parts = relpath.split("/")
@@ -32,15 +36,39 @@ def _parent(root: Path, relpath: str) -> Path:
         try:
             info = os.lstat(current)
         except FileNotFoundError:
-            raise UsageError(f"the directory of {relpath} does not exist") from None
+            raise _MissingDir(f"the directory of {relpath} does not exist") from None
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             raise PolicyViolation(f"{relpath}: {part} is a link or not a directory")
     return current
 
 
+def make_repo_dirs(root: Path, relpath: str) -> None:
+    """Create the missing directories of `relpath` (mode 0755); a link on the way exits 6.
+
+    For aipm's own generated directories only (`.claude/agents`, `.claude/skills/aipm-*`).
+    """
+    parts = relpath.split("/")
+    if not relpath or any(p in ("", ".", "..") for p in parts):
+        raise UsageError(f"not a plain relative path: {relpath!r}")
+    current = root
+    for part in parts[:-1]:
+        current = current / part
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            current.mkdir(mode=0o755)
+            info = os.lstat(current)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise PolicyViolation(f"{relpath}: {part} is a link or not a directory")
+
+
 def read_repo_bytes(root: Path, relpath: str, *, limit: int = MAX_REPO_FILE_BYTES) -> bytes | None:
-    """The bytes of `root/relpath`, or None if it does not exist. Never follows a link."""
-    target = _parent(root, relpath) / relpath.rsplit("/", 1)[-1]
+    """The bytes of `root/relpath`, or None if it (or its directory) does not exist. Never
+    follows a link."""
+    try:
+        target = _parent(root, relpath) / relpath.rsplit("/", 1)[-1]
+    except _MissingDir:
+        return None
     try:
         fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:

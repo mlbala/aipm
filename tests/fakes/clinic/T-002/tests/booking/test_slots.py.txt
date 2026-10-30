@@ -1,0 +1,39 @@
+"""T-002: slots and appointments."""
+
+from datetime import datetime, timedelta
+
+import pytest
+
+from clinic.booking.service import Booking, SlotTaken
+
+NOW = datetime(2026, 11, 2, 9, 0)
+
+
+def clinic() -> Booking:
+    return Booking(slots={"dr-a": [NOW + timedelta(days=d) for d in (1, 2, 40)]})
+
+
+def test_free_slots_for_four_weeks() -> None:
+    """AC-T002-1: free slots per doctor are listed for the next four weeks."""
+    assert clinic().free_slots("dr-a", NOW) == [
+        NOW + timedelta(days=1),
+        NOW + timedelta(days=2),
+    ]
+
+
+def test_a_taken_slot_fails() -> None:
+    """AC-T002-2: booking a taken slot fails with a clear error."""
+    booking = clinic()
+    booking.book("dr-a", NOW + timedelta(days=1), "p1")
+    with pytest.raises(SlotTaken, match="already taken"):
+        booking.book("dr-a", NOW + timedelta(days=1), "p2")
+
+
+def test_two_bookings_leave_one_appointment() -> None:
+    """AC-T002-3: two bookings for the same slot leave exactly one appointment."""
+    booking = clinic()
+    slot = NOW + timedelta(days=2)
+    booking.book("dr-a", slot, "p1")
+    with pytest.raises(SlotTaken):
+        booking.book("dr-a", slot, "p2")
+    assert list(booking.taken.values()) == ["p1"]

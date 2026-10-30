@@ -70,6 +70,44 @@ def git_commit_all(repo: Path, message: str) -> None:
     )  # fmt: skip
 
 
+def run_git(repo: Path, *args: str) -> str:
+    """Test tooling: git in `repo` with no user or system config and no hooks; returns stdout."""
+    out = subprocess.run(
+        [
+            "git",
+            "-c", "core.hooksPath=/dev/null",
+            "-c", "commit.gpgsign=false",
+            "-c", "user.name=aipm test",
+            "-c", "user.email=test@example.invalid",
+            *args,
+        ],
+        cwd=repo,
+        env=_git_env(repo.parent / "home"),
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )  # fmt: skip
+    return out.stdout.decode("utf-8", errors="replace")
+
+
+def run_program(
+    argv: list[str], *, env: dict[str, str], cwd: Path, timeout: float = 30
+) -> "subprocess.CompletedProcess[str]":
+    """Test tooling: run a program (a shell script under test) with a constructed environment,
+    no stdin and no controlling terminal, so nothing can wait for an answer."""
+    return subprocess.run(
+        argv,
+        cwd=cwd,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+        start_new_session=True,
+    )
+
+
 @pytest.fixture
 def tmp_repo(tmp_path: Path) -> Path:
     """A temporary git repository on `main` with one commit."""

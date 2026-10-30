@@ -1,0 +1,19 @@
+#!/bin/sh
+# Stub trivy (build prompt 06): `trivy fs --format json --output FILE ... <target>`. Reports a
+# secret for each scanned file that holds FAKE-LEAK-FOR-TESTS.
+if [ "$1" = "--version" ]; then echo "Version: 0.76.1"; exit 0; fi
+[ "$1" = "fs" ] || { echo "stub trivy: unsupported: $*" >&2; exit 2; }
+out=""; prev=""; target=""
+for arg in "$@"; do
+  [ "$prev" = "--output" ] && out="$arg"
+  prev="$arg"; target="$arg"
+done
+sep=""
+printf '{"Results":[' > "$out"
+for f in $(grep -rl "FAKE-LEAK-FOR-TESTS" "$target" 2>/dev/null); do
+  printf '%s{"Target":"%s","Secrets":[{"RuleID":"fake-token","Severity":"HIGH","Title":"Fake token","StartLine":1}]}' \
+    "$sep" "${f#"$target"/}" >> "$out"
+  sep=","
+done
+printf ']}\n' >> "$out"
+exit 0

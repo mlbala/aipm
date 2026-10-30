@@ -4,12 +4,11 @@ argv lists only, a timeout, a constructed environment (never a copy of `os.envir
 process group, stdin closed unless given, and an output cap. On timeout the whole process group
 gets SIGTERM, then SIGKILL after `KILL_GRACE_S`. When the leader exits, anything it left behind
 in its group is killed too. A child that starts its own session escapes the group kill; it can
-delay the call by at most `DRAIN_S` and keeps running until the sandbox (build prompt 06)
-contains it.
+delay the call by at most `DRAIN_S`, and only the sandbox contains it.
 
 Each of stdout and stderr is capped at `max_output_bytes`; the excess is read and dropped, and
-the drop is recorded. Sandboxing arrives with build prompt 06: until then any profile is refused
-(exit 8) rather than ignored.
+the drop is recorded. A sandbox profile is applied here through `sandbox.wrap`, so a caller cannot
+forget it; a profile that names no sandbox program is refused (exit 8), never ignored.
 """
 
 import asyncio
@@ -26,8 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, cast
 
-from aipm.domain.errors import MissingCapability, PolicyViolation, UsageError
-from aipm.execution.sandbox import SandboxProfile
+from aipm.domain.errors import PolicyViolation, UsageError
+from aipm.execution.sandbox import SandboxProfile, wrap
 
 BASE_ENV_ALLOWLIST: tuple[str, ...] = (
     "PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "USER",
@@ -112,11 +111,6 @@ def _check_call(
     max_output_bytes: int,
     sandbox: SandboxProfile | None,
 ) -> tuple[tuple[str, ...], dict[str, str]]:
-    if sandbox is not None:
-        raise MissingCapability(
-            "sandboxed execution is not available yet (build prompt 06)",
-            hint="Run without a sandbox profile, or wait for aipm v0.2.",
-        )
     if isinstance(argv, str) or not isinstance(argv, Sequence):
         raise UsageError("argv must be a list of strings, never a command string")
     items: Sequence[object] = argv  # pyright: ignore[reportUnknownVariableType]
@@ -130,7 +124,8 @@ def _check_call(
         raise UsageError("max_output_bytes must not be negative")
     if not cwd.is_dir():
         raise UsageError(f"working directory {cwd} does not exist")
-    return tuple(str(arg) for arg in items), _check_env(env)
+    checked = tuple(str(arg) for arg in items)
+    return (wrap(checked, sandbox) if sandbox is not None else checked), _check_env(env)
 
 
 class _Capture:

@@ -1,7 +1,7 @@
 """Schemas for `.pm/` artifacts and the data passed between components (ARCHITECTURE §6.3).
 
-Pydantic v2 models with `extra="forbid"`, length limits, ID regexes and enums. The placeholders
-at the end belong to later build prompts, which replace them.
+Pydantic v2 models with `extra="forbid"`, length limits, ID regexes and enums, plus the frozen
+dataclasses of `changes`, which aipm builds itself and never parses from text.
 """
 
 from dataclasses import dataclass
@@ -10,6 +10,7 @@ from typing import Any
 from aipm.domain.models.artifacts import (
     APPROVED_NAMES,
     AcceptanceCriterion,
+    AcOverride,
     AdrDoc,
     AdrFrontMatter,
     Answer,
@@ -48,6 +49,8 @@ from aipm.domain.models.artifacts import (
     StaleOverride,
     Stride,
     Task,
+    TaskChange,
+    TaskChangeAction,
     TasksDerivedFrom,
     TasksDoc,
     TaskSize,
@@ -73,6 +76,14 @@ from aipm.domain.models.base import (
     ToolName,
     YamlArtifact,
 )
+from aipm.domain.models.changes import (
+    GITLINK_MODE,
+    SYMLINK_MODE,
+    ChangeSet,
+    ChangeStatus,
+    FileChange,
+    GateWorkspace,
+)
 from aipm.domain.models.events import (
     JournalEvent,
     JournalEventType,
@@ -82,6 +93,7 @@ from aipm.domain.models.events import (
 from aipm.domain.models.gates import (
     BuiltinGate,
     GateDef,
+    GateFinding,
     GateReport,
     GateResult,
     GateStatus,
@@ -108,7 +120,10 @@ __all__ = [
     "ADR_DIR",
     "APPROVED_NAMES",
     "ARTIFACT_FILES",
+    "GITLINK_MODE",
     "SCHEMA_VERSION",
+    "SYMLINK_MODE",
+    "AcOverride",
     "AcceptanceCriterion",
     "AdrDoc",
     "AdrFrontMatter",
@@ -127,6 +142,7 @@ __all__ = [
     "BlockedReason",
     "BuiltinGate",
     "ChangeSet",
+    "ChangeStatus",
     "Component",
     "ComponentInfo",
     "Coverage",
@@ -136,13 +152,16 @@ __all__ = [
     "Ecosystem",
     "Feature",
     "FeatureInfo",
+    "FileChange",
     "FrontMatter",
     "GateCommand",
     "GateDef",
     "GateFailure",
+    "GateFinding",
     "GateReport",
     "GateResult",
     "GateStatus",
+    "GateWorkspace",
     "GeneratedFile",
     "JournalEvent",
     "JournalEventType",
@@ -178,6 +197,8 @@ __all__ = [
     "StrictModel",
     "Stride",
     "Task",
+    "TaskChange",
+    "TaskChangeAction",
     "TaskSize",
     "TaskSpec",
     "TaskStatus",
@@ -197,9 +218,4 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class Workspace:
-    """Placeholder for a worktree or working tree that gates and agents run in."""
-
-
-@dataclass(frozen=True, slots=True)
-class ChangeSet:
-    """Placeholder for the diff facts that post-change checks inspect (prompt 06)."""
+    """Placeholder for the worktree an agent is dispatched into (build prompt 07)."""

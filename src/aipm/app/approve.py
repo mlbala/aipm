@@ -51,7 +51,7 @@ from aipm.domain.phase import InputCheck, InputState, plan_inputs
 from aipm.reporting.plan_review import PlanFacts, plan_facts
 from aipm.security.sanitize import sanitize_text
 from aipm.state.layout import artifact_name
-from aipm.state.store import FileStateStore, open_store
+from aipm.state.store import FileStateStore
 from aipm.state.yamlio import load_yaml
 
 PRD_FILE = artifact_name(ArtifactKind.PRD)
@@ -129,7 +129,7 @@ class PrdReview:
 def _store(project: Path | None) -> FileStateStore:
     root = find_repo_root(project)
     require_initialized(root)
-    return open_store(root, redactor=runtime.user_redactor(root))
+    return runtime.open_repo_store(root)
 
 
 def _review(store: FileStateStore) -> PrdReview:
@@ -205,10 +205,11 @@ _REASONS = {
 }
 
 
-_OVERRIDE_COMMANDS: dict[str, Literal["design", "plan", "prompt"]] = {
+_OVERRIDE_COMMANDS: dict[str, Literal["design", "plan", "prompt", "verify"]] = {
     "design": "design",
     "plan": "plan",
     "prompt": "prompt",
+    "verify": "verify",
 }
 
 

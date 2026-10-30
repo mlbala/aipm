@@ -285,14 +285,15 @@ class FileTrustStore:
         except OSError as exc:
             message = f"cannot read the trust store {self.path} ({exc.strerror})"
             raise PolicyViolation(message) from None
+        info = os.fstat(fd)
+        unsafe = info.st_uid != os.getuid() or info.st_mode & 0o022
+        if not stat.S_ISREG(info.st_mode) or unsafe:
+            os.close(fd)
+            raise PolicyViolation(
+                f"the trust store {self.path} is not a private file of yours",
+                hint="Remove it and trust your repositories again.",
+            )
         with os.fdopen(fd, "rb") as handle:
-            info = os.fstat(handle.fileno())
-            unsafe = info.st_uid != os.getuid() or info.st_mode & 0o022
-            if not stat.S_ISREG(info.st_mode) or unsafe:
-                raise PolicyViolation(
-                    f"the trust store {self.path} is not a private file of yours",
-                    hint="Remove it and trust your repositories again.",
-                )
             data = handle.read(MAX_TRUST_BYTES + 1)
         try:
             if len(data) > MAX_TRUST_BYTES:

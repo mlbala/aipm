@@ -30,7 +30,7 @@ from pydantic import BaseModel, ValidationError
 
 from aipm.config.schema import Config, KeyClass, Tighten, key_class, stricter
 from aipm.domain.errors import PolicyViolation, SchemaError
-from aipm.domain.models import SCHEMA_VERSION, ArtifactKind
+from aipm.domain.models import SCHEMA_VERSION, ArtifactKind, NetworkProfile
 from aipm.security.paths import is_within
 from aipm.state.store import open_store
 from aipm.state.yamlio import MAX_YAML_BYTES, load_yaml
@@ -329,6 +329,23 @@ def user_redact_patterns(
     return list(_user_layer(path, project).security.extra_redact_patterns)
 
 
+def _check_open_network(final: Config, user: Config) -> None:
+    """`open` is honoured only from the user config file (SECURITY.md §9.1).
+
+    A repository cannot relax a tighten-only key, but an `AIPM_*` variable can, and a repository
+    `.env` can fill the environment (R-8), so that route is refused for this one value.
+    """
+    for name in type(final.security.network).model_fields:
+        if getattr(final.security.network, name) is not NetworkProfile.OPEN:
+            continue
+        if getattr(user.security.network, name) is not NetworkProfile.OPEN:
+            raise PolicyViolation(
+                f"security.network.{name} is open, but your user config does not set it",
+                hint=f"Set security.network.{name}: open in your user config, or use another "
+                "profile. A repository or an AIPM_* variable cannot open the network.",
+            )
+
+
 def load_config(
     project: Path | None,
     *,
@@ -353,7 +370,8 @@ def load_config(
     user_raw = _read_user_layer(user_path)
     if user_raw != {}:
         sources.append(str(user_path))
-    config = _merge(config, _validate(user_raw, str(user_path)), path="", limits=_OWN, warnings=[])
+    user_layer = _validate(user_raw, str(user_path))
+    config = _merge(config, user_layer, path="", limits=_OWN, warnings=[])
 
     if project is not None:
         repo_text = open_store(project).read_text(ArtifactKind.CONFIG)
@@ -378,5 +396,6 @@ def load_config(
         )
 
     final = _validate(config.model_dump(mode="json", by_alias=True), "the merged configuration")
+    _check_open_network(final, user_layer)
     warnings.extend(f"relaxed: {item}" for item in relaxations(final))
     return LoadedConfig(config=final, warnings=tuple(warnings), sources=tuple(sources))

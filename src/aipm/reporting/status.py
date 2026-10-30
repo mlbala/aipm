@@ -212,7 +212,8 @@ def render_task(task: Task) -> list[str]:
         if task.blocked.question:
             lines.append(f"  agent says: {_line(task.blocked.question)}")
     if task.done is not None:
-        lines.append(f"  done: {task.done.commit[:12]} at {task.done.at.isoformat()}")
+        where = task.done.commit[:12] if task.done.commit else "verified, not committed"
+        lines.append(f"  done: {where} at {task.done.at.isoformat()}")
     if task.description.strip():
         lines.append("  description:")
         lines.extend(f"    {line}" for line in task.description.strip().splitlines())

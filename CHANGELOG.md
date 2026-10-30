@@ -4,7 +4,31 @@ All notable changes to aipm are recorded here. The format follows [Keep a Change
 
 ## [Unreleased]
 
+### Added
+
+- `aipm verify <T-ID>` (v0.2): post-change checks and every gate for one task, in manual mode. It needs trust (exit 6) and the attempt snapshot `aipm prompt` takes outside the repository (ADR-0021); compares git's configuration, hooks and the agents' global settings before git runs; blocks the task on a severe violation (exit 6); otherwise runs the gates without stopping at the first failure and marks the task `done` only when every required gate passed and the AC reviewer vetoed nothing. `--commit` commits the task's files with `Aipm-*` trailers and no hooks; `--gate`, `--base`, `--override-ac ID --reason` (recorded), `--accept-risk`, `--accept-stale` and `--json`. Reports, gate logs and a journal go to `.pm/runs/<run-id>/`; `aipm prompt --fix` reads the newest report.
+- `aipm scan` (v0.2): gitleaks, semgrep, osv-scanner and trivy over a staged copy of the repository, plus trusted `scanners.extra`; `--scanner`, `--fail-on`.
+- `aipm task show|reset|block|unblock|skip` (v0.2): manual task state control, each change recorded in `approvals.yaml`.
+- The gate runner and the built-in gates `secrets`, `sast`, `deps`, `ac_trace` and `ac_review` (the new AC reviewer role, veto only), the scanner wrappers, the registry lookups for the deps gate, and the stack templates `python-pip`, `node-npm` and `node-pnpm`.
+- The sandbox: `srt` profiles from SECURITY.md §9.1, the network profiles `none`, `registries`, `api-only:<domains>` and `open` (user config only), and detection that exits 8 under `security.require_sandbox` (ADR-0020).
+- The hardened git wrapper: status, diffs, files at a revision, commits with trailers and signing from your global config, and integrity snapshots.
+- The LLM response cache in `.pm/cache/llm/` for the AC reviewer, and `--no-cache` (ARCHITECTURE §14).
+- Claude Code subagents and skills from `aipm sync-context`.
+- `install.sh`.
+- ADR-0020 (`srt` runs commands through a shell) and ADR-0021 (attempt snapshots and the `.pm/` write ledger); residual risk R-10.
+
+### Fixed
+
+- A directory where aipm expected a file (a `.gitignore` directory in a cloned repository, a trust store path) is refused instead of crashing.
+
 ### Security
+
+Fixes from the step 06 security review:
+
+- `verify` lists changes against a fresh index of the base commit, never your own index, and turns off git replace refs, so an `assume-unchanged` or `skip-worktree` flag or a forged base commit cannot hide an edited test or protected file. Replace refs, grafts and object alternates are part of the integrity hashes.
+- `srt`'s interpreter (`node`) is resolved outside the repository and started by aipm, so a `node` planted in an active `.venv/bin` cannot run instead of the sandbox.
+- LLM cache entries and saved verify reports are read only when aipm wrote those exact bytes, so a planted or shipped `.pm/cache/` entry cannot turn off the AC reviewer's veto, and a planted report cannot reach `prompt --fix`.
+- A changed file that changes again while the gates run fails the attempt; `--base` is resolved only after the integrity check; gate output is cleaned before it is redacted; semgrep scans `tests/` and `vendor/` too; JUnit reports must be UTF-8; gates may not read `~/.npmrc`, `~/.pypirc`, `~/.cargo/credentials`, `~/.azure` or `~/.config/op`. Residual risks R-11 and R-12 record what remains.
 
 The v0.1 red-team pass ([docs/security/reviews/v0.1.md](docs/security/reviews/v0.1.md)) found seven problems, all fixed, and two security reviews of the fixes found ways around four of them, also fixed:
 

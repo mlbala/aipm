@@ -28,7 +28,8 @@ from aipm.execution.process import (
     run_safe,
     run_safe_async,
 )
-from aipm.execution.sandbox import SandboxProfile
+from aipm.execution.sandbox import ProcessKind, SandboxProfile
+from aipm.security.network import NetworkPolicy, NetworkProfile
 from tests.conftest import FakeSecrets
 
 pytestmark = pytest.mark.usefixtures("allow_unix_sockets")
@@ -243,9 +244,14 @@ def test_missing_working_directory(tmp_path: Path) -> None:
 
 
 @BOTH
-def test_a_sandbox_profile_is_refused_until_prompt_06(runner: Runner, tmp_path: Path) -> None:
-    with pytest.raises(MissingCapability, match="not available yet") as info:
-        runner(PY, "-c", "pass", cwd=tmp_path, sandbox=SandboxProfile())
+def test_a_sandbox_profile_without_a_runtime_is_refused(runner: Runner, tmp_path: Path) -> None:
+    """Prompt 06 replaced the blanket refusal: a profile still never runs unsandboxed."""
+    network = NetworkPolicy(NetworkProfile.NONE)
+    profile = SandboxProfile(
+        ProcessKind.GATE, network, runtime=str(tmp_path / "no-srt"), settings_dir=tmp_path
+    )
+    with pytest.raises(MissingCapability, match="cannot be run") as info:
+        runner(PY, "-c", "pass", cwd=tmp_path, sandbox=profile)
     assert info.value.exit_code is ExitCode.MISSING_TOOL
 
 

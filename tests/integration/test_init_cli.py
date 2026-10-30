@@ -121,7 +121,7 @@ def test_second_init_needs_force_and_force_keeps_artifacts(tmp_repo: Path) -> No
 @pytest.mark.parametrize(
     ("args", "message"),
     [
-        (["--stack", "node-npm"], "unknown stack template"),
+        (["--stack", "go"], "unknown stack template"),
         (["--tool", "cursor"], "unknown tool"),
         (["--provider", "evil"], "unknown provider"),
     ],
@@ -142,12 +142,26 @@ def test_tool_and_provider_flags(tmp_repo: Path) -> None:
     assert "provider" not in text
 
 
-def test_detected_but_unshipped_stack_is_reported(tmp_repo: Path) -> None:
-    (tmp_repo / "package.json").write_text("{}", encoding="utf-8")
+@pytest.mark.parametrize(
+    ("files", "stack"),
+    [
+        (("package.json",), "node-npm"),
+        (("package.json", "pnpm-lock.yaml"), "node-pnpm"),
+        (("requirements.txt",), "python-pip"),
+    ],
+)
+def test_detected_v02_stacks_get_their_template(
+    tmp_repo: Path, files: tuple[str, ...], stack: str
+) -> None:
+    """v0.1 reported these stacks as detected but unshipped; build prompt 06 ships them (D-1)."""
+    for name in files:
+        (tmp_repo / name).write_text("{}" if name.endswith(".json") else "", encoding="utf-8")
     result = init(tmp_repo)
     assert result.exit_code == 0, result.output
-    assert "detected the node-npm stack" in result.stdout
-    assert load_config(tmp_repo).config.gates == {}
+    assert "its template arrives in v0.2" not in result.stdout
+    config = load_config(tmp_repo).config
+    assert config.stack_template == stack
+    assert set(config.gates) >= {"lint", "unit", "secrets", "deps", "ac_trace"}
 
 
 def test_hostile_file_names_never_reach_the_repo_map_or_terminal(tmp_repo: Path) -> None:

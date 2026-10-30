@@ -463,9 +463,9 @@ class Blocked(StrictModel):
 
 
 class Done(StrictModel):
-    """Where a finished task landed."""
+    """Where a finished task landed. `commit` is unset when `verify` ran without `--commit`."""
 
-    commit: GitSha
+    commit: GitSha | None = None
     run_id: RunId | None = None
     at: AwareDatetime
 
@@ -580,10 +580,42 @@ class OverrideReason(StrEnum):
 class StaleOverride(StrictModel):
     """A recorded `--accept-stale` run (ARCHITECTURE §7.1). Never counts as an approval."""
 
-    command: Literal["design", "plan", "prompt"]
+    command: Literal["design", "plan", "prompt", "verify"]
     artifact: RelPath
     sha256: Sha256
     reason: OverrideReason
+    by: Str200
+    at: AwareDatetime
+
+
+class AcOverride(StrictModel):
+    """A recorded `verify --override-ac`: the AC reviewer's veto of one criterion, set aside."""
+
+    task: TaskId
+    criterion: AcceptanceId
+    reason: Str300
+    run_id: RunId | None = None
+    by: Str200
+    at: AwareDatetime
+
+
+class TaskChangeAction(StrEnum):
+    """Manual task state changes (`aipm task`)."""
+
+    RESET = "reset"
+    BLOCK = "block"
+    UNBLOCK = "unblock"
+    SKIP = "skip"
+
+
+class TaskChange(StrictModel):
+    """A recorded `aipm task` change: who moved which task from what to what, and why."""
+
+    task: TaskId
+    action: TaskChangeAction
+    from_status: TaskStatus
+    to_status: TaskStatus
+    reason: Str300 = ""
     by: Str200
     at: AwareDatetime
 
@@ -604,6 +636,8 @@ class ApprovalsDoc(YamlArtifact):
     artifact_kind: ClassVar[ArtifactKind] = ArtifactKind.APPROVALS
     approvals: list[Approval] = Field(default_factory=list[Approval], max_length=1000)
     overrides: list[StaleOverride] = Field(default_factory=list[StaleOverride], max_length=1000)
+    ac_overrides: list[AcOverride] = Field(default_factory=list[AcOverride], max_length=1000)
+    task_changes: list[TaskChange] = Field(default_factory=list[TaskChange], max_length=5000)
 
     def has(self, gate: ApprovalGate, artifact: str, sha256: str | None) -> bool:
         """Whether this exact hash of the artifact has an approval for the gate."""
@@ -614,10 +648,11 @@ class ApprovalsDoc(YamlArtifact):
         )
 
     def to_document(self) -> dict[str, object]:
-        """`overrides` is written only once there is one, so older files keep their bytes."""
+        """The record lists are written only once they hold one, so older files keep their bytes."""
         data = super().to_document()
-        if not self.overrides:
-            data.pop("overrides", None)
+        for key in ("overrides", "ac_overrides", "task_changes"):
+            if not getattr(self, key):
+                data.pop(key, None)
         return data
 
 

@@ -66,10 +66,13 @@ V01_COMMANDS: dict[str, list[str]] = {
     "sync-context": ["sync-context"],
 }
 
+V02_COMMANDS: dict[str, list[str]] = {
+    "verify": ["verify", "T-001"],
+    "scan": ["scan"],
+    "task": ["task", "show", "T-001"],
+}
+
 LATER_COMMANDS: dict[str, tuple[list[str], str]] = {
-    "verify": (["verify", "T-001"], "v0.2"),
-    "scan": (["scan"], "v0.2"),
-    "task": (["task", "show", "T-001"], "v0.2"),
     "run": (["run", "T-001"], "v0.3"),
     "build": (["build"], "v0.3"),
     "merge": (["merge"], "v0.3"),
@@ -78,7 +81,7 @@ LATER_COMMANDS: dict[str, tuple[list[str], str]] = {
 
 
 def test_command_tables_cover_every_command() -> None:
-    assert set(V01_COMMANDS) | set(LATER_COMMANDS) == set(COMMAND_FLAGS)
+    assert set(V01_COMMANDS) | set(V02_COMMANDS) | set(LATER_COMMANDS) == set(COMMAND_FLAGS)
 
 
 def test_help_lists_every_command_and_global_flag() -> None:
@@ -134,6 +137,15 @@ def test_built_commands_are_no_longer_stubs(command: str, tmp_path: Path) -> Non
     assert "is not inside a git repository" in result.stderr
 
 
+@pytest.mark.parametrize("command", sorted(V02_COMMANDS))
+def test_v02_commands_are_no_longer_stubs(command: str, tmp_path: Path) -> None:
+    """Built in prompt 06: verify, scan and task answer like every built command."""
+    result = runner.invoke(app, ["-C", str(tmp_path), *V02_COMMANDS[command]])
+    assert result.exit_code == 2
+    assert "available in" not in result.stderr
+    assert "is not inside a git repository" in result.stderr
+
+
 def test_bare_aipm_is_no_longer_a_stub() -> None:
     """Built in prompt 04: outside a repository the phase report exits 2 and says why."""
     result = runner.invoke(app, [])
@@ -143,7 +155,7 @@ def test_bare_aipm_is_no_longer_a_stub() -> None:
 
 
 def test_json_envelope_for_a_stub_command() -> None:
-    result = runner.invoke(app, ["--json", "verify", "T-001"])
+    result = runner.invoke(app, ["--json", "run", "T-001"])
     assert result.exit_code == 2
     assert result.stderr == ""
     lines = result.stdout.splitlines()
@@ -151,7 +163,7 @@ def test_json_envelope_for_a_stub_command() -> None:
     env = json.loads(lines[0])
     assert set(env) == {"ok", "command", "version", "exit_code", "data", "errors"}
     assert env["ok"] is False
-    assert env["command"] == "verify"
+    assert env["command"] == "run"
     assert env["version"] == __version__
     assert env["exit_code"] == 2
     assert env["data"] == {}
@@ -159,7 +171,7 @@ def test_json_envelope_for_a_stub_command() -> None:
     error = env["errors"][0]
     assert set(error) == {"code", "message", "hint"}
     assert error["code"] == "NOT_AVAILABLE"
-    assert error["message"] == "available in v0.2"
+    assert error["message"] == "available in v0.3"
 
 
 def test_approve_rejects_an_unknown_artifact() -> None:

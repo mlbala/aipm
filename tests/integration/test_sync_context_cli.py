@@ -15,6 +15,17 @@ from tests.integration.flow import aipm, designed, load, ok, planned, trust
 FILES = ("AGENTS.md", "CLAUDE.md")
 
 
+CONTEXT_FILES = [
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".claude/agents/aipm-test-writer.md",
+    ".claude/agents/aipm-reviewer.md",
+    ".claude/skills/aipm-task-protocol/SKILL.md",
+    ".claude/skills/aipm-run-checks/SKILL.md",
+]
+"""The Claude Code context files, in generation order; the last four arrive in v0.2 (D-3)."""
+
+
 @pytest.fixture
 def repo(tmp_repo: Path, fake_llm: Callable[[str], FakeLLM]) -> Path:
     fake_llm("clinic")
@@ -55,7 +66,7 @@ def test_check_needs_no_trust_and_shows_no_argv(
     assert result.exit_code == 3
     assert "out of date: AGENTS.md, CLAUDE.md" in result.stderr
     assert "uv run" not in result.output
-    assert json.loads(result.stdout) == {"drift": ["AGENTS.md", "CLAUDE.md"]}
+    assert json.loads(result.stdout) == {"drift": CONTEXT_FILES}
 
 
 def test_a_policy_violating_gate_fails_check_with_exit_6(repo: Path) -> None:
@@ -107,7 +118,7 @@ def test_approve_then_sync_writes_both_files(repo: Path) -> None:
     approved = ok(aipm(repo, "approve", "context", "--yes"))
     assert "Context approved." in approved.stdout
     assert not (repo / "AGENTS.md").exists()
-    assert context_approvals(repo) == ["AGENTS.md", "CLAUDE.md"]
+    assert context_approvals(repo) == sorted(CONTEXT_FILES)
     written = ok(aipm(repo, "sync-context"))
     assert "Wrote: AGENTS.md, CLAUDE.md" in written.stdout
     agents = (repo / "AGENTS.md").read_text(encoding="utf-8")
@@ -126,7 +137,7 @@ def test_interactive_sync_writes_and_records(repo: Path, monkeypatch: pytest.Mon
     result = aipm(repo, "sync-context", input="y\n")
     assert result.exit_code == 0, result.output
     assert (repo / "AGENTS.md").is_file()
-    assert context_approvals(repo) == ["AGENTS.md", "CLAUDE.md"]
+    assert context_approvals(repo) == sorted(CONTEXT_FILES)
 
 
 def test_interactive_decline_writes_nothing(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -210,5 +221,5 @@ def test_json_sync(repo: Path) -> None:
     ok(aipm(repo, "approve", "context", "--yes"))
     result = ok(aipm(repo, "sync-context", flags=["--json"]))
     data = json.loads(result.stdout)["data"]
-    assert data["written"] == ["AGENTS.md", "CLAUDE.md"]
-    assert [f["action"] for f in data["files"]] == ["create", "create"]
+    assert data["written"] == CONTEXT_FILES
+    assert [f["action"] for f in data["files"]] == ["create"] * len(CONTEXT_FILES)

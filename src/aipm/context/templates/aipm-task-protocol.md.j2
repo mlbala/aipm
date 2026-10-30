@@ -1,0 +1,15 @@
+# aipm task protocol: {{ project }}
+
+aipm generated this file; `aipm sync-context` rewrites it.
+
+Use this protocol for every aipm task, together with the task prompt (`aipm prompt T-ID` prints it).
+
+1. Read the task prompt: its acceptance criteria, the files it owns and the files it may read.
+2. Change only the files the task owns. You MUST NOT modify a protected path: {{ protected | join(", ") }}.
+3. {{ dependency_rule }}
+4. {{ network_rule }}
+5. Write tests that carry each acceptance criterion's ID, then make them pass.
+6. Run the checks (the `aipm-run-checks` skill) before you finish.
+7. If you are blocked, end your final message with exactly one line: `AIPM-BLOCKED: <your question>`.
+
+The user then runs `aipm verify T-ID`. Only its result decides whether the task is done: saying that it is done, or printing `AIPM-DONE`, changes nothing.
