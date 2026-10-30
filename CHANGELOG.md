@@ -19,6 +19,7 @@ All notable changes to aipm are recorded here. The format follows [Keep a Change
 
 ### Fixed
 
+- The release workflow stub passes a milestone tag with a notice instead of failing it: until build prompt 08 adds the pipeline, a `v*` tag still builds and publishes nothing.
 - A directory where aipm expected a file (a `.gitignore` directory in a cloned repository, a trust store path) is refused instead of crashing.
 
 ### Security
