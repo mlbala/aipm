@@ -1,0 +1,17 @@
+# aipm checks: {{ project }}
+
+aipm generated this file from the gate commands trusted with `aipm trust`; `aipm sync-context` rewrites it.
+
+Run these from the repository root, exactly as written, before you finish a task. `aipm verify` runs the same commands (with its own report file) and decides whether the task is done.
+{% for c in checks %}
+- `{{ c.name }}` ({{ "required" if c.required else "optional" }}): {{ c.command }}
+{%- endfor %}
+{%- if not checks %}
+No command gates are configured.
+{%- endif %}
+{% if builtins %}
+aipm also runs these checks itself:
+{% for b in builtins %}
+- `{{ b.name }}` ({{ "required" if b.required else "optional" }}): {{ b.what }}.
+{%- endfor %}
+{% endif %}

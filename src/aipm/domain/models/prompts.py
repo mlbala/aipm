@@ -117,7 +117,18 @@ class TaskSpec:
 
 @dataclass(frozen=True, slots=True)
 class GeneratedFile:
-    """A context file's managed block (ARCHITECTURE §10.2); the markers are added on write."""
+    """A context file's managed block (ARCHITECTURE §10.2); the markers are added on write.
+
+    With a `preamble` (YAML front matter), aipm owns the whole file: it is `preamble` followed
+    by `block`, with no markers, and any other content is drift (aipm's own subagents and
+    skills, SECURITY.md §14.1 I-2).
+    """
 
     path: str
     block: str
+    preamble: str | None = None
+
+    @property
+    def document(self) -> str:
+        """The whole file, for a file aipm owns."""
+        return f"{self.preamble or ''}{self.block}"

@@ -13,7 +13,8 @@ current PRD and design (G1, G2); there is no `--accept-stale` here.
   only file names, never a block or an argv (ADR-0017). The argv still passes `compile_gate`.
 
 Only text between the aipm markers changes; everything else in the files stays byte for byte,
-and files are never read or written through a link (`aipm.state.repo_files`).
+and files are never read or written through a link (`aipm.state.repo_files`). aipm's own Claude
+subagents and skills are the exception: aipm owns those files whole (front matter and body).
 """
 
 import difflib
@@ -30,6 +31,7 @@ from aipm.app.snapshot import read_snapshot
 from aipm.app.trust import require_trusted
 from aipm.app.workspace import find_repo_root, require_initialized
 from aipm.config.loader import LoadedConfig, load_config
+from aipm.context.generator import CLAUDE_EXTRAS
 from aipm.context.managed_block import extract_block, replace_block
 from aipm.domain.errors import (
     HumanInputRequired,
@@ -39,8 +41,11 @@ from aipm.domain.errors import (
 )
 from aipm.domain.models import ApprovalGate, GeneratedFile, ToolName
 from aipm.domain.phase import InputState, plan_inputs
-from aipm.state.repo_files import read_repo_bytes, write_repo_bytes
+from aipm.state.repo_files import make_repo_dirs, read_repo_bytes, write_repo_bytes
 from aipm.state.store import FileStateStore, normalized_sha256
+
+OWNED_FILES = frozenset(CLAUDE_EXTRAS)
+"""The files aipm owns whole, and whose directories it may create."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,15 +203,22 @@ def _review(
             )
         current = read_repo_bytes(root, generated.path)
         text = _decode(generated.path, current)
-        block_sha = normalized_sha256(generated.block.encode("utf-8"))
+        if generated.preamble is not None:
+            # aipm owns the whole file: it is compared, approved and written whole.
+            document = generated.document
+            block, old_block = document, (None if current is None else text)
+        else:
+            document = replace_block(text, generated.block, name=generated.path)
+            block, old_block = generated.block, extract_block(text, name=generated.path)
+        block_sha = normalized_sha256(block.encode("utf-8"))
         changes.append(
             FileChange(
                 path=generated.path,
                 current=current,
-                document=replace_block(text, generated.block, name=generated.path),
-                block=generated.block,
+                document=document,
+                block=block,
                 block_sha256=block_sha,
-                old_block=extract_block(text, name=generated.path),
+                old_block=old_block,
                 approved=approvals.has(ApprovalGate.CONTEXT, generated.path, block_sha),
             )
         )
@@ -279,6 +291,8 @@ def write(
         written: list[str] = []
         recorded: list[str] = []
         for f in current.changed:
+            if f.path in OWNED_FILES:
+                make_repo_dirs(s.root, f.path)
             write_repo_bytes(s.root, f.path, f.document.encode("utf-8"), expected=f.current)
             written.append(f.path)
             if record_approval(s.store, ApprovalGate.CONTEXT, f.path, f.block_sha256):

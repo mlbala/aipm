@@ -1,7 +1,9 @@
 """Claude Code adapter: render in v0.1, dispatch in v0.3 (ARCHITECTURE §11).
 
-- `context_files`: `AGENTS.md`, and `CLAUDE.md` importing it with `@AGENTS.md` (the pattern the
-  Claude Code memory docs give for sharing one file with other tools).
+- `context_files`: `AGENTS.md`, `CLAUDE.md` importing it with `@AGENTS.md` (the pattern the
+  Claude Code memory docs give for sharing one file with other tools), and from v0.2 the
+  subagents `.claude/agents/aipm-{test-writer,reviewer}.md` and the skills
+  `.claude/skills/aipm-{task-protocol,run-checks}/SKILL.md`.
 - `render_prompt`: the task prompt from `templates/claude_code/task.md.j2`. Every model-written
   field is inside an `untrusted` block with a fresh nonce; IDs, globs and gate argv are in code
   spans; protected paths appear only as "MUST NOT modify" rules. The result is checked against
@@ -158,8 +160,8 @@ class ClaudeCodeAdapter:
         return _detect(self._which)
 
     def context_files(self, ctx: ProjectContext) -> list[GeneratedFile]:
-        """`AGENTS.md` and `CLAUDE.md` (subagents and skills arrive in v0.2)."""
-        return generator.generate(ctx)
+        """`AGENTS.md`, `CLAUDE.md`, and aipm's Claude subagents and skills (v0.2)."""
+        return [*generator.generate(ctx), *generator.claude_extras(ctx)]
 
     def render_prompt(self, task: TaskSpec, ctx: ProjectContext) -> RenderedTaskPrompt:
         """Render the task prompt and check it before anyone sees it."""

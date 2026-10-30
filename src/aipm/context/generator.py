@@ -270,5 +270,71 @@ def claude_md(ctx: ProjectContext) -> GeneratedFile:
 
 
 def generate(ctx: ProjectContext) -> list[GeneratedFile]:
-    """Render every v0.1 context file from approved, sanitized fields."""
+    """Render `AGENTS.md` and `CLAUDE.md` from approved, sanitized fields."""
     return [agents_md(ctx), claude_md(ctx)]
+
+
+# ---------------------------------------------------------------- Claude subagents and skills
+
+
+def _front_matter(name: str, description: str, tools: str | None = None) -> str:
+    lines = ["---", f"name: {name}", f"description: {description}"]
+    if tools is not None:
+        lines.append(f"tools: {tools}")
+    return "\n".join([*lines, "---", "", ""])
+
+
+CLAUDE_EXTRAS: Mapping[str, tuple[str, str]] = {
+    ".claude/agents/aipm-test-writer.md": (
+        "aipm-test-writer.md.j2",
+        _front_matter(
+            "aipm-test-writer",
+            "Writes the tests for an aipm task, one or more per acceptance criterion, only under "
+            "the paths the task owns. Use it when a task prompt asks for tests.",
+            "Read, Grep, Glob, Edit, Write, Bash",
+        ),
+    ),
+    ".claude/agents/aipm-reviewer.md": (
+        "aipm-reviewer.md.j2",
+        _front_matter(
+            "aipm-reviewer",
+            "Reviews an aipm task's change against its acceptance criteria, the files it owns "
+            "and the protected paths, before aipm verify. Read-only.",
+            "Read, Grep, Glob",
+        ),
+    ),
+    ".claude/skills/aipm-task-protocol/SKILL.md": (
+        "aipm-task-protocol.md.j2",
+        _front_matter(
+            "aipm-task-protocol",
+            "The rules for working on an aipm task (T-ID): owned files, protected paths, "
+            "dependencies, tests that carry acceptance-criterion IDs, and how to say you are "
+            "blocked.",
+        ),
+    ),
+    ".claude/skills/aipm-run-checks/SKILL.md": (
+        "aipm-run-checks.md.j2",
+        _front_matter(
+            "aipm-run-checks",
+            "The exact commands that check an aipm task before you finish it, as aipm verify "
+            "runs them.",
+        ),
+    ),
+}
+"""aipm's own Claude Code subagents and skills (ARCHITECTURE §10.2, v0.2): fixed front matter
+(no `allowed-tools`; the reviewer reads only), instructions only, never a script."""
+
+TEST_CONFIG_NAMES = ("pytest.ini", "conftest.py", "tox.ini", "setup.cfg", ".coveragerc",
+                     "jest.config.*", "vitest.config.*")  # fmt: skip
+
+
+def claude_extras(ctx: ProjectContext) -> list[GeneratedFile]:
+    """The Claude Code subagents and skills, rendered like `AGENTS.md` and checked for I-3."""
+    data = _agents_data(ctx, features=False, descriptions=False)
+    data["test_config"] = [code_span(name) for name in TEST_CONFIG_NAMES]
+    files: list[GeneratedFile] = []
+    for path, (template, preamble) in CLAUDE_EXTRAS.items():
+        block = render(template, data, seed_parts=[ctx.project, path])
+        _checked(path, preamble, ctx)
+        files.append(GeneratedFile(path, _checked(path, block, ctx), preamble=preamble))
+    return files
