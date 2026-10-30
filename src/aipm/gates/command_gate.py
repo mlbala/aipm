@@ -1,7 +1,7 @@
 """Command gates: `compile_gate`, then `sandbox.wrap`, then `run_safe` (ARCHITECTURE §13.2).
 
 The argv comes only from the trusted menu through `compile_gate`; `argv[0]` is resolved on PATH
-and refused inside the repository. The gate runs in the work tree with the `gates` network
+as the trust store resolved it. The gate runs in the work tree with the `gates` network
 profile (none by default), a constructed environment without API keys, a 10-minute timeout,
 its own process group and an output cap. Python writes no bytecode into the tree, and reads none
 from it: `PYTHONPYCACHEPREFIX` points into the attempt's temp dir.
@@ -20,13 +20,7 @@ from pathlib import Path
 
 from aipm.domain.errors import PolicyViolation
 from aipm.domain.models import Ecosystem, GateDef, GateResult, GateStatus, NetworkProfile
-from aipm.execution.process import (
-    BASE_ENV_ALLOWLIST,
-    ProcessResult,
-    build_env,
-    is_inside,
-    run_safe,
-)
+from aipm.execution.process import BASE_ENV_ALLOWLIST, ProcessResult, build_env, run_safe
 from aipm.execution.sandbox import ProcessKind, ProfilePaths, SandboxProfile, profile_for
 from aipm.gates.context import GateContext
 from aipm.gates.reports import ReportError, TestReport, load_report
@@ -50,16 +44,13 @@ class CommandOutcome:
 
 
 def resolve_program(name: str, repo: Path) -> str:
-    """`argv[0]` as an absolute path from PATH; exit 6 if it lies inside the repository."""
+    """`argv[0]` as an absolute path from PATH, as the trust store resolved it for the surface
+    hash (SECURITY.md §10 rule 2). A project's own interpreter or tool may live in the
+    repository (`.venv/bin/python`); that is residual risk R-9, shown in full by `aipm trust`.
+    """
+    del repo
     found = shutil.which(name)
-    if found is None:
-        return name
-    if is_inside(found, repo):
-        raise PolicyViolation(
-            f"the {name} found on PATH ({found}) is inside the repository",
-            hint="Remove relative or repository entries from PATH.",
-        )
-    return found
+    return name if found is None else found
 
 
 def gate_env(ctx: GateContext) -> dict[str, str]:

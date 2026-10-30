@@ -1,0 +1,23 @@
+# Stack template: python-pip (ARCHITECTURE §13.1, build prompt 06).
+# For a project with requirements.txt and a virtual environment that is active when aipm runs:
+# `python` is the environment's interpreter. Package installation happens only in the prepare
+# step (SECURITY.md §10 rule 4); gates call each tool as `python -m <tool>`.
+allowed_executables:                  # argv prefixes (SECURITY.md §10 rule 2)
+  - [python, -m, pip, install, -r, requirements.txt]
+  - [python, -m, ruff]
+  - [python, -m, mypy]
+  - [python, -m, pytest]
+test_roots: [tests]                   # where {test_paths} looks for owned tests
+prepare: {run: [python, -m, pip, install, -r, requirements.txt], network: registries}
+gates:
+  lint: {run: [python, -m, ruff, check, "{paths}"], required: true}
+  format: {run: [python, -m, ruff, format, --check, "{paths}"], required: false}
+  types: {run: [python, -m, mypy, "{paths}"], required: false}
+  unit:
+    run: [python, -m, pytest, -q, --junitxml, "{report_file}", "{test_paths}"]
+    required: true
+  secrets: {builtin: gitleaks, required: true}
+  sast: {builtin: semgrep, fail_on: high, required: false}
+  deps: {builtin: osv, fail_on: high, required: true}
+  ac_trace: {builtin: ac_trace, required: true}
+  ac_review: {builtin: ac_review, mode: veto, required: false}

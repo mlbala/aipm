@@ -232,14 +232,14 @@ def test_gate_output_is_redacted(tmp_path: Path) -> None:
 # ---------------------------------------------------------------- argv and paths
 
 
-def test_a_program_inside_the_repository_is_refused(tmp_path: Path) -> None:
+def test_argv0_is_resolved_as_the_trust_store_resolves_it(tmp_path: Path) -> None:
     ctx = make_ctx(tmp_path)
     (ctx.root / "bin").mkdir()
     tool = ctx.root / "bin" / "ruff"
     tool.write_text("#!/bin/sh\n", encoding="utf-8")
     tool.chmod(0o755)
-    with pytest.raises(PolicyViolation, match="inside the repository"):
-        command_gate.resolve_program(str(tool), ctx.root)
+    assert command_gate.resolve_program(str(tool), ctx.root) == str(tool)
+    assert command_gate.resolve_program("no-such-program-x", ctx.root) == "no-such-program-x"
 
 
 def test_owned_paths_expand_and_refuse_links_out(tmp_path: Path) -> None:

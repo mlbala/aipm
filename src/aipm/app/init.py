@@ -110,8 +110,8 @@ def run(
             template_name = detected
         else:
             notes.append(
-                f"detected the {detected} stack; its template arrives in v0.2, so no gates "
-                "were copied (ARCHITECTURE §13.1)."
+                f"detected the {detected} stack, which has no built-in template yet, so no "
+                "gates were copied (ARCHITECTURE §13.1)."
             )
 
     settings: dict[str, object] = {}
