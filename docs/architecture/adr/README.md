@@ -23,6 +23,8 @@ One file per decision, using the template below. A new ADR is proposed in a pull
 | [ADR-0017](0017-gate-commands-as-agents-see-them.md) | Gate commands as agents see them; `sync-context --check` without trust | Accepted |
 | [ADR-0018](0018-environment-cannot-set-user-only-keys.md) | `AIPM_*` variables cannot set user-only keys; `AIPM_CONFIG` stays outside the repository | Accepted |
 | [ADR-0019](0019-hard-denied-programs-at-any-argv-position.md) | Hard-denied programs are refused at any argv position | Accepted |
+| [ADR-0020](0020-srt-runs-commands-through-a-shell.md) | `srt` runs commands through a shell; aipm keeps argv whole and checks the outcome | Accepted |
+| [ADR-0021](0021-attempt-snapshot-and-pm-write-ledger.md) | Manual-mode attempt snapshots and the `.pm/` write ledger live outside the repository | Accepted |
 
 ## Template
 
