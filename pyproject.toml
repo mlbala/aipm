@@ -272,7 +272,8 @@ ignore_imports = [
     "aipm.scanners.registry -> httpx2", "aipm.scanners.registry -> urllib",
 ]
 allow_indirect_imports = true
-# The gateway (prompt 03) and the registry lookups (prompt 06) arrive later.
+# The two exceptions: the LLM gateway, and aipm.scanners.registry, the deps gate's HTTPS lookups
+# of package existence and first-release age (SECURITY.md §12.2; urllib only, no redirects).
 unmatched_ignore_imports_alerting = "none"
 
 [[tool.importlinter.contracts]]
