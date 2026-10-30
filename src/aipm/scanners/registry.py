@@ -73,7 +73,7 @@ def _fetch(url: str, headers: Mapping[str, str]) -> Response:
             status = reply.status
     except urllib.error.HTTPError as exc:
         return Response(exc.code, b"")
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+    except Exception as exc:  # any failure to ask fails closed
         raise RegistryError(f"cannot reach the registry ({type(exc).__name__})") from None
     if len(body) > MAX_RESPONSE_BYTES:
         raise RegistryError("the registry's answer is larger than aipm reads")
@@ -116,10 +116,11 @@ def _npm_first(doc: dict[str, Any]) -> datetime | None:
     return _parse_time(cast("dict[str, Any]", times).get("created"))
 
 
-def first_release(ecosystem: Ecosystem, name: str, *, fetch: Fetch = _fetch) -> PackageInfo:
+def first_release(ecosystem: Ecosystem, name: str, *, fetch: Fetch | None = None) -> PackageInfo:
     """Look a package up in its registry. Raises `RegistryError` on any doubt."""
     check_package_name(ecosystem.value, name)
-    response = fetch(_url(ecosystem, name), {"Accept": _ACCEPT[ecosystem]})
+    ask = fetch if fetch is not None else _fetch
+    response = ask(_url(ecosystem, name), {"Accept": _ACCEPT[ecosystem]})
     if response.status == 404:
         return PackageInfo(exists=False)
     if response.status != 200:

@@ -22,7 +22,7 @@ from collections.abc import Generator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from filelock import FileLock, Timeout
 from pydantic import JsonValue, ValidationError
@@ -73,6 +73,11 @@ MAX_ADR_FILES = 100
 MAX_PROMPT_BYTES = 1_048_576
 _HOLDER = re.compile(r"(\d{1,10}) (\S{1,40})")
 _TOOL = re.compile(r"[a-z]{1,16}")
+_RUN_PART = re.compile(r"[A-Za-z0-9][A-Za-z0-9._\-]{0,99}")
+RUNS_DIR = "runs"
+CACHE_DIR = "cache/llm"
+MAX_CACHE_BYTES = 1_048_576
+_CACHE_KEY = re.compile(r"[0-9a-f]{64}")
 
 _MODELS: Mapping[ArtifactKind, type[YamlArtifact] | type[MarkdownArtifact[Any]]] = {
     ArtifactKind.REQUIREMENTS: RequirementsDoc,
@@ -549,6 +554,102 @@ class FileStateStore:
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             raise PolicyViolation(f".pm/{name} must be a real directory, not a link or a file")
 
+    def _real_dirs(self, parts: Sequence[str]) -> None:
+        """Make `.pm/<parts…>` real directories (created if missing), never links."""
+        self._check_root(create=True)
+        path = self.root
+        for part in parts:
+            path = path / part
+            try:
+                info = os.lstat(path)
+            except FileNotFoundError:
+                path.mkdir(mode=0o755)
+                info = os.lstat(path)
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                raise PolicyViolation(f"{path} must be a real directory, not a link or a file")
+
+    def save_run_text(self, run_id: str, parts: Sequence[str], text: str) -> str:
+        """Write `.pm/runs/<run-id>/<parts…>` (sanitized, redacted, atomic); returns its path
+        relative to the repository. Gate output is T2, so it is cleaned like any other text."""
+        if not is_valid_id("run", run_id) or not parts:
+            raise UsageError(f"not a run ID and file: {run_id!r}")
+        for part in parts:
+            if not _RUN_PART.fullmatch(part) or part in (".", ".."):
+                raise UsageError(f"not a run file name: {part!r}")
+        name = "/".join((RUNS_DIR, run_id, *parts))
+        source = f".pm/{name}"
+        cleaned = self._clean_text(text, source, [])
+        self._refuse_secrets(cleaned, source)
+        self._real_dirs([RUNS_DIR, run_id, *parts[:-1]])
+        self._atomic_write(name, cleaned.encode("utf-8"))
+        return source
+
+    def _cache_name(self, key: str) -> str:
+        if not _CACHE_KEY.fullmatch(key):
+            raise UsageError("not a cache key")
+        return f"{CACHE_DIR}/{key}.json"
+
+    def cache_get(self, key: str) -> str | None:
+        """A cached LLM reply (T2: the caller validates it again), or `None` (ARCHITECTURE §14)."""
+        name = self._cache_name(key)
+        try:
+            data = self._read(name, limit=MAX_CACHE_BYTES)
+        except (PolicyViolation, UsageError):
+            return None
+        if data is None:
+            return None
+        try:
+            entry: object = json.loads(data)
+        except ValueError:
+            return None
+        if not isinstance(entry, dict):
+            return None
+        text = cast("dict[str, object]", entry).get("text")
+        return text if isinstance(text, str) else None
+
+    def cache_put(self, key: str, text: str) -> None:
+        """Store an LLM reply that passed validation (sanitized, redacted, atomic)."""
+        name = self._cache_name(key)
+        cleaned = self._clean_text(text, f".pm/{name}", [])
+        if self.redactor.contains_secret(cleaned):
+            return
+        data = json.dumps({"v": 1, "text": cleaned}, ensure_ascii=True).encode("ascii")
+        if len(data) > MAX_CACHE_BYTES:
+            return
+        self._real_dirs(CACHE_DIR.split("/"))
+        self._atomic_write(name, data)
+
+    def cache_drop(self, key: str) -> None:
+        """Delete a cached reply that failed validation."""
+        name = self._cache_name(key)
+        try:
+            (self.root / name).unlink()
+        except FileNotFoundError:
+            return
+        self._record(name, None)
+
+    def latest_report(self, task_id: str) -> str | None:
+        """The text of the newest `verify` gate report of a task, or `None` (`prompt --fix`).
+
+        Reports live in `.pm/runs/<run-id>/gates/<T-ID>/<attempt>/report.yaml`; links and
+        anything but real directories and files are skipped.
+        """
+        if not is_valid_id("task", task_id):
+            raise UsageError(f"not a task ID: {task_id!r}")
+        runs = self.root / RUNS_DIR
+        best: tuple[str, int, str] | None = None
+        for run_id in _real_children(runs):
+            if not is_valid_id("run", run_id):
+                continue
+            task_dir = runs / run_id / "gates" / task_id
+            for attempt in _real_children(task_dir):
+                if attempt.isdigit() and (best is None or (run_id, int(attempt)) > best[:2]):
+                    best = (run_id, int(attempt), f"{RUNS_DIR}/{run_id}/gates/{task_id}/{attempt}")
+        if best is None:
+            return None
+        data = self._read(f"{best[2]}/report.yaml", limit=MAX_YAML_BYTES)
+        return None if data is None else data.decode("utf-8", errors="replace")
+
     def save_prompt(
         self, task_id: str, tool: str, text: str, *, allowed_url_domains: Sequence[str] = ()
     ) -> tuple[str, str]:
@@ -636,6 +737,21 @@ class FileStateStore:
             with suppress(ValidationError, ValueError):
                 events.append(SecurityEvent.model_validate_json(line))
         return events
+
+
+def _real_children(path: Path) -> list[str]:
+    """The names of the real directories in `path` (links skipped); empty if it is not one."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return []
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        return []
+    return sorted(
+        entry.name
+        for entry in os.scandir(path)
+        if entry.is_dir(follow_symlinks=False) and not entry.is_symlink()
+    )
 
 
 def _record_holder(fd: int) -> None:

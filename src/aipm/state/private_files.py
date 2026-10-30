@@ -41,10 +41,11 @@ def read_private(path: Path, *, limit: int) -> bytes | None:
         return None
     except OSError as exc:
         raise PolicyViolation(f"cannot read {path} safely ({exc.strerror})") from None
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+        os.close(fd)
+        raise PolicyViolation(f"{path} is not a private file of yours")
     with os.fdopen(fd, "rb") as handle:
-        info = os.fstat(handle.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
-            raise PolicyViolation(f"{path} is not a private file of yours")
         data = handle.read(limit + 1)
     if len(data) > limit:
         raise PolicyViolation(f"{path} is larger than {limit} bytes")

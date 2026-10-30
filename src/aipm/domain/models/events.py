@@ -65,6 +65,8 @@ class SecurityEventKind(StrEnum):
     POLICY_VIOLATION = "policy_violation"
     POST_CHANGE_VIOLATION = "post_change_violation"
     FORBIDDEN_FLAG = "forbidden_flag"
+    OVERRIDE = "override"
+    TASK_CHANGE = "task_change"
     ACK = "ack"
 
 

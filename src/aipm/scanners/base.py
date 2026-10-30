@@ -200,9 +200,10 @@ def _read_regular(repo: Path, parts: Sequence[str]) -> bytes | None:
         fd = os.open(current / parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         return None
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        return None
     with os.fdopen(fd, "rb") as handle:
-        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-            return None
         return handle.read(MAX_FILE_BYTES + 1)
 
 
@@ -247,6 +248,9 @@ def read_report(path: Path) -> Any:
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
+        return None
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
         return None
     with os.fdopen(fd, "rb") as handle:
         data = handle.read(MAX_REPORT_BYTES + 1)

@@ -9,7 +9,7 @@ from typing import Annotated, Literal, Self
 from pydantic import Field, StringConstraints, model_validator
 
 from aipm.domain.models.artifacts import GateName
-from aipm.domain.models.base import Severity, Str1000, StrictModel, TaskId
+from aipm.domain.models.base import RunId, Severity, Str200, Str1000, StrictModel, TaskId
 
 MAX_ARGV = 32
 MAX_ARG_LENGTH = 512
@@ -81,14 +81,29 @@ GateOutput = Annotated[str, StringConstraints(max_length=MAX_GATE_OUTPUT, strip_
 """A gate's output, kept as written (T2: it comes from programs that ran agent code)."""
 
 
+class GateFinding(StrictModel):
+    """One scanner or check finding, normalized (ARCHITECTURE §13.2). T2."""
+
+    tool: Annotated[str, StringConstraints(max_length=40)]
+    rule: Str200 = ""
+    severity: Severity = Severity.HIGH
+    path: Annotated[str, StringConstraints(max_length=512)] = ""
+    line: Annotated[int, Field(ge=1, le=10_000_000)] | None = None
+    message: Annotated[str, StringConstraints(max_length=500)] = ""
+
+
 class GateResult(StrictModel):
-    """One gate's result. `output` is the captured output, cut to head and tail in prompts."""
+    """One gate's result. `output` is the captured output, cut to head and tail in prompts;
+    the full output is in the run directory at `output_ref`."""
 
     name: GateName
     status: GateStatus
+    required: bool = False
     duration_ms: Annotated[int, Field(ge=0, le=86_400_000)] = 0
     summary: Str1000 = ""
+    findings: list[GateFinding] = Field(default_factory=list[GateFinding], max_length=100)
     output: GateOutput = ""
+    output_ref: Annotated[str, StringConstraints(max_length=300)] | None = None
 
 
 class GateReport(StrictModel):
@@ -97,6 +112,8 @@ class GateReport(StrictModel):
 
     schema_version: Literal[1] = 1
     task: TaskId
+    run_id: RunId | None = None
+    attempt: Annotated[int, Field(ge=0, le=100)] | None = None
     gates: list[GateResult] = Field(default_factory=list[GateResult], max_length=32)
 
     def failures(self) -> list[GateResult]:

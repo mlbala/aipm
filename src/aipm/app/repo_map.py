@@ -55,9 +55,10 @@ def _read_ignore(path: Path) -> list[str]:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         return []
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        return []
     with os.fdopen(fd, "rb") as handle:
-        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-            return []
         data = handle.read(MAX_IGNORE_BYTES)
     return data.decode("utf-8", errors="replace").splitlines()[:MAX_IGNORE_LINES]
 

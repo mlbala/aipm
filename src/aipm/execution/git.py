@@ -324,6 +324,16 @@ def ignored(repo: Path) -> list[str | None]:
     return [_decode(item) for item in _fields(out)]
 
 
+def repo_files(repo: Path) -> list[str | None]:
+    """Every tracked file and every untracked file that is not ignored (`aipm scan`)."""
+    out = _checked(
+        _run(repo, "ls-files", "-z", "--cached", "--others", "--exclude-standard",
+             max_output=MAX_LIST_BYTES),
+        "ls-files",
+    )  # fmt: skip
+    return [p for p in map(_decode, _fields(out)) if not _bytecode(p)]
+
+
 def tree_entries(repo: Path, rev: str) -> dict[str, tuple[str, str]]:
     """Every file of the commit `rev`: path → (mode, object id). Reads objects only."""
     out = _checked(
@@ -475,6 +485,10 @@ def _hash_file(path: Path, digest: "_Digest", size: int) -> None:
     except OSError as exc:
         digest.update(f"unreadable\0{exc.errno}".encode())
         return
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        digest.update(b"changed type while read")
+        return
     with os.fdopen(fd, "rb") as handle:
         left = MAX_HASH_BYTES
         while left > 0:
@@ -610,12 +624,20 @@ class Listing:
     ignored_files: list[str | None]
 
 
+def _bytecode(path: str | None) -> bool:
+    """A Python bytecode cache: gates neither write nor read these in the tree
+    (`PYTHONPYCACHEPREFIX`), so they are left out of snapshots and change sets."""
+    return path is not None and ("__pycache__" in path.split("/") or path.endswith(".pyc"))
+
+
 def listing(repo: Path, base: str) -> Listing:
     """Tracked changes since `base`, untracked files, and ignored files (not directories)."""
     return Listing(
-        tracked=diff_names(repo, base),
-        untracked=untracked(repo),
-        ignored_files=[p for p in ignored(repo) if p is None or not p.endswith("/")],
+        tracked=[(s, p) for s, p in diff_names(repo, base) if not _bytecode(p)],
+        untracked=[p for p in untracked(repo) if not _bytecode(p)],
+        ignored_files=[
+            p for p in ignored(repo) if p is None or not (p.endswith("/") or _bytecode(p))
+        ],
     )
 
 
@@ -675,9 +697,10 @@ def _read_now(path: Path, limit: int) -> tuple[bytes | None, bool]:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         return None, False
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        return None, False
     with os.fdopen(fd, "rb") as handle:
-        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-            return None, False
         data = handle.read(limit + 1)
     return data[:limit], len(data) > limit
 

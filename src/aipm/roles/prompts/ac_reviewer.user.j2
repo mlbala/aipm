@@ -1,0 +1,24 @@
+Task: {{ task_id }}
+
+## Acceptance criteria
+
+{% for criterion in criteria -%}
+- `{{ criterion.id }}`:
+
+{{ criterion.text | untrusted }}
+
+{% endfor -%}
+## Gate results
+
+{% for gate in gates -%}
+- `{{ gate.name }}`: {{ gate.status }}
+{% endfor %}
+## The diff
+{% if diff_cut %}
+The diff was cut to fit; judge only what you can see, and answer `unclear` for the rest.
+{% endif %}
+{{ diff | untrusted }}
+
+## Task
+
+Give one verdict for each acceptance criterion above.
