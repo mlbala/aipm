@@ -1,0 +1,20 @@
+#!/bin/sh
+# Stub gitleaks (build prompt 06): `gitleaks dir <path> ... --report-path FILE`, as aipm calls it.
+# Reports one finding for each scanned file that holds FAKE-LEAK-FOR-TESTS.
+if [ "$1" = "version" ]; then echo "8.30.1"; exit 0; fi
+[ "$1" = "dir" ] || { echo "stub gitleaks: unsupported: $*" >&2; exit 2; }
+target="$2"; report=""; prev=""
+for arg in "$@"; do
+  [ "$prev" = "--report-path" ] && report="$arg"
+  prev="$arg"
+done
+[ -n "$report" ] || { echo "stub gitleaks: no --report-path" >&2; exit 2; }
+sep=""
+printf '[' > "$report"
+for f in $(grep -rl "FAKE-LEAK-FOR-TESTS" "$target" 2>/dev/null); do
+  printf '%s{"RuleID":"fake-token","Description":"Fake token","File":"%s","StartLine":1}' \
+    "$sep" "${f#"$target"/}" >> "$report"
+  sep=","
+done
+printf ']\n' >> "$report"
+exit 0

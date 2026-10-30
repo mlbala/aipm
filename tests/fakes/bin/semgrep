@@ -1,0 +1,20 @@
+#!/bin/sh
+# Stub semgrep (build prompt 06): `semgrep scan --json --output FILE ... <target>`. Reports an
+# ERROR finding for each scanned file that calls eval(.
+if [ "$1" = "--version" ]; then echo "1.183.0"; exit 0; fi
+[ "$1" = "scan" ] || { echo "stub semgrep: unsupported: $*" >&2; exit 2; }
+out=""; prev=""; target=""
+for arg in "$@"; do
+  [ "$prev" = "--output" ] && out="$arg"
+  [ "$arg" = "auto" ] && { echo "stub semgrep: --config auto" >&2; exit 2; }
+  prev="$arg"; target="$arg"
+done
+sep=""
+printf '{"results":[' > "$out"
+for f in $(grep -rl "eval(" "$target" 2>/dev/null); do
+  printf '%s{"check_id":"python.lang.security.audit.eval-detected","path":"%s","start":{"line":1},"extra":{"message":"Detected eval","severity":"ERROR"}}' \
+    "$sep" "$f" >> "$out"
+  sep=","
+done
+printf '],"errors":[]}\n' >> "$out"
+exit 0

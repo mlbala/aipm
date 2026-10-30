@@ -1,0 +1,6 @@
+# aipm's gitleaks settings: gitleaks' own default rules and nothing else. aipm passes this file
+# with --config, so a repository's .gitleaks.toml (which could allowlist anything) is never read.
+title = "aipm gitleaks settings"
+
+[extend]
+useDefault = true
