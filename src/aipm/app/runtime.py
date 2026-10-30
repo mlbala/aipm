@@ -5,6 +5,7 @@ from pathlib import Path
 from aipm.app.workspace import find_repo_root
 from aipm.config.loader import user_redact_patterns
 from aipm.domain.errors import AipmError
+from aipm.llm.cache import ResponseCache
 from aipm.observability.logging import configure_logging, log_dir
 from aipm.observability.redaction import process_redactor
 from aipm.security.paths import is_within
@@ -65,3 +66,8 @@ def open_repo_store(root: Path, *, redactor: Redactor | None = None) -> FileStat
         redactor=redactor if redactor is not None else user_redactor(root),
         ledger=WriteLedger(root),
     )
+
+
+def llm_cache(store: FileStateStore) -> ResponseCache:
+    """The LLM response cache in `.pm/cache/llm/` (ARCHITECTURE §14)."""
+    return store

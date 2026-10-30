@@ -122,6 +122,22 @@ def check_blocks(text: str) -> int:
     return count
 
 
+def normalize_nonces(text: str) -> str:
+    """Replace each block's random nonce with its ordinal (`u00000001`, ...), for cache keys.
+
+    Nonces are fresh on every render, so without this no key would ever repeat; the prompt
+    that is sent keeps its random nonces (ARCHITECTURE §14).
+    """
+    seen: dict[str, str] = {}
+
+    def ordinal(match: re.Match[str]) -> str:
+        nonce = match.group(2) or match.group(3)
+        number = seen.setdefault(nonce, f"u{len(seen) + 1:08x}")
+        return match.group(0).replace(f'id="{nonce}"', f'id="{number}"')
+
+    return _BLOCK_TAG.sub(ordinal, text)
+
+
 def map_between_tags(text: str, transform: Callable[[str], str]) -> str:
     """Apply `transform` to every run of text between block tags, never to a tag or across one.
 

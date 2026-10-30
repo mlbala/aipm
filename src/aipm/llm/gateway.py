@@ -9,6 +9,7 @@ usage. It never sends `temperature`, `top_p` or `top_k`: no request type carries
 the rest of the gateway (redaction, validation, repair, budget) runs unchanged under test.
 """
 
+import json
 import logging
 import os
 import random
@@ -23,6 +24,7 @@ from aipm.config.schema import LlmConfig
 from aipm.config.schema import Provider as ProviderName
 from aipm.domain.errors import BudgetExceeded, PolicyViolation, UsageError
 from aipm.domain.models import RoleName
+from aipm.llm.cache import ResponseCache, cache_key
 from aipm.llm.cost import UsageLedger, usd_cost
 from aipm.llm.errors import (
     InvalidModelOutput,
@@ -125,8 +127,10 @@ class Gateway:
         ledger: UsageLedger | None = None,
         clock: Clock | None = None,
         rng: random.Random | None = None,
+        cache: ResponseCache | None = None,
     ) -> None:
         self.llm = llm
+        self.cache = cache
         self.provider = provider
         self.redactor = redactor
         self.ledger = ledger if ledger is not None else UsageLedger()
@@ -174,14 +178,51 @@ class Gateway:
 
     # ------------------------------------------------------------ the call
 
+    def _cached[T: BaseModel](self, key: str | None, schema: type[T]) -> T | None:
+        """A cached reply that still validates; one that does not is dropped (ARCHITECTURE §14)."""
+        if key is None or self.cache is None:
+            return None
+        text = self.cache.cache_get(key)
+        if text is None:
+            return None
+        try:
+            return parse_response(text, schema)
+        except OutputInvalid:
+            log.info("dropped a cached reply that no longer validates")
+            self.cache.cache_drop(key)
+            return None
+
     def run[T: BaseModel](
-        self, role: RoleName, prompt: RenderedPrompt, schema: type[T], *, budget: TokenBudget
+        self,
+        role: RoleName,
+        prompt: RenderedPrompt,
+        schema: type[T],
+        *,
+        budget: TokenBudget,
+        template_version: str | None = None,
     ) -> RoleResult[T]:
-        """Route, redact, call, validate (one repair attempt) and account."""
+        """Route, redact, call, validate (one repair attempt) and account.
+
+        With a cache and a `template_version`, a validated cached reply is returned without a
+        call, and a new validated reply is cached (ARCHITECTURE §14, `aipm.llm.cache`).
+        """
         model = self.model_for(role)
         wire = wire_schema(schema)
         system = self._redact(prompt.system, "system")
         user = self._redact(prompt.user, "user")
+        key = None
+        if self.cache is not None and template_version is not None:
+            key = cache_key(
+                provider=self.provider.name,
+                model=model,
+                role=role.value,
+                template_version=template_version,
+                rendered_prompt=f"{system}\n\0\n{user}",
+                schema_json=json.dumps(wire, sort_keys=True, ensure_ascii=True),
+            )
+            hit = self._cached(key, schema)
+            if hit is not None:
+                return RoleResult(value=hit, input_tokens=0, output_tokens=0, cost_usd=None)
         meter = _Meter(limit=budget.remaining_tokens)
         problems: list[str] = []
         for attempt in range(2):
@@ -200,6 +241,8 @@ class Gateway:
                     problems.insert(0, "the reply was cut off at the output token limit; be brief")
                 log.info("%s reply invalid (try %d): %s", role.value, attempt + 1, problems)
                 continue
+            if key is not None and self.cache is not None:
+                self.cache.cache_put(key, response.text)
             return RoleResult(
                 value=value,
                 input_tokens=meter.input_tokens,
@@ -364,7 +407,12 @@ def make_provider(llm: LlmConfig, *, environ: Mapping[str, str] | None = None) -
 
 
 def open_gateway(
-    llm: LlmConfig, *, redactor: Redactor, ledger: UsageLedger | None = None
+    llm: LlmConfig,
+    *,
+    redactor: Redactor,
+    ledger: UsageLedger | None = None,
+    cache: ResponseCache | None = None,
 ) -> Gateway:
     """A gateway for the configured provider. Pass the redactor built from the full environment."""
-    return Gateway(llm=llm, provider=make_provider(llm), redactor=redactor, ledger=ledger)
+    provider = make_provider(llm)
+    return Gateway(llm=llm, provider=provider, redactor=redactor, ledger=ledger, cache=cache)
