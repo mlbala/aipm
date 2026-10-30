@@ -77,7 +77,7 @@ def main(
     ] = 0,
     no_plugins: Annotated[bool, typer.Option("--no-plugins", help="Do not load plugins.")] = False,
     no_cache: Annotated[
-        bool, typer.Option("--no-cache", help="Bypass the LLM response cache (v0.2).")
+        bool, typer.Option("--no-cache", help="Bypass the LLM response cache.")
     ] = False,
     trace: Annotated[
         bool, typer.Option("--trace", help="Emit OpenTelemetry spans (v0.4).")

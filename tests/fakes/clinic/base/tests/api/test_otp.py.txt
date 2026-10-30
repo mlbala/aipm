@@ -1,0 +1,5 @@
+"""One-time codes (task T-003 owns this file)."""
+
+
+def test_wrong_code_is_rejected() -> None:
+    assert "123456" != "654321"

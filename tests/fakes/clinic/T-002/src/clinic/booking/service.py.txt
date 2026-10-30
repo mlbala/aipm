@@ -1,0 +1,31 @@
+"""The booking service: one appointment per slot."""
+
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+
+
+class SlotTaken(Exception):
+    """The slot already holds an appointment."""
+
+
+@dataclass
+class Booking:
+    """Free slots per doctor, and the appointments made."""
+
+    slots: dict[str, list[datetime]] = field(default_factory=dict)
+    taken: dict[tuple[str, datetime], str] = field(default_factory=dict)
+
+    def free_slots(self, doctor: str, now: datetime) -> list[datetime]:
+        """Slots of the next four weeks that hold no appointment."""
+        horizon = now + timedelta(weeks=4)
+        return [
+            s
+            for s in self.slots.get(doctor, [])
+            if now <= s < horizon and (doctor, s) not in self.taken
+        ]
+
+    def book(self, doctor: str, slot: datetime, patient: str) -> None:
+        """Book a slot, or raise SlotTaken."""
+        if (doctor, slot) in self.taken:
+            raise SlotTaken(f"{slot:%Y-%m-%d %H:%M} is already taken")
+        self.taken[(doctor, slot)] = patient

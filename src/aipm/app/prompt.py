@@ -11,8 +11,8 @@ The prompt is compiled without an LLM (`aipm.adapters.compiler`), written to
 printed, written to `--out` or copied is exactly the text the store wrote. When the task starts,
 its attempt snapshot is taken outside the repository, for `verify` (ADR-0021).
 
-`--fix` adds the failing output of the last verify. `verify` arrives in v0.2, so for now the
-saved gate report is named with `--report FILE`.
+`--fix` adds the failing output of the last verify: the newest report `aipm verify` saved in
+`.pm/runs/`, or the gate report named with `--report FILE`.
 """
 
 import os
@@ -104,11 +104,6 @@ def _check_options(options: PromptOptions) -> None:
         raise UsageError(f"{options.task_id!r} is not a task ID such as T-007")
     if options.report is not None and not options.fix:
         raise UsageError("--report goes with --fix")
-    if options.fix and options.report is None:
-        raise UsageError(
-            "--fix needs the failing checks: `aipm verify` saves them from v0.2 on",
-            hint="For now, pass a saved gate report with --report FILE.",
-        )
 
 
 def _check_task(task: Task, tasks: TasksDoc, options: PromptOptions) -> list[str]:
@@ -139,6 +134,22 @@ def _check_task(task: Task, tasks: TasksDoc, options: PromptOptions) -> list[str
     return [f"--force: {task.id} started before {', '.join(unfinished)} finished"]
 
 
+def parse_report(text: str, relpath: str, task_id: str) -> GateReport:
+    """A gate report (YAML or JSON), checked against the task; all of it is T2."""
+    raw = load_yaml(text, source=relpath)
+    try:
+        report = GateReport.model_validate(raw if raw is not None else {})
+    except ValidationError as exc:
+        first = exc.errors()[0]
+        where = ".".join(str(p) for p in first["loc"]) or "(file)"
+        raise SchemaError(f"{relpath} is not a gate report: {where}: {first['msg']}") from None
+    if report.task != task_id:
+        raise UsageError(f"{relpath} is the report of {report.task}, not {task_id}")
+    if not report.failures():
+        raise UsageError(f"{relpath} shows no failing check; there is nothing to fix")
+    return report
+
+
 def load_report(root: Path, given: Path, task_id: str, *, max_bytes: int) -> GateReport:
     """Read a saved gate report (YAML or JSON) from inside the repository; all of it is T2."""
     file = read_repo_file(root, given, max_bytes=max_bytes, what="--report")
@@ -146,18 +157,19 @@ def load_report(root: Path, given: Path, task_id: str, *, max_bytes: int) -> Gat
         text = file.data.decode("utf-8")
     except UnicodeDecodeError:
         raise InputRejected(f"--report {file.relpath} is not valid UTF-8") from None
-    raw = load_yaml(text, source=file.relpath)
-    try:
-        report = GateReport.model_validate(raw if raw is not None else {})
-    except ValidationError as exc:
-        first = exc.errors()[0]
-        where = ".".join(str(p) for p in first["loc"]) or "(file)"
-        raise SchemaError(f"{file.relpath} is not a gate report: {where}: {first['msg']}") from None
-    if report.task != task_id:
-        raise UsageError(f"{file.relpath} is the report of {report.task}, not {task_id}")
-    if not report.failures():
-        raise UsageError(f"{file.relpath} shows no failing check; there is nothing to fix")
-    return report
+    return parse_report(text, file.relpath, task_id)
+
+
+def latest_report(store: FileStateStore, task_id: str) -> GateReport:
+    """The newest report `aipm verify` saved for the task (`--fix` without `--report`)."""
+    text = store.latest_report(task_id)
+    if text is None:
+        raise UsageError(
+            f"--fix needs the failing checks, and {task_id} has no saved verify report",
+            hint=f"Run `aipm verify {task_id}` first, or pass a saved gate report with "
+            "--report FILE.",
+        )
+    return parse_report(text, f"the latest verify report of {task_id}", task_id)
 
 
 def write_out(root: Path, given: Path, text: str, *, extra_protected: Sequence[str] = ()) -> str:
@@ -215,11 +227,12 @@ def run(project: Path | None, options: PromptOptions) -> PromptResult:
         task = next((t for t in tasks.tasks if t.id == options.task_id), None) if tasks else None
         if tasks is None or task is None:
             raise UsageError(f"there is no task {options.task_id} in .pm/tasks.yaml")
+        saved = latest_report(store, task.id) if options.fix and options.report is None else None
         warnings += _check_task(task, tasks, options)
         report = (
             load_report(root, options.report, task.id, max_bytes=cfg.security.max_input_kib * 1024)
             if options.report is not None
-            else None
+            else saved
         )
         keep = task.status is TaskStatus.IN_PROGRESS and task.base_sha is not None
         base_sha = task.base_sha if keep and task.base_sha is not None else head_sha(root)
