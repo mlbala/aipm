@@ -108,6 +108,10 @@ def clinic(
     tmp_repo: Path, llm: FakeLLM, monkeypatch: pytest.MonkeyPatch, user_dirs: UserDirs
 ) -> Path:
     monkeypatch.setenv("PATH", f"{STUBS}{os.pathsep}{os.environ['PATH']}")
+    # A git identity, as every user who commits has (Linux git cannot guess one).
+    (user_dirs.home / ".gitconfig").write_text(
+        "[user]\n\tname = aipm owner\n\temail = owner@example.invalid\n", encoding="utf-8"
+    )
     planned(tmp_repo)
     use_test_gates(tmp_repo)
     install(FIXTURE / "base", tmp_repo)
@@ -140,6 +144,8 @@ def test_a_good_implementation_verifies_and_commits(clinic: Path, tmp_path: Path
     }  # fmt: skip
     assert data["sandboxed"] is True
     assert not marker.exists()
+    author = run_git(clinic, "log", "-1", "--format=%an <%ae>").strip()
+    assert author == "aipm owner <owner@example.invalid>"
     log = run_git(clinic, "log", "-1", "--format=%s%n%b")
     assert log.startswith("aipm: T-002 Slots and appointments without double booking\n")
     assert "Aipm-Task: T-002\n" in log and "Aipm-Attempt: 1\n" in log
