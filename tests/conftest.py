@@ -90,6 +90,24 @@ def run_git(repo: Path, *args: str) -> str:
     return out.stdout.decode("utf-8", errors="replace")
 
 
+def run_program(
+    argv: list[str], *, env: dict[str, str], cwd: Path, timeout: float = 30
+) -> "subprocess.CompletedProcess[str]":
+    """Test tooling: run a program (a shell script under test) with a constructed environment,
+    no stdin and no controlling terminal, so nothing can wait for an answer."""
+    return subprocess.run(
+        argv,
+        cwd=cwd,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+        start_new_session=True,
+    )
+
+
 @pytest.fixture
 def tmp_repo(tmp_path: Path) -> Path:
     """A temporary git repository on `main` with one commit."""
