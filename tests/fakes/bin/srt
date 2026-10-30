@@ -1,0 +1,13 @@
+#!/bin/sh
+# Stub srt (ADR-0020): checks the settings file exists, then runs the command as given.
+# It sandboxes nothing; only tests/security/test_gate_sandbox.py runs under the real one.
+if [ "$1" = "--version" ]; then
+  echo "0.0.81"
+  exit 0
+fi
+if [ "$1" != "--settings" ] || [ ! -f "$2" ] || [ "$3" != "--" ]; then
+  echo "stub srt: unsupported arguments: $*" >&2
+  exit 1
+fi
+shift 3
+exec "$@"

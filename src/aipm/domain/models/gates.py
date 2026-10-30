@@ -37,6 +37,7 @@ class NetworkProfile(StrEnum):
     NONE = "none"
     REGISTRIES = "registries"
     API_ONLY = "api-only"
+    OPEN = "open"
 
 
 class GateDef(StrictModel):
