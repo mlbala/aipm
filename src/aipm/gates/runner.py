@@ -26,6 +26,7 @@ from aipm.gates.builtin.ac_review import Reviewer
 from aipm.gates.command_gate import run_command_gate, run_prepare
 from aipm.gates.context import GateContext, owned_paths
 from aipm.gates.reports import TestReport
+from aipm.observability import tracing
 from aipm.security.paths import SafeRelPath
 
 GATE_ORDER: tuple[str, ...] = (
@@ -198,13 +199,16 @@ def run_gates(
                            summary=f"not run: the required gate {stopped} failed first")
             )  # fmt: skip
             continue
-        if gate is None:
-            message = f"{ctx.task.id} names {name}, which is not in the gate menu"
-            attempt.run.results.append(_error(name, message, required=True))
-        elif gate.run is not None:
-            attempt.command(name, gate, paths, name in named or gate.required)
-        else:
-            attempt.builtin(name, gate, name in named or gate.required)
+        with tracing.span("aipm.gate", gate=name, task_id=ctx.task.id) as span:
+            if gate is None:
+                message = f"{ctx.task.id} names {name}, which is not in the gate menu"
+                attempt.run.results.append(_error(name, message, required=True))
+            elif gate.run is not None:
+                attempt.command(name, gate, paths, name in named or gate.required)
+            else:
+                attempt.builtin(name, gate, name in named or gate.required)
+            last = attempt.run.results[-1]
+            span.set(status=last.status.value, required=last.required)
         if fail_fast:
             stopped = _failed_required(attempt.run)
     return attempt.run

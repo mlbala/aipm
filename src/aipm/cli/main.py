@@ -31,7 +31,7 @@ from aipm.cli.commands import (
     trust,
     verify,
 )
-from aipm.cli.output import GlobalOptions
+from aipm.cli.output import GlobalOptions, print_untrusted
 
 app = typer.Typer(
     name="aipm",
@@ -103,7 +103,9 @@ def main(
     )
     from aipm.app import session
 
-    session.configure(project=project, plugins=not no_plugins)
+    warning = session.configure(project=project, plugins=not no_plugins, trace=trace)
+    if warning is not None:
+        print_untrusted(f"warning: {warning}", err=True)
     if ctx.invoked_subcommand is None:
         phase.show(ctx)
 

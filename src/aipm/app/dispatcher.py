@@ -46,6 +46,7 @@ from aipm.execution.sandbox import (
     path_dirs,
     profile_for,
 )
+from aipm.observability import tracing
 from aipm.security.command_policy import check_forbidden_flags
 from aipm.security.network import NetworkPolicy, allowed_domains
 
@@ -215,13 +216,23 @@ async def dispatch(
         )
         network = agent_network(isolation.network, invocation.api_domains)
         profile = profile_for(ProcessKind.AGENT, network, paths, runtime=isolation.runtime)
-    out = await run_safe_async(
-        invocation.argv,
-        cwd=ws.root,
-        env=invocation.env,
-        timeout_s=limits.timeout_s,
-        stdin=invocation.stdin,
-        max_output_bytes=MAX_AGENT_OUTPUT,
-        sandbox=profile,
-    )
-    return Dispatch(adapter.parse_result(out), out, invocation.argv)
+    with tracing.span("aipm.dispatch", tool=adapter.name.value, task_id=prompt.task_id) as span:
+        out = await run_safe_async(
+            invocation.argv,
+            cwd=ws.root,
+            env=invocation.env,
+            timeout_s=limits.timeout_s,
+            stdin=invocation.stdin,
+            max_output_bytes=MAX_AGENT_OUTPUT,
+            sandbox=profile,
+        )
+        result = adapter.parse_result(out)
+        span.set(
+            exit_code=out.returncode,
+            timed_out=out.timed_out,
+            saw_result=result.saw_result,
+            is_error=result.is_error,
+            cost_usd=result.cost_usd,
+            duration_ms=int(out.duration_s * 1000),
+        )
+    return Dispatch(result, out, invocation.argv)

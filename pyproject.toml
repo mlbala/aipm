@@ -281,6 +281,16 @@ allow_indirect_imports = true
 # of package existence and first-release age (SECURITY.md §12.2; urllib only, no redirects).
 unmatched_ignore_imports_alerting = "none"
 
+# OpenTelemetry export is the opt-in third network path (ADR-0027): only the tracing module
+# imports it, lazily, once --trace and OTEL_EXPORTER_OTLP_ENDPOINT are both set.
+[[tool.importlinter.contracts]]
+name = "Only aipm.observability.tracing imports OpenTelemetry"
+type = "forbidden"
+source_modules = ["aipm"]
+forbidden_modules = ["opentelemetry"]
+ignore_imports = ["aipm.observability.tracing -> opentelemetry"]
+allow_indirect_imports = true
+
 [[tool.importlinter.contracts]]
 name = "cli imports only app, domain.errors and security.sanitize"
 type = "forbidden"
