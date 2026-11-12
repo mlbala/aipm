@@ -121,7 +121,7 @@ def test_second_init_needs_force_and_force_keeps_artifacts(tmp_repo: Path) -> No
 @pytest.mark.parametrize(
     ("args", "message"),
     [
-        (["--stack", "go"], "unknown stack template"),
+        (["--stack", "cobol"], "unknown stack template"),  # go was unknown until v0.4
         (["--tool", "cursor"], "unknown tool"),
         (["--provider", "evil"], "unknown provider"),
     ],

@@ -394,3 +394,18 @@ def test_go_traces_criteria_and_cargo_says_it_cannot() -> None:
     cargo = load_stack("rust-cargo")
     assert "{report_file}" not in (cargo.gates["unit"].run or [])
     assert not cargo.gates["ac_trace"].required
+
+
+@pytest.mark.parametrize(
+    ("manifests", "stack"),
+    [
+        (("go.mod", "go.sum"), "go"),
+        (("Cargo.toml", "Cargo.lock"), "rust-cargo"),
+        (("pyproject.toml", "uv.lock", "go.mod"), "python-uv"),
+        (("README.md",), None),
+    ],
+)
+def test_init_detects_the_v04_stacks(manifests: tuple[str, ...], stack: str | None) -> None:
+    from aipm.app.init import detect_stack  # noqa: PLC0415
+
+    assert detect_stack(manifests) == stack
