@@ -47,6 +47,7 @@ Fixes from the step 07 security review:
 - An npm-installed `claude` (`#!/usr/bin/env node`) has its interpreter resolved outside the repository and started explicitly, for detection and dispatch, so a `node` planted in an active `.venv/bin` never runs.
 - aipm records the tips it gives the integration branch outside the repository; `build` and `merge` refuse one it did not set (a branch that came with a copied `.git`), unless HEAD already contains it.
 - SIGTERM and SIGHUP stop a build like Ctrl-C, instead of orphaning running agents; the journal records each attempt's own cost, and a resumed run charges the task budget for an agent that started but never finished.
+- A re-review of those fixes: putting a changed file back no longer lets git write the agent-writable worktree (git resets only the index; aipm writes the base blobs itself, with the same descriptor walk), and a task's commit is rebased in a fresh worktree no agent knows of; a rebase whose result touches other paths than the verified commit counts as a conflict. `..` and other non-plain paths are refused, and a path aipm cannot put back blocks the task instead of stopping the run. Gates may not read any agent's config home, and agents may not read the other tasks' homes. Tools are looked up outside aipm's worktrees too. A build started under `nohup` keeps ignoring SIGHUP, and a dispatch that never started is journaled as costing nothing.
 
 The v0.2 red-team pass ([docs/security/reviews/v0.2.md](docs/security/reviews/v0.2.md)) found eight problems and one robustness bug, all fixed:
 

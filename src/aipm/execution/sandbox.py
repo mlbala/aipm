@@ -264,22 +264,29 @@ class SandboxStatus:
     launcher: tuple[str, ...] | None = None
 
 
-def which_outside(name: str, repo: Path) -> str | None:
-    """`name` on PATH, skipping relative entries and every entry inside the repository."""
+def which_outside(name: str, repo: Path, *, also: Sequence[Path] = ()) -> str | None:
+    """`name` on PATH, skipping relative entries and every entry inside the repository (or
+    inside `also`: aipm's task worktrees, which agents write)."""
     from aipm.execution.process import is_inside  # noqa: PLC0415 - process imports us
 
+    roots = (repo, *also)
     for entry in os.environ.get("PATH", "").split(os.pathsep):
-        if not entry or not Path(entry).is_absolute() or is_inside(entry, repo):
+        if not entry or not Path(entry).is_absolute() or any(is_inside(entry, r) for r in roots):
             continue
         candidate = Path(entry) / name
         usable = candidate.is_file() and os.access(candidate, os.X_OK)
-        if usable and not is_inside(str(candidate), repo):
+        if usable and not any(is_inside(str(candidate), r) for r in roots):
             return str(candidate)
     return None
 
 
 def launcher_for(
-    srt: str, repo: Path, *, name: str = "srt", hint: str = INSTALL_HINT
+    srt: str,
+    repo: Path,
+    *,
+    name: str = "srt",
+    hint: str = INSTALL_HINT,
+    also: Sequence[Path] = (),
 ) -> tuple[str, ...]:
     """How to start a script without trusting PATH for its interpreter (step 06 review).
 
@@ -304,14 +311,14 @@ def launcher_for(
     if Path(words[0]).name == "env":
         if len(words) != 2 or words[1].startswith("-"):
             raise MissingCapability(f"cannot tell how to start {srt}: {first[:80]!r}")
-        found = which_outside(words[1], repo)
+        found = which_outside(words[1], repo, also=also)
         if found is None:
             raise MissingCapability(
                 f"{name} needs {words[1]}, which is not on PATH outside the repository",
                 hint=hint,
             )
         return (found, srt)
-    if is_inside(words[0], repo):
+    if any(is_inside(words[0], root) for root in (repo, *also)):
         raise PolicyViolation(f"{name}'s interpreter {words[0]} is inside the repository")
     return (srt,)
 

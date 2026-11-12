@@ -56,6 +56,7 @@ from aipm.execution.process import (
     run_safe,
 )
 from aipm.execution.sandbox import launcher_for, which_outside
+from aipm.execution.worktree import WORKTREES_DIR, cache_root
 from aipm.security.command_policy import check_forbidden_flags
 from aipm.security.sanitize import sanitize_text
 from aipm.security.untrusted import (
@@ -184,7 +185,12 @@ def _detect(
     path = os.path.realpath(found)
     # An npm-installed `claude` is a `#!/usr/bin/env node` script: with a repository, `node` is
     # resolved outside it and started explicitly, never looked up on PATH (step 07 review).
-    launcher = (path,) if repo is None else launcher_for(path, repo, name="claude", hint=_HINT)
+    worktrees = (cache_root() / WORKTREES_DIR,)
+    launcher = (
+        (path,)
+        if repo is None
+        else launcher_for(path, repo, name="claude", hint=_HINT, also=worktrees)
+    )
     caps = _detected.get(_key(path, launcher)) or _version(path, launcher)
     if flags and caps.version is not None and not caps.flags_checked:
         caps = _flags(caps)
@@ -363,11 +369,14 @@ class ClaudeCodeAdapter:
         if repo is None:
             return self._which
 
+        worktrees = cache_root() / WORKTREES_DIR
+
         def outside(name: str) -> str | None:
             if self._which is shutil.which:
-                return which_outside(name, repo)
+                return which_outside(name, repo, also=(worktrees,))
             found = self._which(name)
-            return None if found is None or is_inside(found, repo) else found
+            inside = found is not None and any(is_inside(found, r) for r in (repo, worktrees))
+            return None if found is None or inside else found
 
         return outside
 

@@ -1461,15 +1461,17 @@ def checked_out(repo: Path, branch: str) -> list[str]:
     return [w.path for w in worktrees(repo) if w.branch == branch]
 
 
-def worktree_add(repo: Path, path: Path, branch: str, start: str) -> None:
-    """Check `start` out into a new worktree at `path`, on `branch`, created or reset there.
+def worktree_add(repo: Path, path: Path, branch: str | None, start: str) -> None:
+    """Check `start` out into a new worktree at `path`, on `branch` (created or reset there), or
+    detached when `branch` is `None`.
 
     The checkout reads the repository's attributes, so its config is checked first (ADR-0022).
     """
     check_repo_config(repo)
+    where = ["--detach"] if branch is None else ["--no-track", "-B", check_branch(branch)]
     result = _run(
-        repo, "worktree", "add", "--quiet", "--no-track", "-B", check_branch(branch),
-        str(path), _full_sha(start), timeout=COMMIT_TIMEOUT_S, max_output=65_536,
+        repo, "worktree", "add", "--quiet", *where, str(path), _full_sha(start),
+        timeout=COMMIT_TIMEOUT_S, max_output=65_536,
     )  # fmt: skip
     _checked(result, "worktree add")
 
@@ -1497,52 +1499,111 @@ def _remove_new(wt: Path, path: str) -> None:
     review). So nothing is resolved through the tree: each leading directory is opened with
     `O_NOFOLLOW` relative to the one before, and the last name is removed relative to that.
     """
-    parts = path.rstrip("/").split("/")
-    fd = os.open(wt, os.O_RDONLY | os.O_DIRECTORY)
+    fd = _open_parent(wt, path, create=False)
+    if fd is None:
+        return
     try:
-        for part in parts[:-1]:
-            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        _clear(fd, _parts(path)[-1])
+    finally:
+        os.close(fd)
+
+
+def _parts(path: str) -> list[str]:
+    parts = path.rstrip("/").split("/")
+    if path.startswith("/") or any(p in ("", ".", "..") for p in parts):
+        raise PolicyViolation(f"{path[:200]!r} is not a plain path inside the work tree")
+    return parts
+
+
+def _open_parent(wt: Path, path: str, *, create: bool) -> int | None:
+    """An fd on the directory that holds `path`, reached from `wt` one name at a time with
+    `O_NOFOLLOW` (a link anywhere on the way is refused, exit 6); `None` when a directory is
+    missing and `create` is false."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open(wt, os.O_RDONLY | os.O_DIRECTORY)
+    for part in _parts(path)[:-1]:
+        try:
             try:
                 inner = os.open(part, flags, dir_fd=fd)
             except FileNotFoundError:
-                return
-            except OSError:  # a link or a file where a directory should be
-                raise PolicyViolation(f"{path} does not lie inside the work tree") from None
+                if not create:
+                    os.close(fd)
+                    return None
+                os.mkdir(part, 0o755, dir_fd=fd)
+                inner = os.open(part, flags, dir_fd=fd)
+        except OSError:  # a link or a file where a directory should be
             os.close(fd)
-            fd = inner
-        name = parts[-1]
-        try:
-            info = os.stat(name, dir_fd=fd, follow_symlinks=False)
-        except FileNotFoundError:
+            raise PolicyViolation(f"{path} does not lie inside the work tree") from None
+        os.close(fd)
+        fd = inner
+    return fd
+
+
+def _clear(fd: int, name: str) -> None:
+    """Remove `name` from the directory `fd`; a link is removed, never followed."""
+    try:
+        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(info.st_mode):
+        shutil.rmtree(name, dir_fd=fd)
+    else:
+        os.unlink(name, dir_fd=fd)
+
+
+MAX_RESTORE_BYTES = 64 * 1_048_576
+
+
+def _write_base(wt: Path, path: str, entry: tuple[str, str]) -> None:
+    """Write `path` as the base commit has it, without git and without following a link."""
+    mode, oid = entry
+    if mode == GITLINK_MODE:
+        return  # a submodule's commit cannot be written back; the checks still see it
+    data, cut = read_object(wt, oid, max_bytes=MAX_RESTORE_BYTES)
+    if cut:
+        raise PolicyViolation(f"{path} is too large for aipm to restore")
+    fd = _open_parent(wt, path, create=True)
+    assert fd is not None  # noqa: S101 - create=True never returns None
+    name = _parts(path)[-1]
+    try:
+        _clear(fd, name)
+        if mode == SYMLINK_MODE:
+            os.symlink(os.fsdecode(data), name, dir_fd=fd)
             return
-        if stat.S_ISDIR(info.st_mode):
-            shutil.rmtree(name, dir_fd=fd)
-        else:
-            os.unlink(name, dir_fd=fd)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        out = os.open(name, flags, 0o755 if mode == "100755" else 0o644, dir_fd=fd)
+        with os.fdopen(out, "wb") as handle:
+            handle.write(data)
     finally:
         os.close(fd)
 
 
 def restore_paths(wt: Path, base: str, paths: Sequence[str]) -> None:
     """Put each path back as the commit `base` has it: restored if `base` has it, deleted if
-    not, in the work tree and the index (minor post-change violations, ARCHITECTURE §12.4)."""
+    not, in the work tree and the index (minor post-change violations, ARCHITECTURE §12.4).
+    A path aipm cannot put back blocks the task (exit 6)."""
     if not paths:
         return
+    for path in paths:
+        _parts(path)
     check_repo_config(wt)
     tree = tree_entries(wt, _full_sha(base))
-    known = sorted(p for p in paths if p.rstrip("/") in tree)
-    new = sorted(p for p in paths if p.rstrip("/") not in tree)
-    if known:
-        result = _run(wt, "restore", f"--source={base}", "--staged", "--worktree", "--", *known,
-                      timeout=COMMIT_TIMEOUT_S, max_output=65_536)  # fmt: skip
-        _checked(result, "restore")
-    for path in new:
-        _remove_new(wt, path)
-    if new:
-        stripped = [p.rstrip("/") for p in new]
-        result = _run(wt, "rm", "--cached", "--quiet", "--ignore-unmatch", "-r", "--", *stripped,
-                      max_output=65_536)  # fmt: skip
-        _checked(result, "rm --cached")
+    stripped = sorted({p.rstrip("/") for p in paths})
+    # git only resets the index here; aipm writes the files itself, so a process left behind
+    # in this agent-writable tree cannot race git's own check-then-write (step 07 review).
+    result = _run(wt, "reset", "-q", _full_sha(base), "--", *stripped, max_output=65_536)
+    if result.returncode not in (0, 1) or result.timed_out:
+        _checked(result, "reset")
+    try:
+        for path in stripped:
+            if path in tree:
+                _write_base(wt, path, tree[path])
+            else:
+                _remove_new(wt, path)
+    except OSError as exc:
+        raise PolicyViolation(
+            f"aipm could not put {exc.filename or 'a path'} back: {exc.strerror}"
+        ) from None
 
 
 def rebase_onto(wt: Path, onto: str, upstream: str) -> bool:

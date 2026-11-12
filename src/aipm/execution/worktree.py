@@ -15,6 +15,7 @@ tip aipm gives it is recorded outside the repository, so a branch that came with
 
 import json
 import os
+import secrets
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -209,10 +210,14 @@ def integrate(repo: Path, wt: Path, branch: str, commit: str, base: str) -> str 
     if head is None:
         raise UsageError(f"the integration branch {branch} is gone")
     if head != base:
-        git.clean(wt)
-        if not git.rebase_onto(wt, head, base):
+        rebased = _rebase_aside(repo, wt.parent, commit, head, base)
+        # A rebase that changed other paths than the verified commit did (a rename, a merge
+        # of another task's file) is treated as a conflict: no gate saw that result.
+        if rebased is None or sorted(git.changed_paths(repo, head, rebased)) != sorted(
+            git.changed_paths(repo, base, commit)
+        ):
             return None
-        commit = git.head_sha(wt)
+        commit = rebased
     found = git.trailer_commits(repo, commit, since=head, limit=2)
     if len(found) != 1 or found[0].parents != (head,):
         raise PolicyViolation(
@@ -222,6 +227,21 @@ def integrate(repo: Path, wt: Path, branch: str, commit: str, base: str) -> str 
     git.update_ref(repo, branch, commit, head)
     record_tip(repo, branch, commit)
     return commit
+
+
+def _rebase_aside(repo: Path, root: Path, commit: str, onto: str, base: str) -> str | None:
+    """Rebase `commit` onto `onto` in a fresh, detached worktree no agent knows of, so a process
+    an agent left behind in its own worktree cannot race git's writes (step 07 review)."""
+    aside = root / f".integrate-{secrets.token_hex(8)}"
+    git.worktree_add(repo, aside, None, commit)
+    try:
+        if not git.rebase_onto(aside, onto, base):
+            return None
+        return git.head_sha(aside)
+    finally:
+        git.worktree_remove(repo, aside)
+        if aside.exists() and not aside.is_symlink():
+            shutil.rmtree(aside)
 
 
 def find_task_commit(

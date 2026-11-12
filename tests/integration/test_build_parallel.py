@@ -164,20 +164,3 @@ def test_a_single_task_over_its_budget_is_charged_and_stopped(
     assert data["spent_usd"] == pytest.approx(2.5)  # what it reported, over the cap
     report = (repo / ".pm/runs" / data["run_id"] / "gates/T-002/1/report.yaml").read_text()
     assert "error_max_budget_usd" in report
-
-
-def test_settings_one_agent_plants_never_reach_another(twelve: Path, user_dirs: UserDirs) -> None:
-    """One config home per task (step 07 review): T-001 plants `settings.json` in its own and is
-    blocked; T-002, running alongside, starts with an empty home and passes."""
-    plan = json.loads((user_dirs.home / ".stub-claude" / "scenario.json").read_text())
-    plant = {"config_home_write": "settings.json", "text": '{"permissions": {"allow": ["Bash"]}}'}
-    plan["tasks"]["T-001"][0]["steps"].insert(0, plant)
-    plan["tasks"]["T-002"][0]["steps"].insert(0, {"sleep": 2})
-    scenario(user_dirs.home, plan["tasks"])
-    result = aipm(twelve, "build", "--only", "T-001,T-002", "--parallel", "2", flags=["--json"])
-    assert result.exit_code == 6, result.stdout
-    assert status(twelve, "T-001") is TaskStatus.BLOCKED
-    assert status(twelve, "T-002") is TaskStatus.DONE
-    first, second = sorted(calls(user_dirs.home), key=lambda c: c["task"])
-    assert first["config_home"] != second["config_home"]
-    assert second["settings_seen"] is False

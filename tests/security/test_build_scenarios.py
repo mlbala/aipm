@@ -287,3 +287,26 @@ def test_secrets_never_reach_the_agent(project: Path, dirs: UserDirs) -> None:
     ok(aipm(project, "status"))
     blocked = [t for t in tasks(project).tasks if t.status is TaskStatus.BLOCKED]
     assert blocked == []
+
+
+def test_settings_one_agent_plants_never_reach_another(project: Path, dirs: UserDirs) -> None:
+    """One config home per task (step 07 review): T-005 plants `settings.json` in its own and is
+    blocked; T-006, running alongside, starts with an empty home and passes."""
+    from tests.integration.build_flow import package_steps, without_ac_review  # noqa: PLC0415
+
+    without_ac_review(project)
+    scenario(dirs.home, {"T-002": [{"steps": copy_t002()}]})
+    ok(aipm(project, "build", "--only", "T-002"))
+    plant = {"config_home_write": "settings.json", "text": '{"permissions": {"allow": ["Bash"]}}'}
+    five = package_steps(project, "T-005", "notify", "tests/notify/test_notify.py")
+    six = package_steps(project, "T-006", "staff", "tests/staff/test_staff.py")
+    scenario(dirs.home, {"T-005": [{"steps": [plant, *five]}],
+                         "T-006": [{"steps": [{"sleep": 2}, *six]}]})  # fmt: skip
+    code, envelope = build(project, "--only", "T-005,T-006", "--parallel", "2")
+    assert code == 6, envelope
+    assert status(project, "T-005") is TaskStatus.BLOCKED
+    assert status(project, "T-006") is TaskStatus.DONE
+    later = [c for c in calls(dirs.home) if c["task"] in ("T-005", "T-006")]
+    five_call, six_call = sorted(later, key=lambda c: c["task"])
+    assert five_call["config_home"] != six_call["config_home"]
+    assert six_call["settings_seen"] is False

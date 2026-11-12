@@ -300,7 +300,7 @@ class BuildLoop:
         finally:
             if installed:
                 for sig in STOP_SIGNALS:
-                    loop.remove_signal_handler(sig)
+                    loop.remove_signal_handler(sig)  # a no-op for one never installed
             self._finish()
         return self._summary()
 
@@ -309,6 +309,8 @@ class BuildLoop:
         the same way: agents and gates run in their own sessions and would outlive aipm."""
         try:
             for sig in STOP_SIGNALS:
+                if sig is signal.SIGHUP and signal.getsignal(sig) is signal.SIG_IGN:
+                    continue  # started under nohup: a closed terminal must not stop it
                 loop.add_signal_handler(sig, self._on_interrupt)
         except (NotImplementedError, RuntimeError, ValueError):
             return False
@@ -463,6 +465,13 @@ class BuildLoop:
         base = cache_root() / AGENT_HOMES_DIR / repo_id(self.root) / self.run_id
         self.agent_root = outside_repo(base, self.root, "the agents' config homes")
         self.agent_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    def _other_homes(self, task_id: str) -> tuple[Path, ...]:
+        """The other tasks' config homes in this run: their transcripts hold their prompts and
+        the files they read, which an agent may not read (step 07 re-review)."""
+        if not self.agent_root.is_dir():
+            return ()
+        return tuple(sorted(p for p in self.agent_root.iterdir() if p.name != task_id))
 
     def _fresh_home(self, task_id: str) -> Path:
         """The task's own config home, empty: one per task, so no agent sees settings another
@@ -723,7 +732,7 @@ class BuildLoop:
                 runtime=self.runtime,
                 home=self.home,
                 main_pm=self.root / ".pm",
-                other_worktrees=self.worktrees.others(task_id),
+                other_worktrees=(*self.worktrees.others(task_id), *self._other_homes(task_id)),
                 network=self.cfg.security.network.agent,
             )
             if self.sandbox_warning is not None:
@@ -744,13 +753,17 @@ class BuildLoop:
                     ws,
                     isolation,
                 )
-            except PolicyViolation as exc:
+            except AipmError as exc:
+                # The agent never started: nothing was spent, and the journal says so.
                 self.spend.settle(key, 0.0)
-                self.store.append_event(
-                    SecurityEventKind.FORBIDDEN_FLAG,
-                    source=f"build:{task_id}",
-                    detail=exc.message[:1000],
-                )
+                self._journal(JournalEventType.AGENT_FINISHED, task_id, number, started=False,
+                              cost_usd=0.0)  # fmt: skip
+                if isinstance(exc, PolicyViolation):
+                    self.store.append_event(
+                        SecurityEventKind.FORBIDDEN_FLAG,
+                        source=f"build:{task_id}",
+                        detail=exc.message[:1000],
+                    )
                 raise
             return await self._after_agent(
                 task_id, number, key, wt, base, integrity, agent_before, last, done, dirs["gates"]
@@ -936,7 +949,7 @@ class BuildLoop:
             runtime=self.runtime,
             withheld=ignore_spec(wt, also=ignores).match_file,
             changed_during_gates=lambda: moved_since(wt, scanned),
-            deny_read=(self.homes[task_id],),
+            deny_read=(self.agent_root,),
         )
         gate_run = await asyncio.to_thread(
             lambda: run_gates(
