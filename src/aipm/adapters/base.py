@@ -67,14 +67,16 @@ class DispatchLimits:
 @dataclass(frozen=True, slots=True)
 class Invocation:
     """How to start one agent: argv (fixed fragments and validated values only), the prompt
-    for stdin, the environment, the files to write first (absolute path, text) and the API
-    domains the agent's network profile allows."""
+    for stdin, the environment, the files to write first (absolute path, text), the API
+    domains the agent's network profile allows, and the agent's own programs (its executable
+    and interpreter), which its sandbox must let it read."""
 
     argv: tuple[str, ...]
     stdin: bytes
     env: dict[str, str]
     files: tuple[tuple[Path, str], ...] = ()
     api_domains: tuple[str, ...] = ()
+    programs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

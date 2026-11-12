@@ -84,6 +84,8 @@ class StatusView:
     budget: BudgetConfig
     tasks: tuple[Task, ...]
     spend: SpendRecord | None = None
+    claimed: tuple[str, ...] = ()
+    """Done tasks this machine has no record of finishing: the repository says so (v0.3)."""
 
     def _spend(self) -> dict[str, object]:
         spend: dict[str, object] = {
@@ -116,8 +118,10 @@ class StatusView:
             "uncovered": {"features": list(self.uncovered_features),
                           "threats": list(self.uncovered_threats)},
             "spend": self._spend(),
-            "tasks": [{"id": t.id, "status": t.status.value, "title": t.title}
+            "tasks": [{"id": t.id, "status": t.status.value, "title": t.title,
+                       "claimed": t.id in self.claimed}
                       for t in self.tasks],
+            "claimed": list(self.claimed),
         }  # fmt: skip
 
 
@@ -127,9 +131,10 @@ def build_status(
     events: Sequence[SecurityEvent],
     budget: BudgetConfig,
     spend: SpendRecord | None = None,
+    claimed: Sequence[str] = (),
 ) -> StatusView:
     """Count, collect and cross-reference; `events` is the local `events.jsonl`, `spend` the
-    newest build's cost record."""
+    newest build's cost record, `claimed` the done tasks this machine has no record of."""
     tasks = tuple(sorted(snapshot.tasks.tasks if snapshot.tasks else [], key=lambda t: t.id))
     counts = Counter(t.status for t in tasks)
     done_traces = {tr for t in tasks if t.status is TaskStatus.DONE for tr in t.traces}
@@ -163,6 +168,7 @@ def build_status(
         budget=budget,
         tasks=tasks,
         spend=spend,
+        claimed=tuple(claimed),
     )
 
 
@@ -180,6 +186,11 @@ def render_status(view: StatusView, *, show_all: bool = False) -> list[str]:
     counts = ", ".join(f"{name.replace('_', ' ')} {n}" for name, n in view.counts)
     lines.append(f"Tasks: {view.total} ({counts})")
     lines.append(progress_bar(view.finished, view.total))
+    if view.claimed:
+        lines.append(f"  done by the repository's claim only: {', '.join(view.claimed)}")
+        lines.append(
+            "  No gate passed them on this machine; review them, or `aipm task reset` them."
+        )
     if view.blocked:
         lines.append("")
         lines.append("Blocked tasks:")
@@ -219,12 +230,14 @@ def render_status(view: StatusView, *, show_all: bool = False) -> list[str]:
         lines.append("All tasks:")
         for t in view.tasks:
             deps = f" (after {', '.join(t.depends_on)})" if t.depends_on else ""
-            lines.append(f"  {t.id} [{t.status.value}] {t.size.value} {_line(t.title)}{deps}")
+            mark = " (claimed by the repository)" if t.id in view.claimed else ""
+            lines.append(f"  {t.id} [{t.status.value}{mark}] {t.size.value} {_line(t.title)}{deps}")
     return lines
 
 
-def render_task(task: Task) -> list[str]:
-    """`aipm status --task T-ID`: one task in full."""
+def render_task(task: Task, *, claimed: bool = False) -> list[str]:
+    """`aipm status --task T-ID`: one task in full; `claimed` when it is done only by the
+    repository's say-so (no record on this machine)."""
     lines = [
         f"{task.id}: {_line(task.title)}",
         f"  status: {task.status.value}   type: {task.type.value}   size: {task.size.value}   "
@@ -244,6 +257,11 @@ def render_task(task: Task) -> list[str]:
     if task.done is not None:
         where = task.done.commit[:12] if task.done.commit else "verified, not committed"
         lines.append(f"  done: {where} at {task.done.at.isoformat()}")
+        if claimed:
+            lines.append(
+                "  claimed by the repository: no gate passed it on this machine (review it, "
+                "or `aipm task reset` it)"
+            )
     if task.description.strip():
         lines.append("  description:")
         lines.extend(f"    {line}" for line in task.description.strip().splitlines())

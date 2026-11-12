@@ -12,7 +12,7 @@
 
 from collections.abc import Collection, Iterable, Mapping, Sequence
 
-from aipm.domain.dag import globs_may_overlap, is_serialized
+from aipm.domain.dag import fold_path, globs_may_overlap, is_serialized
 from aipm.domain.models import Task, TaskStatus
 
 FINISHED = frozenset({TaskStatus.DONE, TaskStatus.SKIPPED})
@@ -49,7 +49,7 @@ def ready(
 def resources(task: Task, serialized: Sequence[str]) -> frozenset[str]:
     """The serialized resources `task` touches."""
     patterns = tuple(serialized)
-    owned = {f"path:{g.casefold()}" for g in task.owns_files if is_serialized(g, patterns)}
+    owned = {f"path:{fold_path(g)}" for g in task.owns_files if is_serialized(g, patterns)}
     locks = {f"lockfile:{d.ecosystem.value}" for d in task.deps_add}
     return frozenset(owned | locks)
 

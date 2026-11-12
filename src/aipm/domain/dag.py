@@ -211,7 +211,8 @@ def _wild(part: str) -> bool:
 def globs_may_overlap(a: str, b: str) -> bool:
     """Whether two normalized globs could match the same path. Conservative (ARCHITECTURE §9).
 
-    Components are compared case-insensitively from the root. The first depth where either glob
+    Components are compared from the root as macOS compares names: case-insensitively, after
+    Unicode normalization (`fold_path`, red-team v0.3). The first depth where either glob
     has a wildcard counts as an overlap, and so does one glob being a prefix of the other (a
     literal path may be a directory). Only differing literal components rule an overlap out.
     """
@@ -220,10 +221,17 @@ def globs_may_overlap(a: str, b: str) -> bool:
     return pa[:shorter] == pb[:shorter]
 
 
+def fold_path(text: str) -> str:
+    """A path or glob as a case- and normalization-insensitive file system (macOS) compares
+    it: NFC, then case-folded. `src/é.py` spelled with a combining accent is the same file as
+    the precomposed one (red-team v0.3)."""
+    return unicodedata.normalize("NFC", text).casefold()
+
+
 def literal_prefix(glob: str) -> tuple[str, ...]:
-    """The case-folded components of a glob before its first wildcard component."""
+    """The folded components (`fold_path`) of a glob before its first wildcard component."""
     out: list[str] = []
-    for part in glob.casefold().split("/"):
+    for part in fold_path(glob).split("/"):
         if _wild(part):
             break
         out.append(part)
@@ -248,11 +256,11 @@ def _match(parts: Sequence[str], pattern: Sequence[str]) -> bool:
 def is_serialized(glob: str, patterns: tuple[str, ...]) -> bool:
     """Whether a glob names a serialized resource: it equals a `plan.serialized_paths` pattern,
     or it is a literal path that one matches. Patterns are anchored at the repository root."""
-    folded = glob.casefold()
+    folded = fold_path(glob)
     parts = folded.split("/")
     literal = not any(_wild(part) for part in parts)
     for pattern in patterns:
-        pat = pattern.casefold()
+        pat = fold_path(pattern)
         if folded == pat or (literal and _match(parts, pat.split("/"))):
             return True
     return False

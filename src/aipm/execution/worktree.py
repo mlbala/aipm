@@ -31,6 +31,8 @@ from aipm.state.private_files import read_private, state_dir, write_private
 
 WORKTREES_DIR = "worktrees"
 AGENT_HOMES_DIR = "agents"
+INTEGRATE_DIR = ".integrate"
+"""Under a repository's worktree directory: where task commits are rebased."""
 TASK_BRANCH_PREFIX = "aipm/task/"
 INTEGRATION_PREFIX = "aipm/"
 
@@ -103,6 +105,11 @@ class WorktreeManager:
             path.unlink()
         elif path.exists():
             shutil.rmtree(path)
+
+    @property
+    def integrate_root(self) -> Path:
+        """Where task commits are rebased (`integrate`)."""
+        return self.root / INTEGRATE_DIR
 
     def others(self, task_id: str) -> tuple[Path, ...]:
         """The other tasks' worktrees that exist now (an agent may not read them)."""
@@ -212,9 +219,14 @@ def integrate(repo: Path, wt: Path, branch: str, commit: str, base: str) -> str 
     if head != base:
         rebased = _rebase_aside(repo, wt.parent, commit, head, base)
         # A rebase that changed other paths than the verified commit did (a rename, a merge
-        # of another task's file) is treated as a conflict: no gate saw that result.
-        if rebased is None or sorted(git.changed_paths(repo, head, rebased)) != sorted(
-            git.changed_paths(repo, base, commit)
+        # of another task's file), or merged a verified file with another task's change of it,
+        # is treated as a conflict: no gate saw that result (red-team v0.3).
+        verified = sorted(git.changed_paths(repo, base, commit))
+        if (
+            rebased is None
+            or sorted(git.changed_paths(repo, head, rebased)) != verified
+            or git.committed_ids(repo, rebased, verified)
+            != git.committed_ids(repo, commit, verified)
         ):
             return None
         commit = rebased
@@ -231,8 +243,13 @@ def integrate(repo: Path, wt: Path, branch: str, commit: str, base: str) -> str 
 
 def _rebase_aside(repo: Path, root: Path, commit: str, onto: str, base: str) -> str | None:
     """Rebase `commit` onto `onto` in a fresh, detached worktree no agent knows of, so a process
-    an agent left behind in its own worktree cannot race git's writes (step 07 review)."""
-    aside = root / f".integrate-{secrets.token_hex(8)}"
+    an agent left behind in its own worktree cannot race git's writes (step 07 review). It lives
+    under `<worktrees>/.integrate/`, which every agent's profile denies (ADR-0024)."""
+    parent = root / INTEGRATE_DIR
+    parent.mkdir(mode=0o700, exist_ok=True)
+    if parent.is_symlink() or not parent.is_dir():
+        raise PolicyViolation(f"{parent} must be a real directory, not a link")
+    aside = parent / secrets.token_hex(8)
     git.worktree_add(repo, aside, None, commit)
     try:
         if not git.rebase_onto(aside, onto, base):

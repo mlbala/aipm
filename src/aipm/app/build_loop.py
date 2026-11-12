@@ -47,7 +47,13 @@ from aipm.app.attempt import (
     record_violations,
     reviewer,
 )
-from aipm.app.dispatcher import Dispatch, Isolation, config_home_hashes, dispatch
+from aipm.app.dispatcher import (
+    Dispatch,
+    Isolation,
+    config_home_hashes,
+    dispatch,
+    reset_config_home,
+)
 from aipm.app.repo_map import ignore_spec
 from aipm.config.schema import Config
 from aipm.domain.errors import AipmError, BudgetExceeded, PolicyViolation
@@ -74,7 +80,7 @@ from aipm.execution import git, process
 from aipm.execution.git import MAX_CONTENT_BYTES, ChangeInputs
 from aipm.execution.journal import Journal, find_resumable, load, replay
 from aipm.execution.process import KILL_GRACE_S
-from aipm.execution.sandbox import Runtime
+from aipm.execution.sandbox import Runtime, main_repo_entries, path_dirs
 from aipm.execution.worktree import (
     AGENT_HOMES_DIR,
     WorktreeManager,
@@ -99,6 +105,7 @@ from aipm.security.diff_checks import (
     severe,
 )
 from aipm.security.sanitize import sanitize_text
+from aipm.state.done_record import record_done
 from aipm.state.layout import repo_id
 from aipm.state.store import FileStateStore
 from aipm.state.yamlio import dump_yaml
@@ -213,6 +220,11 @@ class _Attempted:
     session_total: float = 0.0
     timed_out: bool = False
     cost: float = 0.0
+
+
+def _held(task_id: str) -> str:
+    """The key of the budget a scheduled task holds until its first attempt starts."""
+    return f"{task_id}/scheduled"
 
 
 def _clean(text: str, limit: int) -> str:
@@ -410,6 +422,7 @@ class BuildLoop:
         finished = Done(commit=commit, run_id=self.run_id, at=datetime.now(UTC))
         update = {"status": TaskStatus.DONE, "blocked": None, "done": finished}
         self._save(task.model_copy(update=update))
+        record_done(self.root, task_id, finished)
         self._outcome(task_id, "done", commit=commit)
         self._emit(task_id, "done", task.attempts, None if commit is None else commit[:12])
 
@@ -472,6 +485,24 @@ class BuildLoop:
         if not self.agent_root.is_dir():
             return ()
         return tuple(sorted(p for p in self.agent_root.iterdir() if p.name != task_id))
+
+    def _elsewhere(self, task_id: str) -> tuple[Path, ...]:
+        """What `task_id`'s agent and gates may not read of this run: every other task's
+        worktree and config home, named whether it exists yet or not (a parallel task may start
+        after this one), and the directory task commits are rebased in (red-team v0.3)."""
+        paths = {*self.worktrees.others(task_id), *self._other_homes(task_id)}
+        for other in self.tasks:
+            if other != task_id:
+                paths |= {self.worktrees.path(other), self.agent_root / other}
+        paths.add(self.worktrees.integrate_root)
+        return tuple(sorted(paths))
+
+    def _main_repo(self, wt: Path, temp: Path) -> tuple[Path, ...]:
+        """What gates and prepare, running in `wt`, may not read of the main checkout
+        (ADR-0024); nothing without a sandbox to apply it."""
+        if self.runtime is None:
+            return ()
+        return main_repo_entries(self.root, keep=(wt, temp, *path_dirs()))
 
     def _fresh_home(self, task_id: str) -> Path:
         """The task's own config home, empty: one per task, so no agent sees settings another
@@ -581,6 +612,9 @@ class BuildLoop:
             if not self.spend.may_dispatch():
                 self._budget_stop()
                 return
+            # The task holds its budget from now on: the next one in this batch must not count
+            # on it (red-team v0.3).
+            self.spend.reserve(_held(task.id))
             self._emit(task.id, "queued", task.attempts + 1)
             self.running[task.id] = asyncio.create_task(self._task(task.id), name=task.id)
 
@@ -601,6 +635,7 @@ class BuildLoop:
         except AipmError as exc:
             self._block(task_id, BlockedReason.MANUAL, f"aipm stopped this task: {exc.message}")
         finally:
+            self.spend.release(_held(task_id))
             self.finished.add(task_id)
 
     # ------------------------------------------------------------ one task
@@ -636,7 +671,7 @@ class BuildLoop:
             if count >= max(self.s.max_retries, 1):
                 self._exhausted(task_id, last)
                 return
-            if not self.spend.may_dispatch():
+            if not self.spend.may_dispatch(held=_held(task_id)):
                 self._budget_stop()
                 self._block(
                     task_id,
@@ -703,7 +738,7 @@ class BuildLoop:
         task = self.tasks[task_id]
         number = task.attempts + 1
         key = f"{task_id}/{number}"
-        self.spend.reserve(key)
+        self.spend.reserve(key, held=_held(task_id))
         self.run_attempts[task_id] = self.run_attempts.get(task_id, 0) + 1
         temp = await asyncio.to_thread(attempt_dir, self.root, "aipm-attempt-")
         try:
@@ -732,9 +767,13 @@ class BuildLoop:
                 runtime=self.runtime,
                 home=self.home,
                 main_pm=self.root / ".pm",
-                other_worktrees=(*self.worktrees.others(task_id), *self._other_homes(task_id)),
+                other_worktrees=self._elsewhere(task_id),
                 network=self.cfg.security.network.agent,
+                main_repo=self.root,
             )
+            # Nothing Claude Code runs or obeys without asking survives into this attempt
+            # (red-team v0.3); the session's transcript stays for `--resume`.
+            await asyncio.to_thread(reset_config_home, self.homes[task_id])
             if self.sandbox_warning is not None:
                 self._emit(task_id, "warning", number, self.sandbox_warning)
             self._journal(
@@ -774,8 +813,13 @@ class BuildLoop:
     def _settle(self, task_id: str, key: str, done: Dispatch, last: _Attempted) -> _Attempted:
         result = done.result
         same = last.session is not None and result.session_id == last.session
+        reported = result.cost_usd if result.saw_result else None
+        if same and reported is not None and reported < last.session_total:
+            # A resumed session's total never falls: the report is wrong, so the attempt is
+            # charged its task budget rather than nothing (red-team v0.3).
+            reported = None
         cost = attempt_cost(
-            reported_total=result.cost_usd if result.saw_result else None,
+            reported_total=reported,
             previous_total=last.session_total if same else 0.0,
             cap=self.s.budget.task_usd,
         )
@@ -949,7 +993,11 @@ class BuildLoop:
             runtime=self.runtime,
             withheld=ignore_spec(wt, also=ignores).match_file,
             changed_during_gates=lambda: moved_since(wt, scanned),
-            deny_read=(self.agent_root,),
+            deny_read=(
+                self.agent_root,
+                *self._elsewhere(task_id),
+                *self._main_repo(wt, gates_dir),
+            ),
         )
         gate_run = await asyncio.to_thread(
             lambda: run_gates(
