@@ -84,9 +84,9 @@ CONFIG_HOME_PROTECTED: tuple[str, ...] = (
     "settings.json", "settings.local.json", "CLAUDE.md", "hooks", "agents", "skills",
     "commands", "plugins",
 )  # fmt: skip
-"""In the agent's isolated config home (`CLAUDE_CONFIG_DIR`): what Claude Code would read as
-user settings on the next `--resume`. The agent may write its sessions there, never these
-(ADR-0023)."""
+"""In Claude Code's isolated config home (`CLAUDE_CONFIG_DIR`): what it would read as user
+settings on the next `--resume`. The agent may write its sessions there, never these
+(ADR-0023). Other tools name theirs in their adapter's `ConfigHomeSpec` (ADR-0026)."""
 
 PACKAGE_CACHES: tuple[str, ...] = (
     ".cache/uv", ".cache/pip", "Library/Caches/uv", "Library/Caches/pip",
@@ -129,6 +129,9 @@ class ProfilePaths:
     keep_readable: tuple[Path, ...] = ()
     """Paths the process must read (its own program): an agent home that holds one is not
     denied."""
+    config_home_protected: tuple[str, ...] = CONFIG_HOME_PROTECTED
+    """What in `config_home` the agent may not write: its tool's settings, hooks and skills
+    (`ConfigHomeSpec.protected`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,7 +171,7 @@ def profile_for(
         allow = [paths.workspace, paths.temp_dir]
         if paths.config_home is not None:
             allow.append(paths.config_home)
-            agent_config = [paths.config_home / rel for rel in CONFIG_HOME_PROTECTED]
+            agent_config = [paths.config_home / rel for rel in paths.config_home_protected]
             # With a config home of its own, the agent never needs the user's (ADR-0024).
             deny_read += [
                 home / rel

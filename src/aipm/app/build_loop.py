@@ -52,7 +52,9 @@ from aipm.app.dispatcher import (
     Isolation,
     config_home_hashes,
     dispatch,
-    reset_config_home,
+    native_allowed,
+    prepare_config_home,
+    tool_limits,
 )
 from aipm.app.repo_map import ignore_spec
 from aipm.config.schema import Config
@@ -72,7 +74,6 @@ from aipm.domain.models import (
     Task,
     TasksDoc,
     TaskStatus,
-    ToolName,
     Workspace,
 )
 from aipm.domain.scheduler import next_batch, ready
@@ -275,7 +276,7 @@ class BuildLoop:
         self.worktrees = WorktreeManager(self.root)
         self.spend = Spend(settings.budget)
         self.tokens = TokenCounter(settings.budget.run_tokens)
-        self.claude = self.cfg.dispatch.tools.get(ToolName.CLAUDE)
+        self.tool_cfg = self.cfg.dispatch.tools.get(adapter.name)
         self.run_id = ""
         self.run_base: str | None = None
         self.journal: Journal | None = None
@@ -507,7 +508,7 @@ class BuildLoop:
     def _fresh_home(self, task_id: str) -> Path:
         """The task's own config home, empty: one per task, so no agent sees settings another
         planted, and a resumed task starts from nothing (step 07 review)."""
-        home = self.agent_root / task_id / "claude"
+        home = self.agent_root / task_id / self.adapter.name.value
         shutil.rmtree(home, ignore_errors=True)
         home.mkdir(mode=0o700, parents=True)
         self.homes[task_id] = home
@@ -661,7 +662,8 @@ class BuildLoop:
             )
         )
         integrity = await asyncio.to_thread(git.integrity_snapshot, wt, self.home)
-        agent_before = config_home_hashes(await asyncio.to_thread(self._fresh_home, task_id))
+        fresh = await asyncio.to_thread(self._fresh_home, task_id)
+        agent_before = await asyncio.to_thread(prepare_config_home, fresh, self.adapter.config_home)
         last = _Attempted(passed=False)
         while True:
             if self.stopping:
@@ -716,14 +718,12 @@ class BuildLoop:
         )
 
     def _limits(self, verify: tuple[tuple[str, ...] | None, ...]) -> DispatchLimits:
-        claude = self.claude
-        return DispatchLimits(
+        return tool_limits(
+            self.tool_cfg,
             timeout_s=self.s.timeout_s,
             task_usd=self.s.budget.task_usd,
             allowed_commands=tuple(p for p in verify if p),
-            pass_env=tuple(claude.pass_env) if claude else (),
-            allow_auto_mode=claude.allow_auto_mode if claude else False,
-            bare=claude.bare if claude else True,
+            native_sandbox=self.runtime is None and native_allowed(self.cfg),
         )
 
     async def _attempt(
@@ -771,9 +771,12 @@ class BuildLoop:
                 network=self.cfg.security.network.agent,
                 main_repo=self.root,
             )
-            # Nothing Claude Code runs or obeys without asking survives into this attempt
-            # (red-team v0.3); the session's transcript stays for `--resume`.
-            await asyncio.to_thread(reset_config_home, self.homes[task_id])
+            # Nothing the agent runs or obeys without asking survives into this attempt
+            # (red-team v0.3); the session's transcript stays for `--resume`, and the settings
+            # aipm gives the tool are written again (ADR-0026).
+            await asyncio.to_thread(
+                prepare_config_home, self.homes[task_id], self.adapter.config_home
+            )
             if self.sandbox_warning is not None:
                 self._emit(task_id, "warning", number, self.sandbox_warning)
             self._journal(
@@ -851,6 +854,16 @@ class BuildLoop:
         }
         self._run_text([*base, "result.json"], json.dumps(summary, indent=2) + "\n")
 
+    def _config_home_violations(
+        self, task_id: str, before: dict[str, str | None]
+    ) -> list[Violation]:
+        """A change to the settings, hooks or skills in the agent's config home (ADR-0023)."""
+        spec = self.adapter.config_home
+        if config_home_hashes(self.homes[task_id], spec.protected) == before:
+            return []
+        message = "the agent changed the settings, hooks or skills in its config home"
+        return [Violation(Kind.GIT_INTEGRITY, spec.env_var, message)]
+
     async def _after_agent(
         self,
         task_id: str,
@@ -884,14 +897,7 @@ class BuildLoop:
         self._emit(task_id, "checks", number)
         changes = await asyncio.to_thread(self._changes, wt, base, integrity)
         violations = check_changes(changes, self.tasks[task_id], self.policy)
-        if config_home_hashes(self.homes[task_id]) != agent_before:
-            violations.append(
-                Violation(
-                    Kind.GIT_INTEGRITY,
-                    "CLAUDE_CONFIG_DIR",
-                    "the agent changed the settings, hooks or skills in its config home",
-                )
-            )
+        violations += self._config_home_violations(task_id, agent_before)
         self._journal(
             JournalEventType.CHECK_RESULT,
             task_id,

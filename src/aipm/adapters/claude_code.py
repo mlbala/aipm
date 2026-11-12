@@ -38,6 +38,7 @@ from aipm import adapters as _package
 from aipm.adapters.base import (
     AgentResult,
     Capabilities,
+    ConfigHomeSpec,
     DispatchLimits,
     Invocation,
     RenderedTaskPrompt,
@@ -55,7 +56,7 @@ from aipm.execution.process import (
     is_inside,
     run_safe,
 )
-from aipm.execution.sandbox import launcher_for, which_outside
+from aipm.execution.sandbox import CONFIG_HOME_PROTECTED, launcher_for, which_outside
 from aipm.execution.worktree import WORKTREES_DIR, cache_root
 from aipm.security.command_policy import check_forbidden_flags
 from aipm.security.sanitize import sanitize_text
@@ -103,6 +104,11 @@ _HELP_FLAG = re.compile(r"--[A-Za-z][A-Za-z-]*(?:\[-file\])?")
 _RULE_WORD = re.compile(r"[A-Za-z0-9._/@:+=-]+")
 SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _detected: dict[str, Capabilities] = {}
+CONFIG_HOME = ConfigHomeSpec(
+    env_var="CLAUDE_CONFIG_DIR", protected=CONFIG_HOME_PROTECTED, keep=frozenset({"projects"})
+)
+"""`CLAUDE_CONFIG_DIR` (ADR-0023): the session transcripts under `projects/` stay for
+`--resume`; the settings, hooks, agents, skills, commands and plugins are protected."""
 
 
 def help_flags(text: str) -> frozenset[str]:
@@ -369,6 +375,7 @@ class ClaudeCodeAdapter:
     name: ToolName = ToolName.CLAUDE
     required_env: tuple[str, ...] = REQUIRED_ENV
     api_domains: tuple[str, ...] = API_DOMAINS
+    config_home: ConfigHomeSpec = CONFIG_HOME
 
     def __init__(
         self,
