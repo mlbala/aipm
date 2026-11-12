@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Stub Gemini CLI for aipm's tests (ARCHITECTURE §20, SECURITY.md §14.3, build prompt 08).
+
+`--version` and `--help` answer like Gemini CLI 0.68.x. Any other call is a dispatch, and the
+stub first ASSERTS what aipm must guarantee (see `_agent_stub.py`):
+
+- argv: `--approval-mode auto_edit`, `--output-format json`, `--extensions none`, a fixed
+  `--prompt`, only `run_shell_command(...)` rules in `--allowed-tools`, and no forbidden flag;
+- environment: no fake secret but `GEMINI_API_KEY`; `GEMINI_CLI_HOME` an existing directory
+  that is not the user's home, holding aipm's `.gemini/settings.json`;
+- working directory: a linked worktree under aipm's `aipm/worktrees/`, with no `.gemini/` and
+  no `.env*` at its root.
+
+It prints one JSON object with `response` and `stats` (or `error`). Python 3.8 syntax.
+"""
+
+import json
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from _agent_stub import Stub, check_cwd, check_forbidden, fail, value_of, values_of  # noqa: E402
+
+VERSION = "0.68.0"
+HELP_FLAGS = [
+    ("-p, --prompt", "Run in non-interactive mode; appended to stdin input"),
+    ("--approval-mode", 'Approval mode [choices: "default", "auto_edit", "yolo", "plan"]'),
+    ("--allowed-tools", "Tools allowed without confirmation (deprecated: policy engine)"),
+    ("-o, --output-format", 'Output format [choices: "text", "json", "stream-json"]'),
+    ("-e, --extensions", "Extensions to use"),
+    ("-s, --sandbox", "Run in a sandbox"),
+    ("-y, --yolo", "Deprecated: use --approval-mode=yolo"),
+]
+FORBIDDEN = ("--yolo", "-y", "--skip-trust")
+STUB = Stub("gemini", "GEMINI_CLI_HOME", "GEMINI_API_KEY")
+
+
+def check_argv(args):
+    for flag, wanted in (("--approval-mode", "auto_edit"), ("--output-format", "json"),
+                         ("--extensions", "none")):
+        if value_of(args, flag) != wanted:
+            fail("%s is %r, not %s" % (flag, value_of(args, flag), wanted))
+    if not value_of(args, "--prompt"):
+        fail("no --prompt")
+    for rule in values_of(args, "--allowed-tools"):
+        if not (rule.startswith("run_shell_command(") and rule.endswith(")")):
+            fail("unexpected --allowed-tools " + rule)
+        if rule == "run_shell_command()":
+            fail("an empty shell rule allows every command")
+    check_forbidden(args, FORBIDDEN)
+
+
+def check_home():
+    home = Path(os.environ.get("GEMINI_CLI_HOME", ""))
+    settings = home / ".gemini" / "settings.json"
+    if not settings.is_file():
+        fail("GEMINI_CLI_HOME has no aipm settings.json")
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    if data.get("privacy", {}).get("usageStatisticsEnabled") is not False:
+        fail("usage statistics are not off")
+    names = os.listdir(os.getcwd())
+    if ".gemini" in names or any(n.startswith(".env") for n in names):
+        fail("the worktree root holds .gemini or .env")
+
+
+def dispatch(args):
+    check_argv(args)
+    STUB.check_env("")
+    check_home()
+    check_cwd()
+    prompt = sys.stdin.read()
+    STUB.check_prompt(prompt)
+    task, index, attempt = STUB.attempt_for(prompt)
+    STUB.log_call(task, index, args, prompt)
+    STUB.play(attempt)
+    text = attempt.get("text", "Done.")
+    if attempt.get("result", True):
+        doc = {"response": text, "stats": {"models": {"stub": {"tokens": {"total": 110}}}}}
+        if attempt.get("error", False):
+            doc["error"] = {"type": "ApiError", "message": "stub failure"}
+        sys.stdout.write(json.dumps(doc) + "\n")
+        sys.stdout.flush()
+    return int(attempt.get("exit", 0))
+
+
+def main():
+    args = sys.argv[1:]
+    if args == ["--version"]:
+        print(VERSION)
+        return 0
+    if args == ["--help"]:
+        STUB.help("Usage: gemini [options] [command]", HELP_FLAGS)
+        return 0
+    return dispatch(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

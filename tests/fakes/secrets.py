@@ -12,3 +12,11 @@ FAKE_SECRETS: dict[str, str] = {
     "GITHUB_TOKEN": "aipm-fake-github-token-not-a-real-secret-0003",
     "AIPM_TEST_DB_PASSWORD": "aipm-fake-db-password-not-a-real-secret-0004",
 }
+
+AGENT_KEYS: dict[str, tuple[str, str]] = {
+    "claude": ("ANTHROPIC_API_KEY", FAKE_SECRETS["ANTHROPIC_API_KEY"]),
+    "codex": ("CODEX_API_KEY", "aipm-fake-codex-key-not-a-real-secret-0005"),
+    "gemini": ("GEMINI_API_KEY", "aipm-fake-gemini-key-not-a-real-secret-0006"),
+    "copilot": ("COPILOT_GITHUB_TOKEN", "aipm-fake-copilot-token-not-a-real-secret-0007"),
+}
+"""Each coding agent's own key (build prompt 08): the one fake secret its stub may see."""

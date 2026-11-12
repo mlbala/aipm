@@ -124,6 +124,11 @@ ignore = [
 "tests/unit/test_fixtures.py" = ["TID251", "S603", "S607"]
 "tests/unit/test_package_imports.py" = ["TID251"]
 "tests/unit/test_startup.py" = ["TID251", "S603"]
+# The stub agents' shared core: Python 3.8 code that, like the stubs themselves, forks daemons
+# and runs git to play the malicious scenarios of SECURITY.md §14.3.
+"tests/fakes/bin/_agent_stub.py" = [
+    "TID251", "S603", "S607", "S105", "T201", "PTH", "PLR0912", "PLR0915", "RUF005", "UP031",
+]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "subprocess".msg = "Only aipm.execution.process may start a process; use run_safe()."

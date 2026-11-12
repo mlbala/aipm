@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""Stub Codex CLI for aipm's tests (ARCHITECTURE §20, SECURITY.md §14.3, build prompt 08).
+
+`--version` and `exec --help` answer like Codex CLI 0.167.x. `exec ... -` is a dispatch, and
+the stub first ASSERTS what aipm must guarantee (see `_agent_stub.py`):
+
+- argv: `exec --sandbox workspace-write --json --ephemeral --ignore-rules`, `-c
+  approval_policy=never`, the prompt read from stdin (`-` last), and no forbidden flag;
+- environment: no fake secret but `CODEX_API_KEY`, and `CODEX_HOME` an existing directory that
+  is not the user's `~/.codex`;
+- working directory: a linked worktree under aipm's `aipm/worktrees/`.
+
+It prints `thread.started`, `item.completed` (the agent message) and `turn.completed` (or
+`turn.failed`) as JSONL. Python 3.8 syntax on purpose.
+"""
+
+import os
+import sys
+import uuid
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from _agent_stub import Stub, check_cwd, check_forbidden, emit, fail, values_of  # noqa: E402
+
+VERSION = "codex-cli 0.167.2"
+HELP_FLAGS = [
+    ("-c, --config <key=value>", "Override a configuration value"),
+    ("-s, --sandbox <SANDBOX_MODE>",
+     "Sandbox policy [possible values: read-only, workspace-write, danger-full-access]"),
+    ("--json", "Print events to stdout as JSONL"),
+    ("--ephemeral", "Do not persist session files"),
+    ("--ignore-rules", "Skip user and project execpolicy rules"),
+    ("--ignore-user-config", "Skip $CODEX_HOME/config.toml"),
+    ("--dangerously-bypass-approvals-and-sandbox", "Run every command without approvals"),
+    ("-o, --output-last-message <FILE>", "Write the last message to FILE"),
+]
+FORBIDDEN = ("--yolo", "--dangerously-bypass-approvals-and-sandbox", "--full-auto",
+             "--approve-for-me", "--not-so-yolo")
+STUB = Stub("codex", "CODEX_HOME", "CODEX_API_KEY")
+
+
+def check_argv(args):
+    if args[:1] != ["exec"]:
+        fail("not `codex exec`")
+    if args[-1:] != ["-"]:
+        fail("the prompt is not read from stdin (`-` last)")
+    for flag in ("--json", "--ephemeral", "--ignore-rules"):
+        if flag not in args:
+            fail("argv lacks " + flag)
+    sandbox = [args[i + 1] for i, a in enumerate(args[:-1]) if a in ("--sandbox", "-s")]
+    if sandbox != ["workspace-write"]:
+        fail("--sandbox is %r, not workspace-write" % sandbox)
+    configs = values_of(args, "-c") + values_of(args, "--config")
+    if "approval_policy=never" not in configs:
+        fail("no -c approval_policy=never")
+    check_forbidden(args, FORBIDDEN)
+    if any("danger-full-access" in a for a in args):
+        fail("danger-full-access")
+
+
+def dispatch(args):
+    check_argv(args)
+    STUB.check_env(".codex")
+    check_cwd()
+    prompt = sys.stdin.read()
+    STUB.check_prompt(prompt)
+    task, index, attempt = STUB.attempt_for(prompt)
+    STUB.log_call(task, index, args, prompt)
+    emit({"type": "thread.started", "thread_id": str(uuid.uuid4())})
+    emit({"type": "turn.started"})
+    STUB.play(attempt)
+    text = attempt.get("text", "Done.")
+    emit({"type": "item.completed",
+          "item": {"id": "item_0", "type": "agent_message", "text": text}})
+    if attempt.get("result", True):
+        if attempt.get("error", False):
+            emit({"type": "turn.failed", "error": {"message": "stub failure"}})
+        else:
+            emit({"type": "turn.completed",
+                  "usage": {"input_tokens": 100, "cached_input_tokens": 0, "output_tokens": 10}})
+    return int(attempt.get("exit", 0))
+
+
+def main():
+    args = sys.argv[1:]
+    if args == ["--version"]:
+        print(VERSION)
+        return 0
+    if args == ["exec", "--help"]:
+        STUB.help("Usage: codex exec [OPTIONS] [PROMPT]", HELP_FLAGS)
+        return 0
+    return dispatch(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
