@@ -21,7 +21,7 @@ from collections.abc import Callable, Mapping
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import platformdirs
 from pydantic import AwareDatetime, Field, ValidationError
@@ -30,7 +30,7 @@ from aipm import __version__
 from aipm.config.loader import relaxations
 from aipm.config.schema import Config
 from aipm.domain.errors import AipmError, PolicyViolation
-from aipm.domain.models import GateDef, PrepareDef, RepoId, StrictModel
+from aipm.domain.models import GateDef, PrepareDef, RepoId, StrictModel, ToolName
 from aipm.domain.models.base import Sha256, Str200, Str500
 from aipm.observability.redaction import process_redactor
 from aipm.security.command_policy import (
@@ -152,8 +152,72 @@ def _resolver(which: Which) -> Which:
     return resolve
 
 
-def execution_surface(cfg: Config, *, which: Which = shutil.which) -> dict[str, Any]:
+REPO_AGENT_FILES: tuple[tuple[str, str], ...] = (
+    (".claude/settings.json", "hooks"),
+    (".mcp.json", "mcpServers"),
+)
+"""The repository files whose hooks and MCP servers Claude Code would load without `--bare`."""
+MAX_AGENT_CONFIG_BYTES = 262_144
+
+
+def _read_agent_file(path: Path) -> bytes | str | None:
+    """The bytes of a repository agent file, read without following links; why it cannot be
+    read; or `None` when there is none."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return exc.strerror or "unreadable"
+    with os.fdopen(fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            return "not a regular file"
+        return handle.read(MAX_AGENT_CONFIG_BYTES + 1)
+
+
+def _agent_file(path: Path) -> dict[str, Any] | None:
+    """`{sha256, content}` for one repository agent file, or `None` when there is none.
+    Anything aipm cannot read or show is pinned by its hash, or by the reason, alone."""
+    data = _read_agent_file(path)
+    if data is None or isinstance(data, str):
+        return None if data is None else {"sha256": None, "error": data}
+    entry: dict[str, Any] = {"sha256": hashlib.sha256(data).hexdigest()}
+    if len(data) > MAX_AGENT_CONFIG_BYTES:
+        return {**entry, "error": "too large to show"}
+    try:
+        parsed: object = json.loads(data)
+    except ValueError:
+        return {**entry, "error": "not JSON"}
+    if not isinstance(parsed, dict):
+        return {**entry, "error": "not a JSON object"}
+    return {**entry, "content": parsed}
+
+
+def repo_agent_config(root: Path, cfg: Config) -> dict[str, Any] | None:
+    """The repository's Claude Code hooks and MCP servers, when `dispatch.tools.claude.bare` is
+    false (SECURITY.md §6 rule 7); `None` when bare mode is on, which never loads them."""
+    claude = cfg.dispatch.tools.get(ToolName.CLAUDE)
+    if claude is None or claude.bare:
+        return None
+    found: dict[str, Any] = {}
+    for name, key in REPO_AGENT_FILES:
+        entry = _agent_file(root / name)
+        if entry is None:
+            continue
+        content = entry.pop("content", None)
+        if isinstance(content, dict):
+            entry[key] = cast("dict[str, Any]", content).get(key)
+        found[name] = entry
+    return found
+
+
+def execution_surface(
+    cfg: Config, *, which: Which = shutil.which, repo_agent: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
     """The canonical execution surface (SECURITY.md §6).
+
+    `repo_agent` is `repo_agent_config(...)`; it joins the surface only when it is not `None`
+    (bare mode off), so the surface of every other repository is unchanged.
 
     Raises `PolicyViolation` (exit 6) if any configured argv or prefix fails the command policy.
     """
@@ -163,7 +227,9 @@ def execution_surface(cfg: Config, *, which: Which = shutil.which) -> dict[str, 
     if prefixes:
         policy()
     prepare = None if cfg.prepare is None else _prepare_entry(cfg.prepare, policy, which)
+    extra: dict[str, Any] = {} if repo_agent is None else {"repo_agent_config": dict(repo_agent)}
     return {
+        **extra,
         "version": SURFACE_VERSION,
         "allowed_executables": [list(p) for p in cfg.allowed_executables],
         "extra_allowed_executables": [list(p) for p in cfg.security.extra_allowed_executables],
@@ -253,6 +319,14 @@ def render_surface(surface: Mapping[str, Any], surface_hash: str) -> list[str]:
     lines.extend(f"  {item}" for item in surface["relaxations"])
     if not surface["relaxations"]:
         lines.append("  (none)")
+    agent = surface.get("repo_agent_config")
+    if agent is not None:
+        lines.append("repository hooks and MCP servers (bare: false; listed, never loaded):")
+        for name, entry in sorted(agent.items()):
+            shown = {k: v for k, v in entry.items() if k != "sha256"}
+            lines.append(f"  {name} [sha256 {entry.get('sha256')}]: {canonical_json(shown)}")
+        if not agent:
+            lines.append("  (none)")
     lines.extend(["", f"surface hash: {surface_hash}", f"confirm with: {surface_hash[:12]}"])
     return lines
 
@@ -269,13 +343,15 @@ class FileTrustStore:
         self.path = path
         self._which = which
 
-    def surface(self, cfg: Config) -> dict[str, Any]:
-        """The execution surface for `cfg`, resolved against the current PATH."""
-        return execution_surface(cfg, which=self._which)
+    def surface(self, cfg: Config, *, root: Path | None = None) -> dict[str, Any]:
+        """The execution surface for `cfg`, resolved against the current PATH; with `root`,
+        the repository's own agent hooks and MCP servers when bare mode is off."""
+        agent = None if root is None else repo_agent_config(root, cfg)
+        return execution_surface(cfg, which=self._which, repo_agent=agent)
 
-    def surface_hash(self, cfg: Config) -> str:
+    def surface_hash(self, cfg: Config, *, root: Path | None = None) -> str:
         """Return the canonical hash of the execution surface."""
-        return hash_surface(self.surface(cfg))
+        return hash_surface(self.surface(cfg, root=root))
 
     def _load(self) -> TrustFile:
         try:

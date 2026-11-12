@@ -63,6 +63,14 @@ AGENT_GLOBAL_CONFIG: tuple[str, ...] = (
 )  # fmt: skip
 """Agents' global settings, hooks, plugins and skills, relative to home (SECURITY.md §9.1)."""
 
+CONFIG_HOME_PROTECTED: tuple[str, ...] = (
+    "settings.json", "settings.local.json", "CLAUDE.md", "hooks", "agents", "skills",
+    "commands", "plugins",
+)  # fmt: skip
+"""In the agent's isolated config home (`CLAUDE_CONFIG_DIR`): what Claude Code would read as
+user settings on the next `--resume`. The agent may write its sessions there, never these
+(ADR-0023)."""
+
 PACKAGE_CACHES: tuple[str, ...] = (
     ".cache/uv", ".cache/pip", "Library/Caches/uv", "Library/Caches/pip",
     ".npm", ".cache/pnpm", ".local/share/pnpm", "Library/pnpm", "Library/Caches/pnpm",
@@ -99,6 +107,8 @@ class ProfilePaths:
     main_pm: Path | None = None
     other_worktrees: tuple[Path, ...] = ()
     output_dir: Path | None = None
+    extra_deny_read: tuple[Path, ...] = ()
+    """More paths no process of this profile may read (build gates: the agent's config home)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,9 +142,13 @@ def profile_for(
     launcher = (runtime,) if isinstance(runtime, str) else tuple(runtime)
     home = paths.home
     deny_read = [home / rel for rel in CREDENTIAL_PATHS]
+    deny_read += list(paths.extra_deny_read)
+    agent_config: list[Path] = []
     if kind is ProcessKind.AGENT:
         allow = [paths.workspace, paths.temp_dir]
-        allow += [] if paths.config_home is None else [paths.config_home]
+        if paths.config_home is not None:
+            allow.append(paths.config_home)
+            agent_config = [paths.config_home / rel for rel in CONFIG_HOME_PROTECTED]
         deny_read += [] if paths.main_pm is None else [paths.main_pm]
         deny_read += list(paths.other_worktrees)
     elif kind is ProcessKind.GATE:
@@ -149,6 +163,7 @@ def profile_for(
         allow = [paths.output_dir if paths.output_dir is not None else paths.temp_dir]
     deny_write = [paths.workspace / rel for rel in _PROTECTED_LITERALS]
     deny_write += [home / rel for rel in AGENT_GLOBAL_CONFIG]
+    deny_write += agent_config
     workspace = str(paths.workspace)
     patterns = () if _GLOB_CHARS & set(workspace) else (f"{workspace}/{ENV_PATTERN}",)
     return SandboxProfile(

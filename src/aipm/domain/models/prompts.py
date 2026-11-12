@@ -27,6 +27,8 @@ class GateCommand:
     required: bool
     argv: tuple[str, ...] | None = None
     builtin: str | None = None
+    allow_prefix: tuple[str, ...] | None = None
+    """`argv` up to its first placeholder: what a dispatched agent may run (ADR-0023)."""
 
 
 @dataclass(frozen=True, slots=True)
