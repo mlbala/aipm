@@ -49,6 +49,8 @@ class GateContext:
     withheld: Callable[[str], bool] = denied_for_llm
     changed_during_gates: Callable[[], list[str]] = lambda: []
     warnings: list[str] = field(default_factory=list[str])
+    deny_read: tuple[Path, ...] = ()
+    """More paths gates may not read: in a build, the agent's isolated config home."""
 
     @property
     def root(self) -> Path:
