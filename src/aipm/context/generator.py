@@ -1,4 +1,5 @@
-"""Context files: `AGENTS.md` and `CLAUDE.md` in v0.1 (ARCHITECTURE §10.2).
+"""Context files: `AGENTS.md` and `CLAUDE.md` in v0.1; `GEMINI.md`, the Copilot instructions and
+the Codex skills in v0.4 (ARCHITECTURE §10.2).
 
 A context file persists across every future agent session, so a poisoned one is a persistent
 prompt injection. Each managed block is rendered only from aipm's package templates and the
@@ -39,9 +40,14 @@ from aipm.security.untrusted import PackageTemplateLoader, Untrusted, make_env
 
 AGENTS_FILE = "AGENTS.md"
 CLAUDE_FILE = "CLAUDE.md"
-CONTEXT_FILES = (AGENTS_FILE, CLAUDE_FILE)
-"""The only repository files outside `.pm/` that hold a managed block in v0.1."""
+GEMINI_FILE = "GEMINI.md"
+COPILOT_FILE = ".github/copilot-instructions.md"
+CONTEXT_FILES = (AGENTS_FILE, CLAUDE_FILE, GEMINI_FILE, COPILOT_FILE)
+"""The repository files outside `.pm/` that hold a managed block, besides aipm's own skills and
+subagents."""
 CLAUDE_IMPORT = "@AGENTS.md"
+GEMINI_IMPORT = "@./AGENTS.md"
+"""Gemini CLI's documented import form: a path relative to `GEMINI.md`."""
 MAX_BLOCK_BYTES = 24 * 1024
 
 GATE_ORDER = ("secrets", "lint", "format", "types", "unit", "ac_trace", "sast", "deps", "ac_review")
@@ -269,6 +275,22 @@ def claude_md(ctx: ProjectContext) -> GeneratedFile:
     return GeneratedFile(CLAUDE_FILE, _checked(CLAUDE_FILE, block, ctx, imports=[CLAUDE_IMPORT]))
 
 
+def gemini_md(ctx: ProjectContext) -> GeneratedFile:
+    """The `GEMINI.md` managed block: the `@./AGENTS.md` import plus Gemini CLI notes (v0.4)."""
+    block = render("gemini.md.j2", {"import_line": GEMINI_IMPORT}, seed_parts=[ctx.project])
+    return GeneratedFile(GEMINI_FILE, _checked(GEMINI_FILE, block, ctx, imports=[GEMINI_IMPORT]))
+
+
+def copilot_instructions(ctx: ProjectContext) -> GeneratedFile:
+    """The `.github/copilot-instructions.md` managed block: a thin pointer to `AGENTS.md`, which
+    Copilot CLI reads natively, so it imports nothing (v0.4)."""
+    project = literal(ctx.project, ctx.allowed_url_domains, what="the project name")
+    block = render(
+        "copilot-instructions.md.j2", {"project": code_span(project)}, seed_parts=[ctx.project]
+    )
+    return GeneratedFile(COPILOT_FILE, _checked(COPILOT_FILE, block, ctx))
+
+
 def generate(ctx: ProjectContext) -> list[GeneratedFile]:
     """Render `AGENTS.md` and `CLAUDE.md` from approved, sanitized fields."""
     return [agents_md(ctx), claude_md(ctx)]
@@ -324,16 +346,36 @@ CLAUDE_EXTRAS: Mapping[str, tuple[str, str]] = {
 """aipm's own Claude Code subagents and skills (ARCHITECTURE §10.2, v0.2): fixed front matter
 (no `allowed-tools`; the reviewer reads only), instructions only, never a script."""
 
+CODEX_SKILLS: Mapping[str, tuple[str, str]] = {
+    ".agents/skills/aipm-task-protocol/SKILL.md": CLAUDE_EXTRAS[
+        ".claude/skills/aipm-task-protocol/SKILL.md"
+    ],
+    ".agents/skills/aipm-run-checks/SKILL.md": CLAUDE_EXTRAS[
+        ".claude/skills/aipm-run-checks/SKILL.md"
+    ],
+}
+"""aipm's skills for Codex (ARCHITECTURE §10.2, v0.4): the same instructions and front matter
+(`name`, `description`) as the Claude Code skills, where Codex looks for repository skills."""
+
 TEST_CONFIG_NAMES = ("pytest.ini", "conftest.py", "tox.ini", "setup.cfg", ".coveragerc",
                      "jest.config.*", "vitest.config.*")  # fmt: skip
 
 
 def claude_extras(ctx: ProjectContext) -> list[GeneratedFile]:
     """The Claude Code subagents and skills, rendered like `AGENTS.md` and checked for I-3."""
+    return _owned_files(ctx, CLAUDE_EXTRAS)
+
+
+def codex_skills(ctx: ProjectContext) -> list[GeneratedFile]:
+    """The Codex skills under `.agents/skills/`, rendered and checked like Claude's (v0.4)."""
+    return _owned_files(ctx, CODEX_SKILLS)
+
+
+def _owned_files(ctx: ProjectContext, specs: Mapping[str, tuple[str, str]]) -> list[GeneratedFile]:
     data = _agents_data(ctx, features=False, descriptions=False)
     data["test_config"] = [code_span(name) for name in TEST_CONFIG_NAMES]
     files: list[GeneratedFile] = []
-    for path, (template, preamble) in CLAUDE_EXTRAS.items():
+    for path, (template, preamble) in specs.items():
         block = render(template, data, seed_parts=[ctx.project, path])
         _checked(path, preamble, ctx)
         files.append(GeneratedFile(path, _checked(path, block, ctx), preamble=preamble))
