@@ -160,15 +160,32 @@ def report(*locations: str, status: CaseStatus = CaseStatus.PASSED) -> TestRepor
     return TestReport(tuple(TestCase(loc, "TestX", status) for loc in locations))
 
 
-def test_a_go_test_file_ran_when_its_package_ran() -> None:
-    ran = report("example.com/clinic/internal/booking", "example.com/clinic")
+GO_TEST = 'package booking\n\nimport "testing"\n\nfunc TestSlots(t *testing.T) {}\n'
+
+
+def test_a_go_test_file_ran_when_one_of_its_own_tests_ran() -> None:
     module = "example.com/clinic"
-    assert ac_trace.ran("internal/booking/slots_test.go", ran, go_module=module)
-    assert ac_trace.ran("main_test.go", ran, go_module=module)
-    assert not ac_trace.ran("internal/other/x_test.go", ran, go_module=module)
-    assert not ac_trace.ran("internal/booking/slots_test.go", ran, go_module=None)
-    skipped = report("example.com/clinic/internal/booking", status=CaseStatus.SKIPPED)
-    assert not ac_trace.ran("internal/booking/slots_test.go", skipped, go_module=module)
+    ran = TestReport((
+        TestCase("example.com/clinic/internal/booking", "TestSlots/free", CaseStatus.PASSED),
+        TestCase("example.com/clinic", "TestSlots", CaseStatus.PASSED),
+    ))  # fmt: skip
+    assert ac_trace.ran("internal/booking/slots_test.go", ran, go_module=module, text=GO_TEST)
+    assert ac_trace.ran("main_test.go", ran, go_module=module, text=GO_TEST)
+    assert not ac_trace.ran("internal/other/x_test.go", ran, go_module=module, text=GO_TEST)
+    assert not ac_trace.ran("internal/booking/slots_test.go", ran, go_module=None, text=GO_TEST)
+
+
+def test_another_test_of_the_same_package_does_not_count() -> None:
+    """A file with only an AC comment and no test of its own does not trace (step 08 review)."""
+    module = "example.com/clinic"
+    ran = report("example.com/clinic/internal/booking")  # a case named TestX
+    marker_only = "package booking\n\n// AC-T002-1\n"
+    assert not ac_trace.ran("internal/booking/ac_test.go", ran, go_module=module,
+                            text=marker_only)  # fmt: skip
+    skipped = TestReport((TestCase("example.com/clinic/internal/booking", "TestSlots",
+                                   CaseStatus.SKIPPED),))  # fmt: skip
+    assert not ac_trace.ran("internal/booking/slots_test.go", skipped, go_module=module,
+                            text=GO_TEST)  # fmt: skip
 
 
 @pytest.mark.parametrize(
@@ -182,3 +199,35 @@ def test_a_go_test_file_ran_when_its_package_ran() -> None:
 )
 def test_the_go_module_line(text: str, module: str | None) -> None:
     assert ac_trace.go_module(text) == module
+
+
+# ---------------------------------------------------------------- step 08 security review
+
+
+def test_every_go_proxy_request_forbids_fetching_from_the_origin() -> None:
+    """Without the header the proxy fetches an uncached, agent-chosen module path from its own
+    server: a channel out for whatever the path encodes."""
+    asked, fetch = answers({
+        PROXY + "list": Response(200, b"v0.3.0\n"),
+        PROXY + "v0.3.0.info": Response(200, b'{"Time": "2013-03-20T17:03:02Z"}'),
+    })  # fmt: skip
+    registry.first_release(Ecosystem.GO, "github.com/BurntSushi/toml", fetch=fetch)
+    assert len(asked) == 2
+    assert all(headers.get("Disable-Module-Fetch") == "true" for _, headers in asked)
+
+
+def test_gates_never_get_the_go_registries() -> None:
+    from aipm.execution.sandbox import ProcessKind  # noqa: PLC0415
+    from aipm.gates.command_gate import _network  # pyright: ignore[reportPrivateUsage]  # noqa: PLC0415
+
+    argv = ("go", "test")
+    gate = _network(NetworkProfile.REGISTRIES, argv, ProcessKind.GATE)
+    prepare = _network(NetworkProfile.REGISTRIES, ("go", "mod", "download"), ProcessKind.PREPARE)
+    assert "proxy.golang.org" not in gate.domains and "storage.googleapis.com" not in gate.domains
+    assert "proxy.golang.org" in prepare.domains
+
+
+def test_agents_may_not_read_a_dotenv_in_home() -> None:
+    from aipm.execution.sandbox import CREDENTIAL_PATHS  # noqa: PLC0415
+
+    assert ".env" in CREDENTIAL_PATHS

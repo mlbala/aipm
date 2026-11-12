@@ -58,6 +58,9 @@ CREDENTIAL_PATHS: tuple[str, ...] = (
     ".bash_history", ".zsh_history", ".zsh_sessions", ".local/share/fish/fish_history",
     ".python_history", ".node_repl_history", ".psql_history", ".mysql_history",
     ".sqlite_history",
+    # Step 08 review: a dotenv file in the home directory, which tools that search upward for
+    # `.env` (Gemini CLI) would load.
+    ".env",
 )  # fmt: skip
 """SECURITY.md §3 developer credentials, relative to the home directory."""
 

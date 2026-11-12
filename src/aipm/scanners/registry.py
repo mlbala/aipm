@@ -10,7 +10,12 @@ reports as an error: a lookup that fails never passes a package.
   file's `upload-time` (PEP 700).
 - npm: the package document; the first release is `time.created`.
 - Go: the module proxy's version list (`@v/list`, plain text), then the `.info` of the oldest
-  tagged version for its time; a module with no tagged version is an error (v0.4).
+  tagged version for its time; a module with no tagged version is an error (v0.4). Every request
+  carries `Disable-Module-Fetch: true`, so the proxy answers from its cache only and never
+  fetches an agent-chosen module path from its origin (which would carry data out through the
+  path); a module the proxy has not cached reads as missing (security review of step 08). The
+  `.info` time is the tag's commit time, which the module author sets: the Go age check is
+  weaker than the others (docs/adapters.md).
 - crates.io: the crate document; the first release is `crate.created_at`. crates.io refuses
   requests without a User-Agent, so a fixed one naming aipm (never the user) is sent (v0.4).
 """
@@ -36,6 +41,7 @@ GO_PROXY = "https://proxy.golang.org/{module}/@v/{what}"
 CRATES_DOC = "https://crates.io/api/v1/crates/{name}"
 USER_AGENT = "aipm-deps-gate (+https://github.com/mlbala/aipm)"
 MAX_GO_VERSIONS = 10_000
+GO_NO_FETCH = {"Disable-Module-Fetch": "true"}
 _ACCEPT = {
     Ecosystem.PYPI: "application/vnd.pypi.simple.v1+json",
     Ecosystem.NPM: "application/json",
@@ -183,14 +189,16 @@ def _status(response: Response, *, gone: tuple[int, ...] = (404,)) -> bool:
 
 def _go_first(name: str, ask: Fetch) -> PackageInfo:
     module = go_escape(name)
-    listing = ask(GO_PROXY.format(module=module, what="list"), {"Accept": "text/plain"})
+    listing = ask(
+        GO_PROXY.format(module=module, what="list"), {"Accept": "text/plain", **GO_NO_FETCH}
+    )
     if not _status(listing, gone=(404, 410)):
         return PackageInfo(exists=False)
     tag = oldest_tag(listing.body.decode("utf-8", errors="replace"))
     if tag is None:
         raise RegistryError("the module has no tagged version, so its age is unknown")
     info = ask(GO_PROXY.format(module=module, what=f"{urllib.parse.quote(tag)}.info"),
-               {"Accept": _ACCEPT[Ecosystem.GO]})  # fmt: skip
+               {"Accept": _ACCEPT[Ecosystem.GO], **GO_NO_FETCH})  # fmt: skip
     if not _status(info, gone=(404, 410)):
         raise RegistryError(f"the proxy lists {tag} but has no information on it")
     first = _parse_time(_json_object(info).get("Time"))

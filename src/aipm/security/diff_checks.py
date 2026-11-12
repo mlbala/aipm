@@ -637,39 +637,64 @@ def _go_entry(kind: str, text: str, names: set[str], off: set[str]) -> bool:
     return True
 
 
+_GO_VERBS = frozenset(
+    {"module", "go", "toolchain", "godebug", "require", "exclude", "replace", "retract", "tool",
+     "ignore"}
+)  # fmt: skip
+"""Every directive `go.mod` allows (go.dev/ref/mod#go-mod-file-grammar); anything else makes the
+file unreadable, never ignored (security review of step 08)."""
+_GO_VERB = re.compile(r"([A-Za-z]+)(?=[\s(]|$)")
+
+
+def _go_directive(line: str, names: set[str], off: set[str]) -> tuple[bool, str | None]:
+    """One top-level line: (well formed, the block it opens)."""
+    verb = _GO_VERB.match(line)
+    if verb is None or verb.group(1) not in _GO_VERBS:
+        return False, None
+    word = verb.group(1)
+    rest = line[verb.end() :].strip()
+    if rest == "(":
+        return True, word
+    if not rest or rest.startswith("("):
+        return False, None
+    if word in ("require", "replace"):
+        return _go_entry(word, rest, names, off), None
+    if word == "toolchain":
+        off.add(f"toolchain {' '.join(rest.split())}")
+    return True, None
+
+
 def _go_mod_deps(text: str) -> Deps | None:
     """`require` lines and blocks; a `replace` to another module or outside the repository, and a
-    `toolchain` line, are sources outside the proxy. Anything not well formed: `None`."""
+    `toolchain` line, are sources outside the proxy. The verb ends at any whitespace or `(`, as
+    in Go's own lexer; an unknown verb or a line not well formed makes the file `None`."""
     names: set[str] = set()
     off: set[str] = set()
     block: str | None = None
     for raw in text.split("\n"):
+        line = raw.split("//", 1)[0].strip()
         if len(raw) > MAX_LINE:
             return None
-        line = raw.split("//", 1)[0].strip()
         if not line:
             continue
-        if block is not None:
-            if line == ")":
-                block = None
-            elif not _go_entry(block, line, names, off):
-                return None
-            continue
-        word, _, rest = line.partition(" ")
-        rest = rest.strip()
-        if word in ("require", "replace"):
-            if rest == "(":
-                block = word
-            elif not rest or not _go_entry(word, rest, names, off):
-                return None
-        elif word == "toolchain":
-            off.add(f"toolchain {rest}")
+        if block is None:
+            ok, block = _go_directive(line, names, off)
+        elif line == ")":
+            ok, block = True, None
+        else:
+            ok = block not in ("require", "replace") or _go_entry(block, line, names, off)
+        if not ok:
+            return None
     if block is not None:
         return None
     return Deps(frozenset((Ecosystem.GO, n) for n in names), frozenset(off))
 
 
-_CARGO_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
+_CARGO_TABLES = (
+    "dependencies", "dev-dependencies", "build-dependencies", "dev_dependencies",
+    "build_dependencies",
+)  # fmt: skip
+"""Cargo still reads the underscore spellings (editions up to 2021)."""
 _CARGO_SOURCES = ("git", "registry", "registry-index")
 
 

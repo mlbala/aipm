@@ -23,6 +23,7 @@ from aipm.domain.models import (
 )
 from aipm.security.diff_checks import (
     CheckPolicy,
+    Deps,
     Kind,
     check_changes,
     is_lockfile,
@@ -302,3 +303,65 @@ def test_new_dependencies_read_both_manifests() -> None:
     found = new_dependencies(ChangeSet("a" * 40, files=files))
     assert ("go.mod", Ecosystem.GO, "github.com/stretchr/testify") in found
     assert ("Cargo.toml", Ecosystem.CRATES, "serde-json") in found
+
+
+# ---------------------------------------------------------------- step 08 security review
+
+
+@pytest.mark.parametrize(
+    ("text", "names"),
+    [
+        ("require\tattacker.example/s3cr3t v0.0.1\n", {"attacker.example/s3cr3t"}),
+        ("require(\n\tattacker.example/s3cr3t v0.0.1\n)\n", {"attacker.example/s3cr3t"}),
+        ("require  \t attacker.example/s3cr3t v0.0.1\n", {"attacker.example/s3cr3t"}),
+    ],
+)
+def test_go_mod_verbs_end_at_any_whitespace_or_paren(text: str, names: set[str]) -> None:
+    """Go's lexer ends a verb at a tab or `(`; so must the check, or a dependency hides."""
+    deps = manifest_deps("go.mod", GO_MOD + text)
+    assert deps is not None
+    assert {(Ecosystem.GO, n) for n in names} <= deps.names
+
+
+@pytest.mark.parametrize(
+    ("text", "source"),
+    [
+        ("replace\tgolang.org/x/crypto => attacker.example/crypto v0.0.1\n",
+         "golang.org/x/crypto => attacker.example/crypto v0.0.1"),
+        ("replace(\n\tgolang.org/x/crypto => attacker.example/crypto v0.0.1\n)\n",
+         "golang.org/x/crypto => attacker.example/crypto v0.0.1"),
+        ("toolchain\tgo1.99.0\n", "toolchain go1.99.0"),
+    ],
+)  # fmt: skip
+def test_go_mod_sources_behind_a_tab_are_seen(text: str, source: str) -> None:
+    deps = manifest_deps("go.mod", GO_MOD + text)
+    assert deps is not None and source in deps.off_registry
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["frobnicate github.com/a/b v1\n", "require ( github.com/a/b v1 )\n", "9require x v1\n",
+     "require\n"],
+)  # fmt: skip
+def test_an_unknown_or_odd_go_mod_line_makes_it_unreadable(text: str) -> None:
+    assert manifest_deps("go.mod", GO_MOD + text) is None
+
+
+def test_other_go_mod_blocks_are_read_without_their_entries() -> None:
+    text = GO_MOD + "exclude (\n\tgithub.com/a/b v1.0.0\n)\nretract [v1.0.0, v1.0.5]\n"
+    deps = manifest_deps("go.mod", text)
+    assert deps is not None
+    assert (Ecosystem.GO, "github.com/a/b") not in deps.names
+
+
+@pytest.mark.parametrize("table", ["dev_dependencies", "build_dependencies"])
+def test_cargo_underscore_tables_are_read(table: str) -> None:
+    text = CARGO + f'\n[{table}]\nevil = {{ git = "https://attacker.example/evil" }}\nplain = "1"\n'
+    deps = manifest_deps("Cargo.toml", text)
+    assert deps is not None
+    assert (Ecosystem.CRATES, "plain") in deps.names
+    assert any(s.startswith("evil: git") for s in deps.off_registry)
+    target = CARGO + f'\n[target.x86_64-unknown-linux-gnu.{table}]\nt = "1"\n'
+    assert (Ecosystem.CRATES, "t") in (
+        manifest_deps("Cargo.toml", target) or Deps(frozenset())
+    ).names

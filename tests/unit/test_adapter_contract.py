@@ -299,10 +299,12 @@ def test_gemini_rules_follow_the_gates_and_the_sandbox_follows_srt(tmp_path: Pat
     assert "--allowed-tools" not in none
 
 
-@pytest.mark.parametrize("name", [".gemini", ".env", ".env.local"])
+@pytest.mark.parametrize("name", [".gemini", ".env", ".env.local", ".GEMINI", ".Env"])
 def test_gemini_refuses_a_worktree_with_settings_it_would_load(name: str, tmp_path: Path) -> None:
     ws = workspace(tmp_path)
-    (ws.root / name).mkdir() if name == ".gemini" else (ws.root / name).write_text("X=1\n")
+    (ws.root / name).mkdir() if name.casefold() == ".gemini" else (ws.root / name).write_text(
+        "X=1\n"
+    )
     with pytest.raises(PolicyViolation, match=name) as info:
         ready("gemini").build_invocation(prompt("gemini"), limits(), ws)
     assert info.value.exit_code is ExitCode.SECURITY_VIOLATION
@@ -376,3 +378,21 @@ def test_an_error_is_reported_and_no_cost_is_claimed(tool: str) -> None:
 def test_gemini_reads_a_result_after_other_lines() -> None:
     out = "Loaded cached credentials.\n" + json.dumps({"response": "AIPM-BLOCKED: q?"}) + "\n"
     assert _make("gemini").parse_result(run(out)).blocked_question == "q?"
+
+
+def test_gemini_stops_its_dotenv_search_at_the_worktree_parent(tmp_path: Path) -> None:
+    """Gemini walks up from its working directory for `.env`: an empty guard in the worktree's
+    parent ends the walk before the user's home (step 08 security review)."""
+    ws = workspace(tmp_path)
+    inv = ready("gemini").build_invocation(prompt("gemini"), limits(), ws)
+    guard = ws.root.parent / ".env"
+    assert guard.is_file() and guard.stat().st_size == 0
+    assert inv.env["GEMINI_SANDBOX"] == "false"
+    ready("gemini").build_invocation(prompt("gemini"), limits(), ws)  # an empty guard is reused
+
+
+def test_gemini_refuses_a_guard_that_is_not_empty(tmp_path: Path) -> None:
+    ws = workspace(tmp_path)
+    (ws.root.parent / ".env").write_text("GEMINI_SANDBOX=false\n")
+    with pytest.raises(PolicyViolation, match="empty file"):
+        ready("gemini").build_invocation(prompt("gemini"), limits(), ws)

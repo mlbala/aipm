@@ -47,18 +47,26 @@ def go_module(text: str) -> str | None:
     return found.group(1) if found else None
 
 
-def ran(path: str, report: TestReport, *, go_module: str | None = None) -> bool:
+_GO_TEST_FUNC = re.compile(r"^func\s+(Test[A-Za-z0-9_]*)\s*\(", re.MULTILINE)
+
+
+def ran(path: str, report: TestReport, *, go_module: str | None = None, text: str = "") -> bool:
     """Whether the report has a case from this test file that ran.
 
-    A Go test file ran when a case's classname is its package's import path (gotestsum writes
-    JUnit with the package as the classname): `<module>/<dir>`, or `<module>` at the root. With
-    no `go.mod` module, no Go file counts as run (ADR-0029)."""
+    A Go test file ran when a test function it defines (`func TestX(`) ran in its package:
+    gotestsum writes JUnit with the package's import path (`<module>/<dir>`, or `<module>` at
+    the root) as the classname and the test as the name (`TestX`, or `TestX/sub`). Another test
+    of the same package does not count (security review of step 08). With no `go.mod` module,
+    no Go file counts as run (ADR-0029)."""
     if path.endswith("_test.go"):
         if go_module is None:
             return False
         directory = path.rpartition("/")[0]
         package = f"{go_module}/{directory}" if directory else go_module
-        return any(case.location == package for case in report.ran)
+        tests = set(_GO_TEST_FUNC.findall(text))
+        return any(
+            case.location == package and case.name.split("/", 1)[0] in tests for case in report.ran
+        )
     module = path.removesuffix(".py").replace("/", ".")
     for case in report.ran:
         loc = case.location
@@ -82,7 +90,7 @@ def run(ctx: GateContext, report: TestReport | None, *, required: bool) -> Built
         holders = [rel for rel, text in texts.items() if pattern.search(text)]
         if not holders:
             detail = "appears in no owned or changed test file"
-        elif not any(ran(rel, report, go_module=module) for rel in holders):
+        elif not any(ran(rel, report, go_module=module, text=texts[rel]) for rel in holders):
             detail = f"its test file(s) did not run: {', '.join(holders[:3])}"
         else:
             continue

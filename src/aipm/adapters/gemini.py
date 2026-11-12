@@ -24,6 +24,7 @@ Gemini reports tokens, not cost, so the build loop charges each attempt its task
 
 import json
 import os
+import stat
 from pathlib import Path
 
 from aipm.adapters._common import (
@@ -90,6 +91,25 @@ PROMPT_TAIL = "Do the task above, following its rules."
 DETECTOR = Detector(DETECT)
 
 
+def env_guard(directory: Path) -> None:
+    """An empty, read-only `.env` in `directory`, so Gemini's search for one, which walks up
+    from its working directory, ends there and never loads the user's `~/.env` or
+    `~/.gemini/.env` (security review of step 08). An existing one must be an empty regular
+    file, or dispatch is refused (exit 6)."""
+    guard = directory / ".env"
+    try:
+        fd = os.open(guard, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
+    except FileExistsError:
+        info = guard.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size:
+            raise PolicyViolation(
+                f"{guard} is not the empty file aipm leaves there for Gemini CLI",
+                hint="Remove it; aipm writes it again before the next dispatch.",
+            ) from None
+        return
+    os.close(fd)
+
+
 def shell_rules(commands: tuple[tuple[str, ...], ...]) -> list[str]:
     """`run_shell_command(<prefix>)` for each gate prefix, in plain words only (exit 6)."""
     rules: list[str] = []
@@ -109,6 +129,8 @@ class GeminiAdapter(HeadlessAdapter):
     api_domains: tuple[str, ...] = API_DOMAINS
     config_home: ConfigHomeSpec = CONFIG_HOME
     detector: Detector = DETECTOR
+    agent_env: tuple[tuple[str, str], ...] = (("GEMINI_SANDBOX", "false"),)
+    """Set, so no `.env` file can turn a sandbox setting on or off; `--sandbox` still wins."""
 
     def context_files(self, ctx: ProjectContext) -> list[GeneratedFile]:
         """`AGENTS.md` and `GEMINI.md`, which points to it."""
@@ -127,18 +149,23 @@ class GeminiAdapter(HeadlessAdapter):
         return [*argv, "--prompt", PROMPT_TAIL]
 
     def _check_workspace(self, ws: Workspace) -> None:
-        """Refuse a worktree whose root holds `.gemini/` or a `.env*` file (exit 6)."""
+        """Refuse a worktree whose root holds `.gemini/` or a `.env*` file in any case (macOS
+        file systems ignore case), exit 6; then stop Gemini's upward `.env` search at the
+        worktree's parent, which aipm owns, before it reaches the user's home."""
         try:
             names = [entry.name for entry in os.scandir(ws.root)]
         except FileNotFoundError:
             return
-        found = sorted(n for n in names if n == ".gemini" or n.startswith(".env"))
+        found = sorted(
+            n for n in names if n.casefold() == ".gemini" or n.casefold().startswith(".env")
+        )
         if found:
             raise PolicyViolation(
                 f"the worktree holds {', '.join(found)}, which Gemini CLI would load as settings "
                 "or environment",
                 hint="Remove them from the repository, or dispatch with another tool.",
             )
+        env_guard(ws.root.parent)
 
     def parse_result(self, out: ProcessResult) -> AgentResult:
         """`response` and `error` from the JSON result. Self-reports carry no authority: only

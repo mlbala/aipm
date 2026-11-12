@@ -29,3 +29,11 @@ Option 2.
 
 - A Rust task's acceptance criteria are traced to tests by the reviewer only, until cargo can write a report to a path aipm chooses. The README and the template say so.
 - Go projects need gotestsum installed alongside Go.
+
+## Addendum: the step 08 security review
+
+- **No fetch from the origin.** The deps gate asks the Go module proxy about every new module in `go.sum`, and those paths are written by the agent. For a module it has not cached, the proxy would fetch the path from its origin server, so the path itself could carry data out. Every proxy request therefore sends `Disable-Module-Fetch: true`, and an uncached module reads as missing, which fails the gate.
+- **The Go age check is weaker.** The proxy's `.info` time is the tag's commit time, which the module author sets. `min_dependency_age_days` cannot be trusted for Go as it is for PyPI, npm and crates.io, whose times come from the registry. Open question: use the checksum database's record order instead.
+- **Strict `go.mod` reading.** A directive's verb ends at any whitespace or `(`, as in Go's own lexer. Any verb outside the `go.mod` grammar, or a malformed line, makes the file unreadable, which is a violation.
+- **Per-test tracing.** For Go, `ac_trace` counts a `_test.go` file as run only when a `func TestX(` that the file defines ran in its package. Another test of the same package does not count.
+- **Go registries for prepare only.** A gate never gets the Go registries: the proxy fetches any origin, and its storage host takes anyone's bucket.

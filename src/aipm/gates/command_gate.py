@@ -87,13 +87,18 @@ def ecosystems_for(argv: Sequence[str]) -> tuple[Ecosystem, ...]:
     return _ECOSYSTEMS.get(program_name(argv[0]), (Ecosystem.PYPI, Ecosystem.NPM))
 
 
-def _network(profile: NetworkProfile, argv: Sequence[str]) -> NetworkPolicy:
+def _network(profile: NetworkProfile, argv: Sequence[str], kind: ProcessKind) -> NetworkPolicy:
     if profile is NetworkProfile.API_ONLY:
         raise PolicyViolation(
             "api-only needs named domains, which only aipm's own tools have",
             hint="Use none (the default), registries or open for gates and the prepare step.",
         )
-    return parse_network(profile.value, ecosystems=ecosystems_for(argv))
+    ecosystems = ecosystems_for(argv)
+    if kind is not ProcessKind.PREPARE:
+        # The Go proxy fetches any module path from its origin, and its storage host takes
+        # anyone's bucket: test code could carry data out through either (step 08 review).
+        ecosystems = tuple(e for e in ecosystems if e is not Ecosystem.GO)
+    return parse_network(profile.value, ecosystems=ecosystems)
 
 
 def sandbox_for(
@@ -105,7 +110,7 @@ def sandbox_for(
     paths = ProfilePaths(
         workspace=ctx.root, temp_dir=ctx.ws.temp_dir, home=ctx.home, extra_deny_read=ctx.deny_read
     )
-    return profile_for(kind, _network(profile, argv), paths, runtime=ctx.runtime)
+    return profile_for(kind, _network(profile, argv, kind), paths, runtime=ctx.runtime)
 
 
 def _output(result: ProcessResult, ctx: GateContext) -> str:
