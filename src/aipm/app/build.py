@@ -298,10 +298,14 @@ def run(
     root = find_repo_root(project)
     require_initialized(root)
     only = _only(options)
-    loaded = load_config(root, flags=_flags(options))
+    flags = _flags(options)
+    loaded = load_config(root, flags=flags)
     cfg = loaded.config
     adapter = get_adapter(parse_tool(options.tool, cfg.dispatch.default_tool))
-    require_trusted(root, loaded, command=options.kind)
+    # Trust is checked without the command-line layer: --parallel, --max-retries, --timeout and
+    # --budget are the person's own choice for this run and change nothing aipm executes, but
+    # relaxing a tighten-only key is part of the surface (SECURITY.md §6).
+    require_trusted(root, load_config(root) if flags else loaded, command=options.kind)
     if not cfg.dispatch.enabled:
         raise UsageError(
             "dispatch is turned off (dispatch.enabled: false)",
