@@ -10,7 +10,7 @@ import pytest
 
 from aipm.adapters import claude_code, registry
 from aipm.adapters.base import DispatchLimits, RenderedTaskPrompt
-from aipm.domain.errors import ExitCode, NotAvailable, UsageError
+from aipm.domain.errors import ExitCode, MissingCapability, NotAvailable, UsageError
 from aipm.domain.models import ToolName, Workspace
 from aipm.execution import clipboard
 from aipm.execution.process import ProcessResult
@@ -78,13 +78,15 @@ def test_detect_when_the_tool_cannot_run(tmp_path: Path) -> None:
     assert caps.version is None
 
 
-def test_dispatch_arrives_in_v03() -> None:
+def test_dispatch_needs_the_flag_check_first(tmp_path: Path) -> None:
+    """Dispatch arrived in v0.3 (build prompt 07): `tests/unit/test_claude_dispatch.py`."""
     adapter = claude_code.create()
     prompt = RenderedTaskPrompt(ToolName.CLAUDE, "T-001", "x")
-    with pytest.raises(NotImplementedError, match=r"v0\.3"):
-        adapter.build_invocation(prompt, DispatchLimits(), Workspace())
-    with pytest.raises(NotImplementedError, match=r"v0\.3"):
-        adapter.parse_result(ProcessResult(("x",), 0, b"", b"", False, False, 0.0))
+    ws = Workspace(root=tmp_path, temp_dir=tmp_path, context_dir=tmp_path, config_home=tmp_path)
+    with pytest.raises(MissingCapability, match="flags dispatch needs"):
+        adapter.build_invocation(prompt, DispatchLimits(timeout_s=60, task_usd=1.0), ws)
+    result = adapter.parse_result(ProcessResult(("x",), 0, b"", b"", False, False, 0.0))
+    assert not result.saw_result
 
 
 def test_context_files_are_agents_md_claude_md_and_the_v02_extras() -> None:

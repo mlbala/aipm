@@ -2,7 +2,8 @@
 
 1. `prepare`, with the `registries` network profile, when a command gate will run.
 2. The gates in the order secrets, lint, format, types, unit, ac_trace, sast, deps, ac_review;
-   any other menu gate runs after `unit`. `verify` runs them all (no fail-fast).
+   any other menu gate runs after `unit`. `verify` runs them all; a build with
+   `dispatch.fail_fast` reports the gates after the first required failure as skipped.
 3. Command gates go through `compile_gate` → `sandbox.wrap` → `run_safe` with no network.
 
 A gate counts as required when the menu says so or the task names it. A gate the task names
@@ -145,6 +146,13 @@ class _Attempt:
         return None
 
 
+def _failed_required(run: GateRun) -> str | None:
+    last = run.results[-1] if run.results else None
+    if last is not None and last.required and last.status in (GateStatus.FAIL, GateStatus.ERROR):
+        return last.name
+    return None
+
+
 def run_gates(
     ctx: GateContext,
     *,
@@ -153,8 +161,13 @@ def run_gates(
     only: str | None = None,
     override_ac: str | None = None,
     hold_prepare: str | None = None,
+    fail_fast: bool = False,
 ) -> GateRun:
-    """Run `prepare` and the gates for one attempt; never stops at the first failure."""
+    """Run `prepare` and the gates for one attempt.
+
+    `verify` runs them all. With `fail_fast` (`dispatch.fail_fast` during a build, §13.2) the
+    gates after the first required one that failed are reported as skipped.
+    """
     menu = ctx.cfg.gates
     named = set(ctx.task.gates)
     names = [only] if only is not None else gate_order([*menu, *named])
@@ -175,8 +188,16 @@ def run_gates(
             attempt.run.outputs["prepare"] = prepare.full_output
             attempt.prepare_ok = prepare.result.status is GateStatus.PASS
     paths = owned_paths(ctx.root, ctx.task, extra_protected=ctx.protected_extra())
+    stopped = _failed_required(attempt.run) if fail_fast else None
     for name in names:
         gate = menu.get(name)
+        if stopped is not None:
+            required = name in named or (gate is not None and gate.required)
+            attempt.run.results.append(
+                GateResult(name=name, status=GateStatus.SKIPPED, required=required,
+                           summary=f"not run: the required gate {stopped} failed first")
+            )  # fmt: skip
+            continue
         if gate is None:
             message = f"{ctx.task.id} names {name}, which is not in the gate menu"
             attempt.run.results.append(_error(name, message, required=True))
@@ -184,4 +205,6 @@ def run_gates(
             attempt.command(name, gate, paths, name in named or gate.required)
         else:
             attempt.builtin(name, gate, name in named or gate.required)
+        if fail_fast:
+            stopped = _failed_required(attempt.run)
     return attempt.run

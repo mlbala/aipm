@@ -18,6 +18,7 @@ import os
 import re
 import secrets
 import stat
+import threading
 from collections.abc import Generator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, suppress
 from datetime import UTC, datetime
@@ -78,6 +79,8 @@ RUNS_DIR = "runs"
 CACHE_DIR = "cache/llm"
 MAX_CACHE_BYTES = 1_048_576
 _CACHE_KEY = re.compile(r"[0-9a-f]{64}")
+MAX_RUN_FILE_BYTES = 16 * 1_048_576
+"""The largest run file aipm appends to (the build journal) or reads back."""
 
 _MODELS: Mapping[ArtifactKind, type[YamlArtifact] | type[MarkdownArtifact[Any]]] = {
     ArtifactKind.REQUIREMENTS: RequirementsDoc,
@@ -188,11 +191,15 @@ class FileStateStore:
         self.root = pm_root(self.repo_root)
         self.redactor = redactor if redactor is not None else process_redactor()
         self.ledger = ledger
+        # The build loop writes from its event loop and, through the AC reviewer's cache, from
+        # gate threads: the ledger is read, changed and rewritten, so writes take turns.
+        self._writes = threading.RLock()
 
     def _record(self, name: str, data: bytes | None) -> None:
         if self.ledger is not None:
             digest = None if data is None else hashlib.sha256(data).hexdigest()
-            self.ledger.record(f".pm/{name}", digest)
+            with self._writes:
+                self.ledger.record(f".pm/{name}", digest)
 
     # ------------------------------------------------------------ directory and file safety
 
@@ -568,21 +575,112 @@ class FileStateStore:
             if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
                 raise PolicyViolation(f"{path} must be a real directory, not a link or a file")
 
-    def save_run_text(self, run_id: str, parts: Sequence[str], text: str) -> str:
-        """Write `.pm/runs/<run-id>/<parts…>` (sanitized, redacted, atomic); returns its path
-        relative to the repository. Gate output is T2, so it is cleaned like any other text."""
+    @staticmethod
+    def _run_name(run_id: str, parts: Sequence[str]) -> str:
         if not is_valid_id("run", run_id) or not parts:
             raise UsageError(f"not a run ID and file: {run_id!r}")
         for part in parts:
             if not _RUN_PART.fullmatch(part) or part in (".", ".."):
                 raise UsageError(f"not a run file name: {part!r}")
-        name = "/".join((RUNS_DIR, run_id, *parts))
+        return "/".join((RUNS_DIR, run_id, *parts))
+
+    def save_run_text(self, run_id: str, parts: Sequence[str], text: str) -> str:
+        """Write `.pm/runs/<run-id>/<parts…>` (sanitized, redacted, atomic); returns its path
+        relative to the repository. Gate output is T2, so it is cleaned like any other text."""
+        name = self._run_name(run_id, parts)
         source = f".pm/{name}"
         cleaned = self._clean_text(text, source, [])
         self._refuse_secrets(cleaned, source)
         self._real_dirs([RUNS_DIR, run_id, *parts[:-1]])
         self._atomic_write(name, cleaned.encode("utf-8"))
         return source
+
+    def append_run_line(self, run_id: str, parts: Sequence[str], line: str) -> str:
+        """Append one line to `.pm/runs/<run-id>/<parts…>` (the build journal): sanitized,
+        redacted, refused if a secret is left, fsync'd, and recorded in the write ledger with
+        the file's new hash. Returns its path relative to the repository."""
+        name = self._run_name(run_id, parts)
+        source = f".pm/{name}"
+        cleaned = self._clean_text(line, source, [])
+        if "\n" in cleaned or "\r" in cleaned:
+            raise UsageError(f"{source}: one line at a time")
+        self._refuse_secrets(cleaned, source)
+        data = (cleaned + "\n").encode("utf-8")
+        with self._writes:
+            self._real_dirs([RUNS_DIR, run_id, *parts[:-1]])
+            target = self.root / name
+            created = not os.path.lexists(target)
+            flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+            try:
+                fd = os.open(target, flags, 0o644)
+            except OSError as exc:
+                raise PolicyViolation(
+                    f"{source} cannot be appended safely ({exc.strerror})"
+                ) from None
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode):
+                    raise PolicyViolation(f"{source} is not a regular file")
+                if info.st_size + len(data) > MAX_RUN_FILE_BYTES:
+                    raise UsageError(f"{source} would be larger than {MAX_RUN_FILE_BYTES} bytes")
+                os.write(fd, data)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            if created:
+                dir_fd = os.open(target.parent, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            if self.ledger is not None:
+                self._record(name, self._read(name, limit=MAX_RUN_FILE_BYTES))
+        return source
+
+    def run_ids(self) -> list[str]:
+        """The run IDs under `.pm/runs/` that are real directories, oldest name first."""
+        return sorted(r for r in _real_children(self.root / RUNS_DIR) if is_valid_id("run", r))
+
+    def read_run_text(
+        self, run_id: str, parts: Sequence[str], *, limit: int = MAX_RUN_FILE_BYTES
+    ) -> str | None:
+        """A run file aipm wrote whole (`save_run_text`), or `None`: missing, or not what the
+        write ledger says aipm wrote. `.pm/runs/` is ignored by git, so a file planted there,
+        or shipped with a copied repository, is never read as aipm's own."""
+        name = self._run_name(run_id, parts)
+        try:
+            data = self._read(name, limit=limit)
+        except (PolicyViolation, SchemaError):
+            return None
+        if data is None or not self._ours(name, data):
+            return None
+        return data.decode("utf-8", errors="replace")
+
+    def run_lines(
+        self, run_id: str, parts: Sequence[str], *, limit: int = MAX_RUN_FILE_BYTES
+    ) -> list[str] | None:
+        """The lines of a run file aipm appended to (`append_run_line`), or `None` when the
+        write ledger says aipm did not write it so.
+
+        An unfinished last line is dropped. So is a whole last line the ledger has not recorded
+        yet: aipm stopped between appending it and recording the new hash.
+        """
+        name = self._run_name(run_id, parts)
+        try:
+            data = self._read(name, limit=limit)
+        except (PolicyViolation, SchemaError):
+            return None
+        if data is None:
+            return None
+        whole = data[: data.rfind(b"\n") + 1]
+        lines = whole.decode("utf-8", errors="replace").splitlines()
+        if self._ours(name, whole):
+            return lines
+        if lines:
+            previous = whole[: whole.rfind(b"\n", 0, len(whole) - 1) + 1]
+            if self._ours(name, previous):
+                return lines[:-1]
+        return None
 
     def _cache_name(self, key: str) -> str:
         if not _CACHE_KEY.fullmatch(key):

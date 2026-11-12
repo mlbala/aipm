@@ -22,7 +22,7 @@ from aipm.domain.models import (
     ProjectContext,
     StateSnapshot,
 )
-from aipm.security.command_policy import CommandPolicy, compile_gate
+from aipm.security.command_policy import PLACEHOLDERS, CommandPolicy, compile_gate
 from aipm.security.paths import protected_patterns
 
 AGENT_REPORT_FILE = Path("/dev/null")
@@ -53,7 +53,8 @@ def agent_gates(cfg: Config, *, detail: bool = True) -> tuple[GateCommand, ...]:
                 f"gate {name!r} is not allowed by the command policy",
                 hint="Run `aipm trust --show` to see why.",
             ) from None
-        gates.append(GateCommand(name, gate.required, argv=argv))
+        first = next((i for i, arg in enumerate(gate.run) if arg in PLACEHOLDERS), len(gate.run))
+        gates.append(GateCommand(name, gate.required, argv=argv, allow_prefix=argv[:first]))
     return tuple(gates)
 
 

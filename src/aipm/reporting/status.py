@@ -61,6 +61,15 @@ class EventView:
 
 
 @dataclass(frozen=True, slots=True)
+class SpendRecord:
+    """What the newest build spent (its `cost.json`, as aipm wrote it)."""
+
+    run_id: str
+    usd: float
+    tokens: int
+
+
+@dataclass(frozen=True, slots=True)
 class StatusView:
     """Everything `aipm status` shows."""
 
@@ -74,6 +83,19 @@ class StatusView:
     uncovered_threats: tuple[str, ...]
     budget: BudgetConfig
     tasks: tuple[Task, ...]
+    spend: SpendRecord | None = None
+
+    def _spend(self) -> dict[str, object]:
+        spend: dict[str, object] = {
+            "usd": None if self.spend is None else round(self.spend.usd, 4),
+            "tokens": None if self.spend is None else self.spend.tokens,
+            "budget_run_usd": self.budget.run_usd,
+            "budget_task_usd": self.budget.task_usd,
+            "budget_run_tokens": self.budget.run_tokens,
+        }
+        if self.spend is not None:
+            spend["run_id"] = self.spend.run_id
+        return spend
 
     def to_data(self) -> dict[str, object]:
         """The `--json` payload."""
@@ -93,9 +115,7 @@ class StatusView:
             ],
             "uncovered": {"features": list(self.uncovered_features),
                           "threats": list(self.uncovered_threats)},
-            "spend": {"usd": None, "tokens": None, "budget_run_usd": self.budget.run_usd,
-                      "budget_task_usd": self.budget.task_usd,
-                      "budget_run_tokens": self.budget.run_tokens},
+            "spend": self._spend(),
             "tasks": [{"id": t.id, "status": t.status.value, "title": t.title}
                       for t in self.tasks],
         }  # fmt: skip
@@ -106,8 +126,10 @@ def build_status(
     phase: PhaseReport,
     events: Sequence[SecurityEvent],
     budget: BudgetConfig,
+    spend: SpendRecord | None = None,
 ) -> StatusView:
-    """Count, collect and cross-reference; `events` is the local `events.jsonl`."""
+    """Count, collect and cross-reference; `events` is the local `events.jsonl`, `spend` the
+    newest build's cost record."""
     tasks = tuple(sorted(snapshot.tasks.tasks if snapshot.tasks else [], key=lambda t: t.id))
     counts = Counter(t.status for t in tasks)
     done_traces = {tr for t in tasks if t.status is TaskStatus.DONE for tr in t.traces}
@@ -140,6 +162,7 @@ def build_status(
         ),
         budget=budget,
         tasks=tasks,
+        spend=spend,
     )
 
 
@@ -180,10 +203,17 @@ def render_status(view: StatusView, *, show_all: bool = False) -> list[str]:
     lines.append(f"  threats (medium or higher): {'; '.join(view.uncovered_threats) or 'none'}")
     b = view.budget
     lines.append("")
-    lines.append(
-        f"Spend: not recorded yet (arrives with builds in v0.3); budget ${b.run_usd:.2f} per run, "
-        f"${b.task_usd:.2f} per task, {b.run_tokens} tokens per run"
-    )
+    if view.spend is None:
+        lines.append(
+            f"Spend: not recorded yet (no build has run); budget ${b.run_usd:.2f} per run, "
+            f"${b.task_usd:.2f} per task, {b.run_tokens} tokens per run"
+        )
+    else:
+        s = view.spend
+        lines.append(
+            f"Spend: ${s.usd:.2f} of ${b.run_usd:.2f} in the last build ({s.run_id}), "
+            f"${b.task_usd:.2f} per task; {s.tokens} of {b.run_tokens} tokens"
+        )
     if show_all and view.tasks:
         lines.append("")
         lines.append("All tasks:")

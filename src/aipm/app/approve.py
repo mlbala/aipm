@@ -205,11 +205,13 @@ _REASONS = {
 }
 
 
-_OVERRIDE_COMMANDS: dict[str, Literal["design", "plan", "prompt", "verify"]] = {
+_OVERRIDE_COMMANDS: dict[str, Literal["design", "plan", "prompt", "verify", "run", "build"]] = {
     "design": "design",
     "plan": "plan",
     "prompt": "prompt",
     "verify": "verify",
+    "run": "run",
+    "build": "build",
 }
 
 

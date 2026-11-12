@@ -1,8 +1,268 @@
-#!/bin/sh
-# Stub Claude Code for the adapter tests (ARCHITECTURE §20): answers --version like the real CLI.
-if [ "$1" = "--version" ]; then
-  echo "2.1.300 (Claude Code)"
-  exit 0
-fi
-echo "stub claude: unsupported arguments: $*" >&2
-exit 2
+#!/usr/bin/env python3
+"""Stub Claude Code for aipm's tests (ARCHITECTURE §20, SECURITY.md §14.3, build prompt 07).
+
+`--version` and `--help` answer like Claude Code 2.1.x. Any other call is a dispatch, and the
+stub first ASSERTS what aipm must guarantee, exiting 97 with `STUB-ASSERTION-FAILED: ...` on
+stderr when it does not hold:
+
+- argv holds `--bare`, `-p`, `--permission-mode dontAsk`, `--permission-prompts none`,
+  `--setting-sources user`, `--strict-mcp-config`, `--output-format stream-json`, an
+  `--allowedTools` list starting with the file tools, a positive `--max-budget-usd` and a
+  readable `--append-system-prompt-file`, and no forbidden flag;
+- the environment holds no fake secret (`*not-a-real-secret*`) except `ANTHROPIC_API_KEY`, and
+  `CLAUDE_CONFIG_DIR` names a directory that is not the user's `~/.claude`;
+- the working directory is a linked worktree under aipm's `aipm/worktrees/`.
+
+It then plays the scenario in `$HOME/.stub-claude/scenario.json` for the task named in the
+prompt (stdin), one entry per call: `{"tasks": {"T-001": [attempt, ...], "*": [...]},
+"help_drop": [flags]}`. An attempt is `{"steps": [...], "cost": 0.1, "text": "...", "exit": 0,
+"result": true, "error": false, "subtype": "success"}`; the steps are listed in `STEPS` below.
+Every call is logged to `$HOME/.stub-claude/calls.jsonl`. Python 3.8 syntax on purpose: the
+`python3` on PATH may be an old system one.
+"""
+
+import json
+import os
+import re
+import sys
+import time
+import uuid
+from pathlib import Path
+
+VERSION = "2.1.300 (Claude Code)"
+HELP_FLAGS = [
+    ("--allowedTools, --allowed-tools <tools...>", "Comma or space-separated list of tool names"),
+    ("--append-system-prompt <prompt>", "Append a system prompt to the default system prompt"),
+    ("--bare", "Minimal mode. Explicitly provide context via: --append-system-prompt[-file]"),
+    ("--dangerously-skip-permissions", "Bypass all permission checks."),
+    ("--max-budget-usd <amount>", "Maximum dollar amount to spend on API calls"),
+    ("--output-format <format>", 'Output format (choices: "text", "json", "stream-json")'),
+    ("--permission-mode <mode>",
+     'Permission mode (choices: "acceptEdits", "auto", "bypassPermissions", "manual", '
+     '"dontAsk", "plan")'),
+    ("--permission-prompts <target>", 'Who answers permission prompts (choices: "host", "none")'),
+    ("-p, --print", "Print response and exit"),
+    ("-r, --resume [value]", "Resume a conversation by session ID"),
+    ("--setting-sources <sources>", "Comma-separated list of setting sources to load"),
+    ("--strict-mcp-config", "Only use MCP servers from --mcp-config"),
+    ("--verbose", "Override verbose mode setting from config"),
+]
+FORBIDDEN = ("--dangerously-skip-permissions", "--allow-dangerously-skip-permissions")
+NAMESPACE = uuid.UUID("6f1d2c3a-0000-4000-8000-00000000a1b2")
+
+
+def stub_dir():
+    path = Path(os.environ.get("HOME", "/nonexistent")) / ".stub-claude"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def scenario():
+    path = stub_dir() / "scenario.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+def fail(message):
+    sys.stderr.write("STUB-ASSERTION-FAILED: " + message + "\n")
+    sys.stderr.flush()
+    sys.exit(97)
+
+
+def value_of(args, flag):
+    for i, arg in enumerate(args):
+        if arg == flag and i + 1 < len(args):
+            return args[i + 1]
+        if arg.startswith(flag + "="):
+            return arg.split("=", 1)[1]
+    return None
+
+
+def check_argv(args):
+    for flag in ("--bare", "-p", "--strict-mcp-config", "--verbose"):
+        if flag not in args:
+            fail("argv lacks " + flag)
+    for flag, wanted in (("--permission-mode", "dontAsk"), ("--permission-prompts", "none"),
+                         ("--setting-sources", "user"), ("--output-format", "stream-json")):
+        if value_of(args, flag) != wanted:
+            fail("%s is %r, not %s" % (flag, value_of(args, flag), wanted))
+    for flag in FORBIDDEN:
+        if any(a == flag or a.startswith(flag + "=") for a in args):
+            fail("forbidden flag " + flag)
+    tools = value_of(args, "--allowedTools") or ""
+    if not tools.startswith("Read,Edit,Write,Glob,Grep"):
+        fail("unexpected --allowedTools " + tools)
+    if "Bash," in tools + "," or tools.endswith(",Bash"):
+        fail("a bare Bash rule allows every command")
+    try:
+        budget = float(value_of(args, "--max-budget-usd") or "")
+    except ValueError:
+        budget = 0.0
+    if budget <= 0:
+        fail("no positive --max-budget-usd")
+    context = value_of(args, "--append-system-prompt-file")
+    if context is None or not Path(context).is_file():
+        fail("no readable --append-system-prompt-file")
+
+
+def check_env():
+    for name, value in os.environ.items():
+        if "not-a-real-secret" in value and name != "ANTHROPIC_API_KEY":
+            fail("the environment holds a fake secret in " + name)
+    if "not-a-real-secret" not in os.environ.get("ANTHROPIC_API_KEY", ""):
+        fail("ANTHROPIC_API_KEY is missing")
+    home = os.environ.get("CLAUDE_CONFIG_DIR")
+    if not home or not Path(home).is_dir():
+        fail("CLAUDE_CONFIG_DIR is not an existing directory")
+    real_home = Path(os.environ.get("HOME", "/")) / ".claude"
+    if Path(home).resolve() == real_home.resolve():
+        fail("CLAUDE_CONFIG_DIR is the user's own ~/.claude")
+
+
+def check_cwd():
+    cwd = Path.cwd()
+    if not (cwd / ".git").is_file():
+        fail("the working directory is not a linked worktree: " + str(cwd))
+    if "aipm/worktrees/" not in cwd.as_posix() + "/":
+        fail("the working directory is not under aipm/worktrees/: " + str(cwd))
+
+
+def common_git_dir():
+    text = (Path.cwd() / ".git").read_text(encoding="utf-8").strip()
+    git_dir = Path(text.split(":", 1)[1].strip())
+    common = git_dir / "commondir"
+    if common.exists():
+        return (git_dir / common.read_text(encoding="utf-8").strip()).resolve()
+    return git_dir
+
+
+def target(rel):
+    path = Path.cwd() / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def run_step(step):
+    """One scenario step. Paths are relative to the worktree unless the step says otherwise."""
+    if "write" in step:
+        target(step["write"]).write_text(step["text"], encoding="utf-8")
+    elif "append" in step:
+        with target(step["append"]).open("a", encoding="utf-8") as handle:
+            handle.write(step["text"])
+    elif "copy" in step:
+        target(step["copy"]).write_bytes(Path(step["from"]).read_bytes())
+    elif "delete" in step:
+        Path.cwd().joinpath(step["delete"]).unlink()
+    elif "symlink" in step:
+        target(step["symlink"]).symlink_to(step["to"])
+    elif "write_abs" in step:
+        Path(step["write_abs"]).write_text(step["text"], encoding="utf-8")
+    elif "git_config" in step:
+        with (common_git_dir() / "config").open("a", encoding="utf-8") as handle:
+            handle.write(step["git_config"])
+    elif "git_hook" in step:
+        hook = common_git_dir() / "hooks" / step["git_hook"]
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        hook.write_text(step["text"], encoding="utf-8")
+        hook.chmod(0o755)
+    elif "home_write" in step:
+        path = Path(os.environ["HOME"]) / step["home_write"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(step["text"], encoding="utf-8")
+    elif "config_home_write" in step:
+        path = Path(os.environ["CLAUDE_CONFIG_DIR"]) / step["config_home_write"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(step["text"], encoding="utf-8")
+    elif "sleep" in step:
+        time.sleep(float(step["sleep"]))
+    elif "daemon" in step:
+        pid = os.fork()
+        if pid == 0:  # the child stays in the process group, as a careless daemon would
+            Path(step["daemon"]).write_text(str(os.getpid()), encoding="utf-8")
+            time.sleep(300)
+            os._exit(0)
+    elif "flood_mb" in step:
+        chunk = b"x" * 1_048_576
+        for _ in range(int(step["flood_mb"])):
+            sys.stdout.buffer.write(chunk + b"\n")
+        sys.stdout.flush()
+    else:
+        fail("unknown scenario step " + json.dumps(step))
+
+
+STEPS = ("write", "append", "copy", "delete", "symlink", "write_abs", "git_config", "git_hook",
+         "home_write", "config_home_write", "sleep", "daemon", "flood_mb")
+
+
+def calls_for(task):
+    log = stub_dir() / "calls.jsonl"
+    if not log.exists():
+        return 0
+    lines = log.read_text(encoding="utf-8").splitlines()
+    return sum(1 for line in lines if json.loads(line).get("task") == task)
+
+
+def sessions():
+    path = stub_dir() / "sessions.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+def emit(event):
+    sys.stdout.write(json.dumps(event) + "\n")
+    sys.stdout.flush()
+
+
+def dispatch(args):
+    check_argv(args)
+    check_env()
+    check_cwd()
+    prompt = sys.stdin.read()
+    found = re.search(r"\bT-[0-9]{3}\b", prompt)
+    task = found.group(0) if found else "T-???"
+    index = calls_for(task)
+    plan = scenario().get("tasks", {})
+    attempts = plan.get(task, plan.get("*", [{}]))
+    attempt = attempts[min(index, len(attempts) - 1)] if attempts else {}
+    resume = value_of(args, "--resume")
+    known = sessions()
+    if resume is not None and resume not in known:
+        fail("--resume names a session this stub never started: " + resume)
+    sid = resume or str(uuid.uuid5(NAMESPACE, "%s-%d-%s" % (task, index, os.getcwd())))
+    with (stub_dir() / "calls.jsonl").open("a", encoding="utf-8") as handle:
+        home = os.environ.get("CLAUDE_CONFIG_DIR", "")
+        handle.write(json.dumps({"task": task, "call": index + 1, "argv": args,
+                                 "cwd": os.getcwd(), "resume": resume, "config_home": home,
+                                 "settings_seen": os.path.exists(os.path.join(home, "settings.json"))
+                                 }) + "\n")
+    emit({"type": "system", "subtype": "init", "session_id": sid, "model": "stub"})
+    for step in attempt.get("steps", []):
+        run_step(step)
+    text = attempt.get("text", "Done.")
+    emit({"type": "assistant", "session_id": sid,
+          "message": {"content": [{"type": "text", "text": text}]}})
+    total = float(known.get(sid, 0.0)) + float(attempt.get("cost", 0.05))
+    known[sid] = total
+    (stub_dir() / "sessions.json").write_text(json.dumps(known), encoding="utf-8")
+    if attempt.get("result", True):
+        emit({"type": "result", "subtype": attempt.get("subtype", "success"),
+              "is_error": bool(attempt.get("error", False)), "total_cost_usd": total,
+              "session_id": sid, "num_turns": 1, "result": text})
+    return int(attempt.get("exit", 0))
+
+
+def main():
+    args = sys.argv[1:]
+    if args == ["--version"]:
+        print(VERSION)
+        return 0
+    if args == ["--help"]:
+        drop = set(scenario().get("help_drop", []))
+        print("Usage: claude [options] [command] [prompt]\n\nOptions:")
+        for flag, text in HELP_FLAGS:
+            if not any(d in flag or d in text for d in drop):
+                print("  %-40s %s" % (flag, text))
+        return 0
+    return dispatch(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

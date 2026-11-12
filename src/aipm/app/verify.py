@@ -24,10 +24,7 @@ suspected prompt injection and `--accept-risk` was not given. Manual verify neve
 anything in your tree.
 """
 
-import secrets
 import shutil
-import tempfile
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,7 +33,20 @@ from pydantic import JsonValue
 
 from aipm.app import runtime
 from aipm.app.approve import approver, load_approvals, require_inputs
-from aipm.app.attempt import changes_since, check_policy
+from aipm.app.attempt import (
+    MAX_EVENTS,
+    attempt_dir,
+    base_ignores,
+    changed_hashes,
+    changes_since,
+    check_policy,
+    checks_result,
+    moved_since,
+    new_run_id,
+    prepare_hold,
+    record_violations,
+    reviewer,
+)
 from aipm.app.repo_map import ignore_spec
 from aipm.app.snapshot import read_snapshot
 from aipm.app.trust import require_trusted
@@ -56,20 +66,14 @@ from aipm.domain.models import (
     AcOverride,
     Blocked,
     BlockedReason,
-    BuiltinGate,
     ChangeSet,
-    ChangeStatus,
     Done,
-    GateFinding,
     GateReport,
-    GateResult,
-    GateStatus,
     GateWorkspace,
     JournalEvent,
     JournalEventType,
     RoleName,
     SecurityEventKind,
-    Severity,
     Task,
     TasksDoc,
     TaskStatus,
@@ -78,29 +82,19 @@ from aipm.domain.models.snapshot import StateSnapshot
 from aipm.domain.phase import prompt_inputs
 from aipm.execution import git
 from aipm.execution.sandbox import Runtime, resolve_sandbox
-from aipm.gates.builtin.ac_review import Reviewer
 from aipm.gates.context import GateContext
 from aipm.gates.runner import GateRun, run_gates
-from aipm.llm.gateway import TokenBudget, open_gateway
 from aipm.reporting.worksheet import WORKSHEET_FILE, render_worksheet
-from aipm.roles import ac_reviewer
-from aipm.roles.ac_reviewer import ACReview, ACReviewInput
 from aipm.security.diff_checks import (
     Kind,
-    Level,
     Violation,
     check_changes,
-    is_dependency_path,
     severe,
 )
-from aipm.security.paths import is_within
 from aipm.security.sanitize import sanitize_text
 from aipm.state.attempts import AttemptSnapshot, load_snapshot
 from aipm.state.store import FileStateStore
 from aipm.state.yamlio import dump_yaml
-
-MAX_EVENTS = 20
-CHECKS = "checks"
 
 type Events = list[tuple[JournalEventType, dict[str, JsonValue]]]
 
@@ -183,98 +177,6 @@ def _check_task(task: Task, options: VerifyOptions) -> None:
     raise UsageError(f"{task.id} is {task.status.value}, not in progress", hint=hints[task.status])
 
 
-def _attempt_dir(root: Path) -> Path:
-    """A private (0700) temp dir for this attempt, outside the repository."""
-    path = Path(tempfile.mkdtemp(prefix="aipm-verify-"))
-    if is_within(path, root):
-        shutil.rmtree(path, ignore_errors=True)
-        raise PolicyViolation(
-            "the temporary directory is inside the repository",
-            hint="Check TMPDIR, which a repository .env loaded by a tool such as pipenv can set.",
-        )
-    return path
-
-
-def new_run_id() -> str:
-    """`r-YYYYMMDD-HHMM-xxxx`."""
-    return f"r-{datetime.now(UTC):%Y%m%d-%H%M}-{secrets.token_hex(2)}"
-
-
-def checks_result(violations: Sequence[Violation]) -> GateResult:
-    """The post-change checks as a report entry, so `prompt --fix` sends them as feedback."""
-    findings = [
-        GateFinding(
-            tool="checks",
-            rule=v.kind.value,
-            path=v.path[:512],
-            message=v.detail[:500],
-            severity=Severity.CRITICAL if v.level is Level.SEVERE else Severity.MEDIUM,
-        )
-        for v in violations[:100]
-    ]
-    worst = "severe" if severe(violations) else "minor"
-    summary = f"{len(violations)} {worst} post-change violation(s)" if violations else "clean"
-    lines = (f"{v.level.value}: {v.kind.value}: {v.path}: {v.detail}" for v in violations)
-    return GateResult(
-        name=CHECKS,
-        status=GateStatus.FAIL if violations else GateStatus.PASS,
-        required=True,
-        summary=summary,
-        findings=findings,
-        output="\n".join(lines)[:65_536],
-    )
-
-
-def _reviewer(cfg: Config, store: FileStateStore, *, no_cache: bool) -> tuple[Reviewer | None, str]:
-    """The AC reviewer through the LLM gateway, or why it cannot run."""
-    if not any(g.builtin is BuiltinGate.AC_REVIEW for g in cfg.gates.values()):
-        return None, "the gate menu has no ac_review gate"
-    try:
-        gateway = open_gateway(
-            cfg.llm, redactor=store.redactor, cache=None if no_cache else runtime.llm_cache(store)
-        )
-    except AipmError as exc:
-        return None, f"the AC reviewer cannot run: {exc.message}"
-    role = ac_reviewer.create()
-    budget = TokenBudget(cfg.budget.run_tokens)
-
-    def review(inp: ACReviewInput) -> ACReview:
-        result = gateway.run(
-            RoleName.AC_REVIEWER,
-            role.render(inp),
-            ACReview,
-            budget=budget,
-            template_version=role.template_version,
-        )
-        return role.postprocess(result.value, inp)
-
-    return review, ""
-
-
-def _hashes(root: Path, changes: ChangeSet) -> dict[str, str | None]:
-    """The task's changed files as the gates are about to see them: what is scanned and linted
-    must be what is saved and committed (step 06 security review)."""
-    return {
-        c.path: git.hash_path(root / c.path)
-        for c in changes.files
-        if c.status is not ChangeStatus.DELETED and not c.path.startswith(".pm/")
-    }
-
-
-def _base_ignores(root: Path, base: str) -> list[str]:
-    """The `.gitignore` and `.aipmignore` lines of the base commit."""
-    lines: list[str] = []
-    for name in (".gitignore", ".aipmignore"):
-        data = git.file_at(root, base, name, max_bytes=262_144) or b""
-        lines += data.decode("utf-8", errors="replace").splitlines()
-    return lines
-
-
-def _moved(root: Path, scanned: dict[str, str | None]) -> list[str]:
-    """The changed files whose contents differ from what the checks read."""
-    return [path for path, digest in scanned.items() if git.hash_path(root / path) != digest]
-
-
 def _save_tasks(store: FileStateStore, tasks: TasksDoc, task: Task) -> None:
     doc = tasks.model_copy(update={"tasks": [task if t.id == task.id else t for t in tasks.tasks]})
     store.save(doc)
@@ -307,24 +209,6 @@ def _save_run(
     document = result.report.model_dump(mode="json")
     result.saved = store.save_run_text(result.run_id, [*base, "report.yaml"], dump_yaml(document))
     store.save_run_text(result.run_id, ["journal.jsonl"], _journal(result, events))
-
-
-def _prepare_hold(violations: Sequence[Violation]) -> str | None:
-    """Why the prepare step must not run: it would install a dependency the checks refused."""
-    for v in violations:
-        if v.kind is Kind.DEPENDENCY or is_dependency_path(v.path):
-            return f"the post-change checks refused a dependency change in {v.path}"
-    return None
-
-
-def _record_violations(store: FileStateStore, task: Task, violations: Sequence[Violation]) -> None:
-    for violation in severe(violations)[:MAX_EVENTS]:
-        store.append_event(
-            SecurityEventKind.POST_CHANGE_VIOLATION,
-            source=f"verify:{task.id}",
-            detail=f"{violation.kind.value}: {violation.path}: {violation.detail}",
-            data={"kind": violation.kind.value, "path": violation.path[:512]},
-        )
 
 
 def _record_override(
@@ -405,24 +289,24 @@ class _Verify:
         self.warnings += require_inputs(
             self.store, "verify", prompt_inputs(state), accept_stale=self.options.accept_stale
         )
-        scanned = _hashes(self.root, changes)
+        scanned = changed_hashes(self.root, changes)
         ctx = GateContext(
             ws=GateWorkspace(root=self.root, temp_dir=self.temp, base_sha=base),
             task=task, cfg=self.cfg, changes=changes, redactor=self.store.redactor,
             home=Path.home(), now=datetime.now(UTC), runtime=self.sandbox,
-            withheld=ignore_spec(self.root, also=_base_ignores(self.root, base)).match_file,
-            changed_during_gates=lambda: _moved(self.root, scanned),
+            withheld=ignore_spec(self.root, also=base_ignores(self.root, base)).match_file,
+            changed_during_gates=lambda: moved_since(self.root, scanned),
         )  # fmt: skip
-        reviewer, unavailable = _reviewer(self.cfg, self.store, no_cache=self.options.no_cache)
+        review, unavailable = reviewer(self.cfg, self.store, no_cache=self.options.no_cache)
         commit_paths = [c.path for c in changes.files if not c.path.startswith(".pm/")]
         expected = git.staged_ids(self.root, commit_paths) if self.options.commit else None
         gate_run = run_gates(
             ctx,
-            reviewer=reviewer,
+            reviewer=review,
             reviewer_unavailable=unavailable,
             only=self.options.gate,
             override_ac=self.options.override_ac,
-            hold_prepare=_prepare_hold(violations),
+            hold_prepare=prepare_hold(violations),
         )
         self.warnings += ctx.warnings
         after = check_changes(changes_since(self.root, snapshot, base, self.cfg), task, policy)
@@ -431,7 +315,7 @@ class _Verify:
             self._block(tasks, task, result, [*violations, *late], gate_run)
         moved = [
             Violation(Kind.CHANGED_DURING_GATES, path, "changed while the gates ran")
-            for path in _moved(self.root, scanned)
+            for path in moved_since(self.root, scanned)
         ]
         result.violations = [*violations, *moved]
         return self._finish(tasks, task, result, gate_run, changes, expected)
@@ -452,7 +336,7 @@ class _Verify:
         result.report = GateReport(
             task=task.id, run_id=result.run_id, attempt=result.attempt, gates=gates
         )
-        _record_violations(self.store, task, violations)
+        record_violations(self.store, task, violations, source="verify")
         first = severe(violations)[0]
         blocked = task.model_copy(
             update={
@@ -602,6 +486,10 @@ class _Verify:
         return git.commit(self.root, paths, message=f"aipm: {task.id} {title}", trailers=trailers)
 
 
+_base_ignores = base_ignores
+"""The name the red-team v0.2 tests import (the helper now lives in `aipm.app.attempt`)."""
+
+
 def run(project: Path | None, options: VerifyOptions) -> VerifyResult:
     """Run the use case."""
     root = find_repo_root(project)
@@ -611,7 +499,7 @@ def run(project: Path | None, options: VerifyOptions) -> VerifyResult:
     _check_options(options, cfg)
     require_trusted(root, loaded, command="verify")
     store = runtime.open_repo_store(root)
-    temp = _attempt_dir(root)
+    temp = attempt_dir(root)
     try:
         sandbox = resolve_sandbox(
             mode=cfg.dispatch.sandbox.value,

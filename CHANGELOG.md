@@ -6,6 +6,14 @@ All notable changes to aipm are recorded here. The format follows [Keep a Change
 
 ### Added
 
+- `aipm build` (v0.3): every ready task, dispatched to Claude Code and verified, unattended. Each attempt runs in a worktree outside the repository on `aipm/task/<T-ID>`, made from the integration branch (`aipm/integration`); the agent is sandboxed with the `api-only` network profile and a configuration home of its own, and runs with `--bare`, `dontAsk`, no permission prompts, no repository or local settings and no MCP servers, the file tools plus the task's gate commands, and `--max-budget-usd` (ADR-0023). Then the post-change checks and gates of `verify` run: a severe violation blocks the task at once and is never retried; a minor one is reverted and the attempt retried with feedback in the same session (`--resume`), up to `--max-retries`. A passing task gets one commit with `Aipm-Task`, `Aipm-Run` and `Aipm-Attempt` trailers, checked against what was verified and fast-forwarded (rebased first if needed) onto the integration branch; a conflict blocks it with `merge_conflict`. `--parallel` (at most 8) never runs tasks that own the same files or a serialized path together; the run budget holds each running attempt's task budget and exits 5 when the next would not fit; the first Ctrl-C lets running tasks finish for 30 s, a second stops them (exit 130); a crashed or interrupted run resumes from its journal without committing anything twice. `--only`, `--timeout`, `--budget`, `--dry-run` (prints batches and argv, dispatches nothing), live progress on stderr and an end-of-run summary.
+- `aipm run <T-ID>` (v0.3): the same loop for one task.
+- `aipm merge` (v0.3): shows `git log --oneline <branch>..aipm/integration`, asks, then fast-forwards your branch (`--into`); never pushes, never makes a merge commit.
+- `aipm status` shows the newest build's spend against the budget.
+- The run journal (`.pm/runs/<run-id>/journal.jsonl`, append-only, fsync'd, trusted for resume only when the write ledger says aipm wrote it), the pure scheduler, run and task budgets with a token counter for the AC reviewer, and `dispatch.fail_fast` for build gates.
+- The stub `claude` asserts every dispatch invariant (flags, environment, working directory) and plays scripted scenarios; every SECURITY.md §14.3 scenario now runs through `aipm build` (`tests/security/test_build_scenarios.py`), with crash and resume, parallel, budget and Ctrl-C tests.
+- ADR-0023: the Claude Code dispatch flags, checked against Claude Code 2.1.314.
+
 - `aipm verify <T-ID>` (v0.2): post-change checks and every gate for one task, in manual mode. It needs trust (exit 6) and the attempt snapshot `aipm prompt` takes outside the repository (ADR-0021); compares git's configuration, hooks and the agents' global settings before git runs; blocks the task on a severe violation (exit 6); otherwise runs the gates without stopping at the first failure and marks the task `done` only when every required gate passed and the AC reviewer vetoed nothing. `--commit` commits the task's files with `Aipm-*` trailers and no hooks; `--gate`, `--base`, `--override-ac ID --reason` (recorded), `--accept-risk`, `--accept-stale` and `--json`. Reports, gate logs and a journal go to `.pm/runs/<run-id>/`; `aipm prompt --fix` reads the newest report.
 - `aipm scan` (v0.2): gitleaks, semgrep, osv-scanner and trivy over a staged copy of the repository, plus trusted `scanners.extra`; `--scanner`, `--fail-on`.
 - `aipm task show|reset|block|unblock|skip` (v0.2): manual task state control, each change recorded in `approvals.yaml`.
@@ -19,10 +27,27 @@ All notable changes to aipm are recorded here. The format follows [Keep a Change
 
 ### Fixed
 
+- `aipm status` with no build yet says "no build has run" instead of naming the milestone (the status snapshot changed on purpose).
 - The release workflow stub passes a milestone tag with a notice instead of failing it: until build prompt 08 adds the pipeline, a `v*` tag still builds and publishes nothing.
 - A directory where aipm expected a file (a `.gitignore` directory in a cloned repository, a trust store path) is refused instead of crashing.
 
 ### Security
+
+Dispatch (v0.3):
+
+- A dispatched Claude Code reads no repository or local settings and no MCP servers (`--setting-sources user --strict-mcp-config`): bare mode still applies a repository's settings `env` block and helper commands. Its configuration home is aipm's own; the settings, hooks and skills there are write-denied and hashed before and after each attempt, so an agent cannot plant permissions for its own `--resume`. The `AGENTS.md` context is written under a fresh name, before each dispatch, where the agent cannot write. `claude` is looked up outside the repository and the worktrees, and dispatch fails closed (exit 8) when it lacks a required flag (ADR-0023).
+- The integration branch must be one of aipm's own (`aipm/…`, not a task branch, not checked out): a repository's `.pm/config.yaml` could otherwise make it `main` (exit 6). Every ref update is a compare-and-swap, and a task commit must be one commit on its base holding exactly the verified paths.
+- A repository config naming `merge.<driver>.driver` is refused (exit 6), since a rebase would run it; every git call turns off signature checks, submodule recursion, rerere, autostash and update-refs. Reverting a new file never follows a link out of the work tree.
+- Build gates may not read the agent's configuration home; a resumed run reads only a journal the write ledger says aipm wrote, and checks every claim against the commit trailers in git.
+
+Fixes from the step 07 security review:
+
+- Reverting a minor violation could be raced into deleting files outside the worktree, as aipm and unsandboxed, by a process the agent left behind swapping a directory for a link between the check and the delete. Paths are now walked from a directory descriptor with `O_NOFOLLOW` and deleted relative to it.
+- Each task gets its own empty agent config home, so settings one agent plants (a severe violation) can never reach another task's agent or a resumed run.
+- An npm-installed `claude` (`#!/usr/bin/env node`) has its interpreter resolved outside the repository and started explicitly, for detection and dispatch, so a `node` planted in an active `.venv/bin` never runs.
+- aipm records the tips it gives the integration branch outside the repository; `build` and `merge` refuse one it did not set (a branch that came with a copied `.git`), unless HEAD already contains it.
+- SIGTERM and SIGHUP stop a build like Ctrl-C, instead of orphaning running agents; the journal records each attempt's own cost, and a resumed run charges the task budget for an agent that started but never finished.
+- A re-review of those fixes: putting a changed file back no longer lets git write the agent-writable worktree (git resets only the index; aipm writes the base blobs itself, with the same descriptor walk), and a task's commit is rebased in a fresh worktree no agent knows of; a rebase whose result touches other paths than the verified commit counts as a conflict. `..` and other non-plain paths are refused, and a path aipm cannot put back blocks the task instead of stopping the run. Gates may not read any agent's config home, and agents may not read the other tasks' homes. Tools are looked up outside aipm's worktrees too. A build started under `nohup` keeps ignoring SIGHUP, and a dispatch that never started is journaled as costing nothing.
 
 The v0.2 red-team pass ([docs/security/reviews/v0.2.md](docs/security/reviews/v0.2.md)) found eight problems and one robustness bug, all fixed:
 

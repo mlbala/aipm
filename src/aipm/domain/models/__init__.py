@@ -5,6 +5,7 @@ dataclasses of `changes`, which aipm builds itself and never parses from text.
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from aipm.domain.models.artifacts import (
@@ -218,4 +219,20 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class Workspace:
-    """Placeholder for the worktree an agent is dispatched into (build prompt 07)."""
+    """Where one dispatch runs (ARCHITECTURE §12.4).
+
+    - `root`: the task's worktree, outside the repository; the agent's working directory.
+    - `temp_dir`: the agent's private temp dir for this attempt (writable by the agent).
+    - `context_dir`: a per-attempt directory the agent may read but not write, for the context
+      file passed with the prompt (ADR-0023).
+    - `config_home`: the agent's isolated configuration home for the run.
+    - `context_text`: the project context given alongside the prompt (the `AGENTS.md` block).
+    - `resume_session`: the session a fix attempt continues; the adapter validates it.
+    """
+
+    root: Path
+    temp_dir: Path
+    context_dir: Path
+    config_home: Path
+    context_text: str = ""
+    resume_session: str | None = None

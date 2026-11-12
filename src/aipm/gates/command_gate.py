@@ -80,7 +80,9 @@ def sandbox_for(
     """The `srt` profile for a gate or the prepare step, or `None` without a sandbox."""
     if ctx.runtime is None:
         return None
-    paths = ProfilePaths(workspace=ctx.root, temp_dir=ctx.ws.temp_dir, home=ctx.home)
+    paths = ProfilePaths(
+        workspace=ctx.root, temp_dir=ctx.ws.temp_dir, home=ctx.home, extra_deny_read=ctx.deny_read
+    )
     return profile_for(kind, _network(profile), paths, runtime=ctx.runtime)
 
 

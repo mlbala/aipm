@@ -580,7 +580,7 @@ class OverrideReason(StrEnum):
 class StaleOverride(StrictModel):
     """A recorded `--accept-stale` run (ARCHITECTURE §7.1). Never counts as an approval."""
 
-    command: Literal["design", "plan", "prompt", "verify"]
+    command: Literal["design", "plan", "prompt", "verify", "run", "build"]
     artifact: RelPath
     sha256: Sha256
     reason: OverrideReason

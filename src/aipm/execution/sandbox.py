@@ -63,6 +63,14 @@ AGENT_GLOBAL_CONFIG: tuple[str, ...] = (
 )  # fmt: skip
 """Agents' global settings, hooks, plugins and skills, relative to home (SECURITY.md §9.1)."""
 
+CONFIG_HOME_PROTECTED: tuple[str, ...] = (
+    "settings.json", "settings.local.json", "CLAUDE.md", "hooks", "agents", "skills",
+    "commands", "plugins",
+)  # fmt: skip
+"""In the agent's isolated config home (`CLAUDE_CONFIG_DIR`): what Claude Code would read as
+user settings on the next `--resume`. The agent may write its sessions there, never these
+(ADR-0023)."""
+
 PACKAGE_CACHES: tuple[str, ...] = (
     ".cache/uv", ".cache/pip", "Library/Caches/uv", "Library/Caches/pip",
     ".npm", ".cache/pnpm", ".local/share/pnpm", "Library/pnpm", "Library/Caches/pnpm",
@@ -99,6 +107,8 @@ class ProfilePaths:
     main_pm: Path | None = None
     other_worktrees: tuple[Path, ...] = ()
     output_dir: Path | None = None
+    extra_deny_read: tuple[Path, ...] = ()
+    """More paths no process of this profile may read (build gates: the agent's config home)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,9 +142,13 @@ def profile_for(
     launcher = (runtime,) if isinstance(runtime, str) else tuple(runtime)
     home = paths.home
     deny_read = [home / rel for rel in CREDENTIAL_PATHS]
+    deny_read += list(paths.extra_deny_read)
+    agent_config: list[Path] = []
     if kind is ProcessKind.AGENT:
         allow = [paths.workspace, paths.temp_dir]
-        allow += [] if paths.config_home is None else [paths.config_home]
+        if paths.config_home is not None:
+            allow.append(paths.config_home)
+            agent_config = [paths.config_home / rel for rel in CONFIG_HOME_PROTECTED]
         deny_read += [] if paths.main_pm is None else [paths.main_pm]
         deny_read += list(paths.other_worktrees)
     elif kind is ProcessKind.GATE:
@@ -149,6 +163,7 @@ def profile_for(
         allow = [paths.output_dir if paths.output_dir is not None else paths.temp_dir]
     deny_write = [paths.workspace / rel for rel in _PROTECTED_LITERALS]
     deny_write += [home / rel for rel in AGENT_GLOBAL_CONFIG]
+    deny_write += agent_config
     workspace = str(paths.workspace)
     patterns = () if _GLOB_CHARS & set(workspace) else (f"{workspace}/{ENV_PATTERN}",)
     return SandboxProfile(
@@ -249,27 +264,37 @@ class SandboxStatus:
     launcher: tuple[str, ...] | None = None
 
 
-def which_outside(name: str, repo: Path) -> str | None:
-    """`name` on PATH, skipping relative entries and every entry inside the repository."""
+def which_outside(name: str, repo: Path, *, also: Sequence[Path] = ()) -> str | None:
+    """`name` on PATH, skipping relative entries and every entry inside the repository (or
+    inside `also`: aipm's task worktrees, which agents write)."""
     from aipm.execution.process import is_inside  # noqa: PLC0415 - process imports us
 
+    roots = (repo, *also)
     for entry in os.environ.get("PATH", "").split(os.pathsep):
-        if not entry or not Path(entry).is_absolute() or is_inside(entry, repo):
+        if not entry or not Path(entry).is_absolute() or any(is_inside(entry, r) for r in roots):
             continue
         candidate = Path(entry) / name
         usable = candidate.is_file() and os.access(candidate, os.X_OK)
-        if usable and not is_inside(str(candidate), repo):
+        if usable and not any(is_inside(str(candidate), r) for r in roots):
             return str(candidate)
     return None
 
 
-def launcher_for(srt: str, repo: Path) -> tuple[str, ...]:
-    """How to start `srt` without trusting PATH for its interpreter (step 06 review).
+def launcher_for(
+    srt: str,
+    repo: Path,
+    *,
+    name: str = "srt",
+    hint: str = INSTALL_HINT,
+    also: Sequence[Path] = (),
+) -> tuple[str, ...]:
+    """How to start a script without trusting PATH for its interpreter (step 06 review).
 
-    `srt` is a `#!/usr/bin/env node` script: the kernel would look `node` up on the PATH aipm
-    passes on, where a repository-local entry (an active `.venv/bin`) could come first. So the
-    interpreter is resolved here, outside the repository, and started explicitly. An absolute
-    interpreter inside the repository exits 6; a first line aipm cannot read exits 8.
+    `srt` (and an npm-installed `claude`) is a `#!/usr/bin/env node` script: the kernel would
+    look `node` up on the PATH aipm passes on, where a repository-local entry (an active
+    `.venv/bin`, `node_modules/.bin`) could come first. So the interpreter is resolved here,
+    outside the repository, and started explicitly. An absolute interpreter inside the
+    repository exits 6; a first line aipm cannot read exits 8. A native binary starts as is.
     """
     from aipm.execution.process import is_inside  # noqa: PLC0415 - process imports us
 
@@ -277,24 +302,24 @@ def launcher_for(srt: str, repo: Path) -> tuple[str, ...]:
         with Path(srt).open("rb") as handle:
             first = handle.read(256).split(b"\n", 1)[0]
     except OSError:
-        raise MissingCapability(f"cannot read {srt}", hint=INSTALL_HINT) from None
+        raise MissingCapability(f"cannot read {srt}", hint=hint) from None
     if not first.startswith(b"#!"):
         return (srt,)
     words = first[2:].decode("utf-8", errors="replace").split()
     if not words:
-        raise MissingCapability(f"cannot tell how to start {srt}", hint=INSTALL_HINT)
+        raise MissingCapability(f"cannot tell how to start {srt}", hint=hint)
     if Path(words[0]).name == "env":
         if len(words) != 2 or words[1].startswith("-"):
             raise MissingCapability(f"cannot tell how to start {srt}: {first[:80]!r}")
-        found = which_outside(words[1], repo)
+        found = which_outside(words[1], repo, also=also)
         if found is None:
             raise MissingCapability(
-                f"srt needs {words[1]}, which is not on PATH outside the repository",
-                hint=INSTALL_HINT,
+                f"{name} needs {words[1]}, which is not on PATH outside the repository",
+                hint=hint,
             )
         return (found, srt)
-    if is_inside(words[0], repo):
-        raise PolicyViolation(f"srt's interpreter {words[0]} is inside the repository")
+    if any(is_inside(words[0], root) for root in (repo, *also)):
+        raise PolicyViolation(f"{name}'s interpreter {words[0]} is inside the repository")
     return (srt,)
 
 

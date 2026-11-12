@@ -84,7 +84,7 @@ def inspect(context: TrustContext, *, store: FileTrustStore | None = None) -> Tr
     Raises `PolicyViolation` (exit 6) if the surface fails the command policy.
     """
     trust_store = store if store is not None else default_trust_store(context.root)
-    surface = trust_store.surface(context.loaded.config)
+    surface = trust_store.surface(context.loaded.config, root=context.root)
     digest = hash_surface(surface)
     rid = repo_id(context.root)
     return TrustReport(

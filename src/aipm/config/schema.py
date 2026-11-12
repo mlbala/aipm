@@ -5,6 +5,7 @@ Every leaf field carries its key class as `Annotated` metadata: `KeyClass.USER_O
 neither is repo-ok. The loader reads these markers; nothing else decides what a repo may set.
 """
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -84,9 +85,18 @@ def _branch_name(value: str) -> str:
     return value
 
 
-def _duration_seconds(value: str) -> int:
+DURATION = re.compile(r"[1-9][0-9]{0,4}[smh]")
+
+
+def duration_seconds(value: str) -> int:
+    """`20m` → 1200. Raises `ValueError` for anything but 1-5 digits and `s`, `m` or `h`."""
+    if not DURATION.fullmatch(value):
+        raise ValueError(f"{value[:20]!r} is not a duration such as 30s, 20m or 2h")
     number, unit = int(value[:-1]), value[-1]
     return number * {"s": 1, "m": 60, "h": 3600}[unit]
+
+
+_duration_seconds = duration_seconds
 
 
 EnvName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,99}$")]
