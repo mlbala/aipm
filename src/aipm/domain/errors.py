@@ -114,3 +114,10 @@ class MissingCapability(AipmError):
 
     exit_code = ExitCode.MISSING_TOOL
     code = "MISSING_CAPABILITY"
+
+
+class Interrupted(AipmError):
+    """The user interrupted a run (Ctrl-C); what finished is kept (ARCHITECTURE §12.6)."""
+
+    exit_code = ExitCode.INTERRUPTED
+    code = "INTERRUPTED"
