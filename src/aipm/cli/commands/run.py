@@ -3,7 +3,10 @@
 import typer
 
 from aipm.cli.commands._options import AcceptStale, Budget, DryRun, TaskId, Timeout, Tool
-from aipm.cli.output import not_available
+from aipm.cli.commands.build import report
+from aipm.cli.output import global_options, handled, print_untrusted, succeed, warn
+from aipm.cli.progress import progress_view, show
+from aipm.domain.errors import AipmError
 
 
 def command(
@@ -16,4 +19,23 @@ def command(
     accept_stale: AcceptStale = False,
 ) -> None:
     """Dispatch one task to a coding agent and verify the result."""
-    not_available(ctx, "run", "v0.3")
+    opts = global_options(ctx)
+    with handled(ctx, "run"):
+        from aipm.app import run as use_case
+
+        try:
+            with progress_view(json=opts.json) as view:
+                result = use_case.run(
+                    opts.project, task_id=task_id, tool=tool, timeout=timeout, budget=budget,
+                    dry_run=dry_run, accept_stale=accept_stale, no_cache=opts.no_cache,
+                    progress=view,
+                )  # fmt: skip
+        except AipmError as error:
+            report(error, json=opts.json)
+            raise
+        warn(result.warnings)
+        data = result.to_data()
+        if not opts.json:
+            for line in show(data):
+                print_untrusted(line)
+        succeed(ctx, "run", data)

@@ -109,6 +109,7 @@ class TaskReplay:
 
     task: str
     attempts: int = 0
+    dispatches: int = 0
     committed: str | None = None
     committed_attempt: int | None = None
     merged: str | None = None
@@ -174,7 +175,9 @@ def replay(run_id: str, events: Sequence[JournalEvent]) -> RunReplay:
         task = state.task(event.task)
         if event.attempt is not None:
             task.attempts = max(task.attempts, event.attempt)
-        if event.type is JournalEventType.TASK_COMMITTED:
+        if event.type is JournalEventType.AGENT_STARTED:
+            task.dispatches += 1
+        elif event.type is JournalEventType.TASK_COMMITTED:
             task.committed = _sha(data, "commit")
             task.committed_attempt = event.attempt
             task.merged = None

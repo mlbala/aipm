@@ -391,20 +391,13 @@ class ClaudeCodeAdapter:
             )
         return RenderedTaskPrompt(ToolName.CLAUDE, task.id, text, task.omitted)
 
-    def build_invocation(
-        self, p: RenderedTaskPrompt, limits: DispatchLimits, ws: Workspace
-    ) -> Invocation:
-        """The headless invocation for one attempt (ADR-0023). Needs `detect(flags=True)`."""
+    def _argv(self, limits: DispatchLimits, ws: Workspace, context_file: Path) -> tuple[str, ...]:
         caps = self._ready
         if caps is None or caps.path is None:
             raise MissingCapability(
                 "Claude Code has not been checked for the flags dispatch needs",
                 hint="This is a bug in aipm: detect(flags=True) must run first.",
             )
-        stdin = p.text.encode("utf-8")
-        if len(stdin) > MAX_PROMPT_STDIN:
-            raise UsageError(f"the prompt for {p.task_id} is larger than Claude Code reads")
-        context_file = ws.context_dir / f"agents-{secrets.token_hex(8)}.md"
         argv: list[str] = [caps.path]
         if limits.bare:
             argv.append("--bare")
@@ -421,6 +414,22 @@ class ClaudeCodeAdapter:
                 raise PolicyViolation("the session to resume is not a Claude Code session id")
             argv += ["--resume", ws.resume_session]
         check_forbidden_flags(ToolName.CLAUDE, tuple(argv), allow_auto_mode=limits.allow_auto_mode)
+        return tuple(argv)
+
+    def preview_argv(self, limits: DispatchLimits, ws: Workspace) -> tuple[str, ...]:
+        """The argv a dispatch would use, for `build --dry-run`; the context file is shown as
+        `<context>/agents-<random>.md`. Needs no API key."""
+        return self._argv(limits, ws, ws.context_dir / "agents-<random>.md")
+
+    def build_invocation(
+        self, p: RenderedTaskPrompt, limits: DispatchLimits, ws: Workspace
+    ) -> Invocation:
+        """The headless invocation for one attempt (ADR-0023). Needs `detect(flags=True)`."""
+        stdin = p.text.encode("utf-8")
+        if len(stdin) > MAX_PROMPT_STDIN:
+            raise UsageError(f"the prompt for {p.task_id} is larger than Claude Code reads")
+        context_file = ws.context_dir / f"agents-{secrets.token_hex(8)}.md"
+        argv = self._argv(limits, ws, context_file)
         names = [*BASE_ENV_ALLOWLIST, *PROXY_ENV, *limits.pass_env]
         if limits.bare:
             for name in REQUIRED_ENV:

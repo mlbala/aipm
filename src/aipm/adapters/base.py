@@ -117,6 +117,10 @@ class ToolAdapter(Protocol):
         """Build the argv from fixed fragments plus validated values."""
         ...
 
+    def preview_argv(self, limits: DispatchLimits, ws: Workspace) -> tuple[str, ...]:
+        """The argv `build_invocation` would use, for `--dry-run`."""
+        ...
+
     def parse_result(self, out: ProcessResult) -> AgentResult:
         """Parse the agent's output; self-reports carry no authority."""
         ...
