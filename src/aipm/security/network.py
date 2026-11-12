@@ -24,6 +24,10 @@ __all__ = [
 REGISTRY_DOMAINS: dict[Ecosystem, tuple[str, ...]] = {
     Ecosystem.PYPI: ("pypi.org", "files.pythonhosted.org"),
     Ecosystem.NPM: ("registry.npmjs.org",),
+    # The Go module proxy redirects downloads to Google Cloud Storage; `go mod download` runs no
+    # repository code, and only the prepare step has this profile (ADR-0029).
+    Ecosystem.GO: ("proxy.golang.org", "sum.golang.org", "storage.googleapis.com"),
+    Ecosystem.CRATES: ("index.crates.io", "static.crates.io"),
 }
 MAX_DOMAINS = 32
 _DOMAIN = re.compile(

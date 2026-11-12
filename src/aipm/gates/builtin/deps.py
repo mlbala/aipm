@@ -26,7 +26,12 @@ from aipm.security.supply_chain import age_ok, typosquat_of
 NAME = "deps"
 MAX_LOOKUPS = 500
 """Registry lookups per attempt; more new packages than this is an error, never a pass."""
-_REGISTRY = {Ecosystem.PYPI: "PyPI", Ecosystem.NPM: "npm"}
+_REGISTRY = {
+    Ecosystem.PYPI: "PyPI",
+    Ecosystem.NPM: "npm",
+    Ecosystem.GO: "the Go module proxy",
+    Ecosystem.CRATES: "crates.io",
+}
 
 
 def _finding(path: str, rule: str, message: str) -> GateFinding:

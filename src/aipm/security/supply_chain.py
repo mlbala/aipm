@@ -62,16 +62,41 @@ POPULAR_NPM: tuple[str, ...] = (
 )  # fmt: skip
 """Widely used npm names: the typosquat reference list."""
 
+POPULAR_GO: tuple[str, ...] = (
+    "github.com/stretchr/testify", "github.com/spf13/cobra", "github.com/spf13/viper",
+    "github.com/gin-gonic/gin", "github.com/gorilla/mux", "github.com/google/uuid",
+    "github.com/sirupsen/logrus", "github.com/pkg/errors", "github.com/go-chi/chi",
+    "github.com/labstack/echo", "github.com/jackc/pgx", "github.com/lib/pq",
+    "github.com/go-sql-driver/mysql", "github.com/redis/go-redis", "github.com/golang/protobuf",
+    "github.com/prometheus/client_golang", "github.com/urfave/cli", "github.com/joho/godotenv",
+    "go.uber.org/zap", "golang.org/x/crypto", "golang.org/x/net", "golang.org/x/sync",
+    "golang.org/x/sys", "golang.org/x/text", "google.golang.org/grpc",
+    "google.golang.org/protobuf", "gopkg.in/yaml.v3", "gorm.io/gorm",
+)  # fmt: skip
+"""Widely used Go modules: the typosquat reference list."""
+POPULAR_CRATES: tuple[str, ...] = (
+    "serde", "serde-json", "tokio", "rand", "clap", "anyhow", "thiserror", "log", "regex",
+    "reqwest", "chrono", "futures", "lazy-static", "once-cell", "itertools", "hyper", "axum",
+    "tracing", "uuid", "base64", "bytes", "syn", "quote", "proc-macro2", "libc", "bitflags",
+    "rayon", "env-logger", "sqlx", "diesel", "actix-web", "tempfile", "toml", "hashbrown",
+)  # fmt: skip
+"""Widely used crates, normalized (`_` read as `-`): the typosquat reference list."""
+
 POPULAR: dict[Ecosystem, tuple[str, ...]] = {
     Ecosystem.PYPI: POPULAR_PYPI,
     Ecosystem.NPM: POPULAR_NPM,
+    Ecosystem.GO: POPULAR_GO,
+    Ecosystem.CRATES: POPULAR_CRATES,
 }
 
 
 def normalize_name(ecosystem: Ecosystem, name: str) -> str:
-    """PEP 503 for PyPI (lowercase, runs of `-_.` become `-`); lowercase for npm."""
+    """PEP 503 for PyPI (lowercase, runs of `-_.` become `-`); `_` read as `-` for crates.io,
+    which treats them as the same name; lowercase for npm and Go."""
     if ecosystem is Ecosystem.PYPI:
         return re.sub(r"[-_.]+", "-", name).lower()
+    if ecosystem is Ecosystem.CRATES:
+        return name.replace("_", "-").lower()
     return name.lower()
 
 

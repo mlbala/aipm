@@ -15,6 +15,7 @@ test that kills its own runner must not pass (ADR-0020).
 import secrets
 import shutil
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from aipm.execution.process import BASE_ENV_ALLOWLIST, ProcessResult, build_env,
 from aipm.execution.sandbox import ProcessKind, ProfilePaths, SandboxProfile, profile_for
 from aipm.gates.context import GateContext
 from aipm.gates.reports import ReportError, TestReport, load_report
-from aipm.security.command_policy import compile_gate, compile_prepare
+from aipm.security.command_policy import compile_gate, compile_prepare, program_name
 from aipm.security.network import NetworkPolicy, parse_network
 from aipm.security.paths import SafeRelPath
 from aipm.security.sanitize import head_tail, sanitize_text, strip_terminal_escapes
@@ -65,17 +66,38 @@ def gate_env(ctx: GateContext) -> dict[str, str]:
     )
 
 
-def _network(profile: NetworkProfile) -> NetworkPolicy:
+_ECOSYSTEMS: dict[str, tuple[Ecosystem, ...]] = {
+    "uv": (Ecosystem.PYPI,),
+    "pip": (Ecosystem.PYPI,),
+    "python": (Ecosystem.PYPI,),
+    "npm": (Ecosystem.NPM,),
+    "pnpm": (Ecosystem.NPM,),
+    "yarn": (Ecosystem.NPM,),
+    "node": (Ecosystem.NPM,),
+    "go": (Ecosystem.GO,),
+    "gotestsum": (Ecosystem.GO,),
+    "cargo": (Ecosystem.CRATES,),
+}
+"""The registries a `registries` profile opens, by the program the step runs: a Python
+project's prepare step never reaches the Go proxy's storage host (v0.4)."""
+
+
+def ecosystems_for(argv: Sequence[str]) -> tuple[Ecosystem, ...]:
+    """The registries the step's program installs from; PyPI and npm for any other program."""
+    return _ECOSYSTEMS.get(program_name(argv[0]), (Ecosystem.PYPI, Ecosystem.NPM))
+
+
+def _network(profile: NetworkProfile, argv: Sequence[str]) -> NetworkPolicy:
     if profile is NetworkProfile.API_ONLY:
         raise PolicyViolation(
             "api-only needs named domains, which only aipm's own tools have",
             hint="Use none (the default), registries or open for gates and the prepare step.",
         )
-    return parse_network(profile.value, ecosystems=(Ecosystem.PYPI, Ecosystem.NPM))
+    return parse_network(profile.value, ecosystems=ecosystems_for(argv))
 
 
 def sandbox_for(
-    ctx: GateContext, kind: ProcessKind, profile: NetworkProfile
+    ctx: GateContext, kind: ProcessKind, profile: NetworkProfile, argv: Sequence[str] = ("",)
 ) -> SandboxProfile | None:
     """The `srt` profile for a gate or the prepare step, or `None` without a sandbox."""
     if ctx.runtime is None:
@@ -83,7 +105,7 @@ def sandbox_for(
     paths = ProfilePaths(
         workspace=ctx.root, temp_dir=ctx.ws.temp_dir, home=ctx.home, extra_deny_read=ctx.deny_read
     )
-    return profile_for(kind, _network(profile), paths, runtime=ctx.runtime)
+    return profile_for(kind, _network(profile, argv), paths, runtime=ctx.runtime)
 
 
 def _output(result: ProcessResult, ctx: GateContext) -> str:
@@ -132,7 +154,7 @@ def run_command_gate(
         compile_gate(gate, paths=paths, policy=ctx.cfg.command_policy(), report_file=report_file)
     )
     argv[0] = resolve_program(argv[0], ctx.root)
-    profile = sandbox_for(ctx, ProcessKind.GATE, ctx.cfg.security.network.gates)
+    profile = sandbox_for(ctx, ProcessKind.GATE, ctx.cfg.security.network.gates, argv)
     if report_file is not None:
         report_file.unlink(missing_ok=True)
     started = time.monotonic()
@@ -168,7 +190,7 @@ def run_prepare(ctx: GateContext) -> CommandOutcome | None:
         return None
     argv = list(compile_prepare(prepare, policy=ctx.cfg.command_policy()))
     argv[0] = resolve_program(argv[0], ctx.root)
-    profile = sandbox_for(ctx, ProcessKind.PREPARE, min_network(prepare.network, ctx))
+    profile = sandbox_for(ctx, ProcessKind.PREPARE, min_network(prepare.network, ctx), argv)
     started = time.monotonic()
     env = build_env(
         extra={"TMPDIR": str(ctx.ws.temp_dir)},
