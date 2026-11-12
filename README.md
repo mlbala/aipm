@@ -19,6 +19,8 @@ Or run [`install.sh`](install.sh) (`sh install.sh [-y] [-t TAG]`): it prints wha
 
 aipm needs Python 3.13 or later. It is distributed from GitHub only ([ADR-0001](docs/architecture/adr/0001-distribute-from-github.md)).
 
+It needs git 2.55 or later, or a git older than 2.54. git 2.54 (including the Apple Git that macOS ships as `/usr/bin/git`) cannot turn off hooks named in your git config (`hook.<name>.command`), so aipm refuses it (exit 8) while such a hook is configured. `aipm doctor` shows which git you have.
+
 ## Use
 
 The v0.1 flow, in any git repository:
@@ -132,12 +134,13 @@ For full coverage install [`srt`](https://github.com/anthropic-experimental/sand
 
 `aipm build` hands every ready task to Claude Code and verifies it, unattended; `aipm run T-002` does the same for one task. A task is ready when it is `todo` and its dependencies are done or skipped. Each attempt runs in its own worktree outside your repository (`<cache dir>/aipm/worktrees/`), on a branch `aipm/task/<T-ID>` made from the integration branch (`aipm/integration`, created from your HEAD on the first build). Your own branches never get a commit from aipm.
 
-For each task: Claude Code runs in the `srt` sandbox (it may write only its worktree and reach only `api.anthropic.com`), with `--bare`, `--permission-mode dontAsk`, no permission prompts, no repository or local settings and no MCP servers (`--setting-sources user --strict-mcp-config`, with a configuration home of its own), the file tools plus exactly the task's gate commands, and `--max-budget-usd` set to `budget.task_usd`. Then the same post-change checks and gates as `verify` run. A severe violation blocks the task at once (exit 6 at the end, a security event, never retried); a minor one is reverted and the attempt fails. A failed attempt gets a fix prompt with the failures, in the same agent session (`--resume`), up to `--max-retries` (default 3). A passing task is committed with `Aipm-Task`, `Aipm-Run` and `Aipm-Attempt` trailers and fast-forwarded onto the integration branch (rebased first if another task landed meanwhile; a conflict blocks the task). `AIPM-BLOCKED: <question>` in the agent's last message blocks the task with the question; nothing else the agent says counts.
+For each task: Claude Code runs in the `srt` sandbox (it may write only its worktree and reach only `api.anthropic.com`; it may not read your checkout outside `.git`, your agent logins, the other tasks or the usual credential files), with `--bare`, `--permission-mode dontAsk`, no permission prompts, no repository or local settings and no MCP servers (`--setting-sources user --strict-mcp-config`, with a configuration home of its own), the file tools plus exactly the task's gate commands, and `--max-budget-usd` set to `budget.task_usd`. Then the same post-change checks and gates as `verify` run. A severe violation blocks the task at once (exit 6 at the end, a security event, never retried); a minor one is reverted and the attempt fails. A failed attempt gets a fix prompt with the failures, in the same agent session (`--resume`), up to `--max-retries` (default 3). A passing task is committed with `Aipm-Task`, `Aipm-Run` and `Aipm-Attempt` trailers and fast-forwarded onto the integration branch (rebased first if another task landed meanwhile; a conflict blocks the task). `AIPM-BLOCKED: <question>` in the agent's last message blocks the task with the question; nothing else the agent says counts.
 
 - `--parallel N` (at most 8) runs up to N tasks at once, never two that own the same files or touch the same serialized path (`plan.serialized_paths`, a lockfile).
 - `budget.run_usd` (or `--budget`) is checked before every dispatch, holding `task_usd` for each attempt still running; when the next one would not fit, nothing new starts, running tasks finish, and the build exits 5. An attempt whose cost Claude Code does not report is charged its whole task budget.
 - `--timeout` (default `20m`) bounds each attempt; `--only T-001,T-004` limits the build; `--dry-run` prints the batches and every argv and dispatches nothing.
 - Ctrl-C stops scheduling and gives running tasks 30 seconds; a second Ctrl-C stops them at once (exit 130). `aipm build` again resumes the run: merged tasks stay done, nothing is committed twice.
+- aipm records outside the repository every task it marks done. A task that a cloned `tasks.yaml` says is done, with no such record, shows as *claimed by the repository* in `aipm status` and `build --dry-run`; review it, or `aipm task reset` it. It still counts as done for the tasks after it.
 
 `aipm build` needs trust (exit 6), `dispatch.enabled`, an approved plan that is not stale, a clean working tree (`.pm/` aside), a Claude Code that has every flag above (exit 8 otherwise; check with `claude --help`) and `ANTHROPIC_API_KEY`: bare mode never reads a subscription login, so **give agents a dedicated API key with a spend limit**. `dispatch.tools.claude.bare: false` drops `--bare` only; the repository's hooks and MCP servers are then listed in `aipm trust` but still never loaded. Agent output, prompts, gate reports and `cost.json` are saved in `.pm/runs/<run-id>/`, and `aipm status` shows the spend against the budget.
 
@@ -275,7 +278,7 @@ aipm reads untrusted text (your repository, LLM output, agent output) and launch
 - **Deterministic gates decide when a task is done.** An LLM reviewer can veto, never pass.
 - **Coding agents run sandboxed**, with a scrubbed environment and limited network, when `srt` is installed. A dispatched agent reads no repository settings, hooks or MCP servers, works in a worktree outside your repository, and its work reaches your branch only through `aipm merge`, after you have seen the log.
 
-Give coding agents a dedicated API key with a spend limit. To report a vulnerability, see [SECURITY.md](SECURITY.md).
+Give coding agents a dedicated API key with a spend limit. Keep tokens out of git remote URLs (use a credential helper): a dispatched agent can read your repository's `.git`. To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ## Documentation
 
