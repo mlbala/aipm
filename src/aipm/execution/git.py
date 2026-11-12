@@ -24,8 +24,13 @@ v0.2, RT02-1, ADR-0022). So every call also gets, through git's `GIT_CONFIG_*` e
 `--no-verify` say; `gc.auto=0` and `maintenance.auto=false`; and no lazy fetch from a promisor
 remote and no transport at all (`GIT_NO_LAZY_FETCH`, `GIT_ALLOW_PROTOCOL`), since a remote URL
 can name a command (`ext::`). Before git compares or stages work-tree files, `check_repo_config`
-refuses (exit 6) a repository whose own config names a filter driver, a hook command, an SSH
-signing-key command or another work tree.
+refuses (exit 6) a repository whose own config names a filter driver, a merge driver, a hook
+command, an SSH signing-key command or another work tree.
+
+The build loop (v0.3) adds branches, worktrees and integration: task worktrees on
+`aipm/task/<T>`, rebasing a task commit onto the integration branch, and compare-and-swap ref
+updates, so a ref that moved under aipm is never overwritten. Signature checks, submodule
+recursion, rerere and autostash are off for every call. aipm never pushes or fetches.
 """
 
 import hashlib
@@ -69,6 +74,15 @@ CONFIG_OVERRIDES: tuple[tuple[str, str], ...] = (
     *((f"hook.{event}.enabled", "false") for event in HOOK_EVENTS),
     ("gc.auto", "0"),
     ("maintenance.auto", "false"),
+    # v0.3 checks out, rebases, merges and logs: none of it may verify signatures (which runs
+    # `gpg.program`), enter submodules, replay recorded conflict resolutions or stash.
+    ("submodule.recurse", "false"),
+    ("log.showSignature", "false"),
+    ("merge.verifySignatures", "false"),
+    ("rerere.enabled", "false"),
+    ("rebase.autoStash", "false"),
+    ("rebase.updateRefs", "false"),
+    ("rebase.autoSquash", "false"),
 )
 """Config set for every call through `GIT_CONFIG_COUNT`, which ranks with `-c` (RT02-1)."""
 
@@ -180,11 +194,12 @@ def _checked(result: ProcessResult, what: str) -> bytes:
 _PROGRAM_KEY = re.compile(
     r"filter\..+\.(?:clean|smudge|process)|hook\..+\.command|trailer\..+\.(?:cmd|command)|"
     r"gpg\.ssh\.defaultkeycommand|lfs\.extension\..+\.(?:clean|smudge)|"
-    r"lfs\.customtransfer\..+\.path|lfs\.standalonetransferagent",
+    r"lfs\.customtransfer\..+\.path|lfs\.standalonetransferagent|merge\..+\.driver",
     re.DOTALL,
 )
 """Repository config keys that make the git commands aipm runs (or git-lfs, a global filter
-they start) run a program."""
+they start) run a program. `merge.<name>.driver` runs when a rebase merges a file whose
+attributes name it (v0.3 integrates task branches)."""
 _USER_SCOPES = frozenset({b"global", b"system", b"command"})
 
 
@@ -1327,3 +1342,299 @@ def _describe(
         truncated=truncated,
     )
     return change, used
+
+
+# ---------------------------------------------------------------- branches and worktrees (v0.3)
+
+_BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/\-]{0,99}")
+_TRAILER_TASK = re.compile(r"T-[0-9]{3}")
+_TRAILER_RUN = re.compile(r"r-[0-9]{8}-[0-9]{4}-[0-9a-f]{4}")
+_TRAILER_ATTEMPT = re.compile(r"[1-9][0-9]{0,2}")
+TRAILER_SCAN = 2_000
+"""How many commits a trailer search reads at most."""
+_TRAILER_FORMAT = (
+    "%H%x00%P%x00%(trailers:key=Aipm-Task,valueonly,separator=%x2C)%x00"
+    "%(trailers:key=Aipm-Run,valueonly,separator=%x2C)%x00"
+    "%(trailers:key=Aipm-Attempt,valueonly,separator=%x2C)%x00"
+)
+
+
+def check_branch(name: str) -> str:
+    """`name`, if it is a branch name aipm passes to git; exit 2 otherwise.
+
+    Letters, digits and `. _ / -`, at most 100 characters, starting with a letter or digit; no
+    empty component, no component that starts with `.` or `-` or ends with `.` or `.lock`, and
+    no `..`. Narrower than `git check-ref-format`, so a name can never read as an option.
+    """
+    parts = name.split("/")
+    if (
+        not _BRANCH.fullmatch(name)
+        or ".." in name
+        or any(not p or p.startswith((".", "-")) or p.endswith((".", ".lock")) for p in parts)
+    ):
+        raise UsageError(f"{name[:80]!r} is not a branch name aipm can use")
+    return name
+
+
+def _full_sha(value: str) -> str:
+    if not _SHA.fullmatch(value):
+        raise UsageError(f"{value[:80]!r} is not a full commit id")
+    return value
+
+
+def ref_sha(repo: Path, branch: str) -> str | None:
+    """The commit `refs/heads/<branch>` points at, or `None` when there is no such branch."""
+    ref = f"refs/heads/{check_branch(branch)}^{{commit}}"
+    result = _run(repo, "rev-parse", "--verify", "--quiet", ref, max_output=4096)
+    sha = result.stdout.decode("ascii", errors="replace").strip()
+    if result.returncode == 1 and not sha and not result.timed_out:
+        return None
+    if result.returncode != 0 or not _SHA.fullmatch(sha):
+        raise UsageError(f"git cannot read the branch {branch}")
+    return sha
+
+
+def is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
+    """Whether commit `ancestor` is `descendant` or one of its ancestors."""
+    result = _run(
+        repo, "merge-base", "--is-ancestor", _full_sha(ancestor), _full_sha(descendant),
+        max_output=4096,
+    )  # fmt: skip
+    if result.returncode not in (0, 1) or result.timed_out:
+        raise UsageError("git merge-base failed")
+    return result.returncode == 0
+
+
+def update_ref(repo: Path, branch: str, new: str, old: str | None) -> None:
+    """Point `branch` at `new`, only if it points at `old` now (`None`: only if it does not
+    exist yet). A compare-and-swap: a branch that moved under aipm is never overwritten."""
+    expected = "0" * len(_full_sha(new)) if old is None else _full_sha(old)
+    ref = f"refs/heads/{check_branch(branch)}"
+    result = _run(repo, "update-ref", "-m", "aipm", ref, new, expected, max_output=4096)
+    _checked(result, f"update-ref {branch}")
+
+
+def delete_branch(repo: Path, branch: str, old: str) -> None:
+    """Delete `branch`, only if it still points at `old`."""
+    ref = f"refs/heads/{check_branch(branch)}"
+    _checked(_run(repo, "update-ref", "-d", ref, _full_sha(old), max_output=4096), "update-ref -d")
+
+
+@dataclass(frozen=True, slots=True)
+class WorktreeEntry:
+    """One record of `git worktree list --porcelain`; `branch` without `refs/heads/`."""
+
+    path: str
+    head: str | None
+    branch: str | None
+
+
+def worktrees(repo: Path) -> list[WorktreeEntry]:
+    """Every worktree of the repository, the main one first."""
+    out = _checked(
+        _run(repo, "worktree", "list", "--porcelain", "-z", max_output=MAX_LIST_BYTES),
+        "worktree list",
+    )
+    entries: list[WorktreeEntry] = []
+    record: dict[str, str] = {}
+    for field in [*out.split(b"\0"), b""]:
+        if field:
+            key, _, value = field.decode("utf-8", errors="replace").partition(" ")
+            record[key] = value
+        elif record:
+            branch = record.get("branch", "")
+            entries.append(
+                WorktreeEntry(
+                    path=record.get("worktree", ""),
+                    head=record.get("HEAD"),
+                    branch=branch.removeprefix("refs/heads/")
+                    if branch.startswith("refs/heads/")
+                    else None,
+                )
+            )
+            record = {}
+    return entries
+
+
+def checked_out(repo: Path, branch: str) -> list[str]:
+    """The worktrees that have `branch` checked out."""
+    return [w.path for w in worktrees(repo) if w.branch == branch]
+
+
+def worktree_add(repo: Path, path: Path, branch: str, start: str) -> None:
+    """Check `start` out into a new worktree at `path`, on `branch`, created or reset there.
+
+    The checkout reads the repository's attributes, so its config is checked first (ADR-0022).
+    """
+    check_repo_config(repo)
+    result = _run(
+        repo, "worktree", "add", "--quiet", "--no-track", "-B", check_branch(branch),
+        str(path), _full_sha(start), timeout=COMMIT_TIMEOUT_S, max_output=65_536,
+    )  # fmt: skip
+    _checked(result, "worktree add")
+
+
+def worktree_remove(repo: Path, path: Path) -> None:
+    """Remove the worktree at `path`, changes and all, and prune git's record of any worktree
+    whose directory is gone. A path git does not know is left to the caller."""
+    _run(repo, "worktree", "remove", "--force", "--force", str(path),
+         timeout=COMMIT_TIMEOUT_S, max_output=65_536)  # fmt: skip
+    _checked(_run(repo, "worktree", "prune", max_output=65_536), "worktree prune")
+
+
+def clean(wt: Path) -> None:
+    """Remove every untracked and ignored file from the work tree `wt`."""
+    result = _run(wt, "clean", "-f", "-f", "-d", "-x", "--quiet",
+                  timeout=COMMIT_TIMEOUT_S, max_output=65_536)  # fmt: skip
+    _checked(result, "clean")
+
+
+def _remove_new(wt: Path, path: str) -> None:
+    """Delete what `path` holds in the work tree, never following a link out of it."""
+    target = wt / path
+    # Resolved, so a directory reached through a link that leads out of the tree is outside.
+    if not _real_within(target.parent, wt):
+        raise PolicyViolation(f"{path} does not lie inside the work tree")
+    try:
+        info = os.lstat(target)
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(info.st_mode):
+        shutil.rmtree(target)
+    else:
+        target.unlink()
+
+
+def restore_paths(wt: Path, base: str, paths: Sequence[str]) -> None:
+    """Put each path back as the commit `base` has it: restored if `base` has it, deleted if
+    not, in the work tree and the index (minor post-change violations, ARCHITECTURE §12.4)."""
+    if not paths:
+        return
+    check_repo_config(wt)
+    tree = tree_entries(wt, _full_sha(base))
+    known = sorted(p for p in paths if p.rstrip("/") in tree)
+    new = sorted(p for p in paths if p.rstrip("/") not in tree)
+    if known:
+        result = _run(wt, "restore", f"--source={base}", "--staged", "--worktree", "--", *known,
+                      timeout=COMMIT_TIMEOUT_S, max_output=65_536)  # fmt: skip
+        _checked(result, "restore")
+    for path in new:
+        _remove_new(wt, path)
+    if new:
+        stripped = [p.rstrip("/") for p in new]
+        result = _run(wt, "rm", "--cached", "--quiet", "--ignore-unmatch", "-r", "--", *stripped,
+                      max_output=65_536)  # fmt: skip
+        _checked(result, "rm --cached")
+
+
+def rebase_onto(wt: Path, onto: str, upstream: str) -> bool:
+    """Replay the commits after `upstream` onto `onto` in the work tree `wt`.
+
+    Returns `False` after a conflict, which is aborted. Signing follows the user's global
+    config, hooks are off, and a repository merge driver was refused by `check_repo_config`.
+    """
+    check_repo_config(wt)
+    signing = signing_overrides(wt)
+    result = _run(
+        wt, *signing, "rebase", "--quiet", "--no-verify", "--no-autostash", "--onto",
+        _full_sha(onto), _full_sha(upstream), timeout=COMMIT_TIMEOUT_S, max_output=1_048_576,
+    )  # fmt: skip
+    if result.returncode == 0 and not result.timed_out:
+        return True
+    _run(wt, "rebase", "--abort", timeout=COMMIT_TIMEOUT_S, max_output=65_536)
+    if result.returncode != 1 or result.timed_out:
+        _checked(result, "rebase")
+    return False
+
+
+def merge_ff_only(repo: Path, sha: str) -> None:
+    """Fast-forward the checked-out branch of `repo` to `sha`; refuse anything else (exit 2)."""
+    check_repo_config(repo)
+    result = _run(repo, "merge", "--ff-only", "--quiet", "--no-verify", _full_sha(sha),
+                  timeout=COMMIT_TIMEOUT_S, max_output=65_536)  # fmt: skip
+    _checked(result, "merge --ff-only")
+
+
+def current_branch(repo: Path) -> str | None:
+    """The branch checked out in `repo`, or `None` when HEAD is detached."""
+    result = _run(repo, "symbolic-ref", "--quiet", "--short", "HEAD", max_output=4096)
+    name = result.stdout.decode("utf-8", errors="replace").strip()
+    return name if result.returncode == 0 and name else None
+
+
+def log_oneline(repo: Path, base: str, tip: str, *, limit: int = 200) -> tuple[list[str], bool]:
+    """`git log --oneline base..tip`, newest first, at most `limit` lines, and whether there
+    were more. The subjects are repository text: print them only after sanitizing."""
+    out = _checked(
+        _run(repo, "log", "--no-show-signature", "--no-decorate", "--format=%h %s",
+             f"--max-count={limit + 1}", f"{_full_sha(base)}..{_full_sha(tip)}", "--",
+             max_output=1_048_576),
+        "log",
+    )  # fmt: skip
+    lines = out.decode("utf-8", errors="replace").splitlines()
+    return lines[:limit], len(lines) > limit
+
+
+@dataclass(frozen=True, slots=True)
+class TrailerCommit:
+    """A commit with its parents and the aipm trailers it carries (`None` when absent)."""
+
+    sha: str
+    parents: tuple[str, ...]
+    task: str | None
+    run: str | None
+    attempt: int | None
+
+
+def _trailer(value: bytes, pattern: re.Pattern[str]) -> str | None:
+    text = value.decode("utf-8", errors="replace").strip()
+    return text if pattern.fullmatch(text) else None
+
+
+def trailer_commits(
+    repo: Path, tip: str, *, since: str | None = None, limit: int = TRAILER_SCAN
+) -> list[TrailerCommit]:
+    """The commits reachable from `tip` and not from `since`, newest first, at most `limit`,
+    with their `Aipm-Task`, `Aipm-Run` and `Aipm-Attempt` trailers (ARCHITECTURE §12.6)."""
+    revs = _full_sha(tip) if since is None else f"{_full_sha(since)}..{_full_sha(tip)}"
+    out = _checked(
+        _run(repo, "log", "--no-show-signature", f"--format={_TRAILER_FORMAT}",
+             f"--max-count={limit}", revs, "--", max_output=MAX_LIST_BYTES),
+        "log",
+    )  # fmt: skip
+    found: list[TrailerCommit] = []
+    for record in out.split(b"\0\n"):
+        fields = record.strip(b"\n").split(b"\0")
+        if len(fields) != 5:
+            continue
+        sha = fields[0].decode("ascii", errors="replace")
+        parents = tuple(fields[1].decode("ascii", errors="replace").split())
+        if not _SHA.fullmatch(sha) or not all(_SHA.fullmatch(p) for p in parents):
+            raise UsageError("git log printed a commit aipm cannot read")
+        attempt = _trailer(fields[4], _TRAILER_ATTEMPT)
+        found.append(
+            TrailerCommit(
+                sha=sha,
+                parents=parents,
+                task=_trailer(fields[2], _TRAILER_TASK),
+                run=_trailer(fields[3], _TRAILER_RUN),
+                attempt=None if attempt is None else int(attempt),
+            )
+        )
+    return found
+
+
+def changed_paths(repo: Path, a: str, b: str) -> list[str]:
+    """The paths that differ between commits `a` and `b`."""
+    out = _checked(
+        _run(repo, "diff", *_DIFF_FLAGS, "--name-only", "-z", _full_sha(a), _full_sha(b), "--",
+             max_output=MAX_LIST_BYTES),
+        "diff",
+    )  # fmt: skip
+    paths: list[str] = []
+    for raw in _fields(out):
+        path = _decode(raw)
+        if path is None:
+            raise UsageError("git diff printed a path aipm cannot read")
+        paths.append(path)
+    return paths
