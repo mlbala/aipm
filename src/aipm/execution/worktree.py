@@ -8,9 +8,12 @@ onto the integration branch, rebased first when the branch moved since the task 
 conflict is reported, never resolved. Every ref update is a compare-and-swap.
 
 The integration branch must be aipm's own: under `aipm/` and not a task branch, because a
-repository's `.pm/config.yaml` can name it, and aipm never commits to the user's branches.
+repository's `.pm/config.yaml` can name it, and aipm never commits to the user's branches. Every
+tip aipm gives it is recorded outside the repository, so a branch that came with a copied
+`.git` (commits no check ever saw) is refused rather than built on or merged (step 07 review).
 """
 
+import json
 import os
 import shutil
 from dataclasses import dataclass
@@ -23,6 +26,7 @@ from aipm.domain.ids import is_valid_id
 from aipm.execution import git
 from aipm.security.paths import is_within
 from aipm.state.layout import repo_id
+from aipm.state.private_files import read_private, state_dir, write_private
 
 WORKTREES_DIR = "worktrees"
 AGENT_HOMES_DIR = "agents"
@@ -109,6 +113,49 @@ class WorktreeManager:
         )
 
 
+MAX_TIPS_BYTES = 65_536
+
+
+def _tips_path(repo: Path) -> Path:
+    return state_dir(repo) / "integration" / f"{repo_id(repo)}.json"
+
+
+def recorded_tip(repo: Path, branch: str) -> str | None:
+    """The tip aipm last gave `branch` in this repository, from outside the repository."""
+    data = read_private(_tips_path(repo), limit=MAX_TIPS_BYTES)
+    if data is None:
+        return None
+    try:
+        tips: object = json.loads(data)
+    except ValueError:
+        return None
+    value = tips.get(branch) if isinstance(tips, dict) else None  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    return value if isinstance(value, str) else None
+
+
+def record_tip(repo: Path, branch: str, sha: str) -> None:
+    """Record that aipm set `branch` to `sha`."""
+    path = _tips_path(repo)
+    data = read_private(path, limit=MAX_TIPS_BYTES)
+    try:
+        loaded: object = json.loads(data) if data else {}
+    except ValueError:
+        loaded = {}
+    tips = {str(k): v for k, v in loaded.items()} if isinstance(loaded, dict) else {}  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportUnknownArgumentType]
+    tips[branch] = sha
+    write_private(path, json.dumps(tips, sort_keys=True).encode("ascii"))
+
+
+def require_own_tip(repo: Path, branch: str, tip: str) -> None:
+    """Exit 6 unless `tip` is where aipm left `branch`."""
+    if recorded_tip(repo, branch) != tip:
+        raise PolicyViolation(
+            f"{branch} points at {tip[:12]}, which aipm did not put there",
+            hint=f"It may have come with a copied repository. Review it (`git log {branch}`); "
+            f"if it is not yours, delete it (`git branch -D {branch}`) and build again.",
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class Integration:
     """The integration branch at the start of a build."""
@@ -137,11 +184,16 @@ def ensure_integration(repo: Path, branch: str) -> Integration:
     current = git.ref_sha(repo, branch)
     if current is None:
         git.update_ref(repo, branch, head, None)
+        record_tip(repo, branch, head)
         return Integration(branch, head, created=True)
-    if current != head and git.is_ancestor(repo, current, head):
-        git.update_ref(repo, branch, head, current)
-        return Integration(branch, head, caught_up=True)
-    diverged = current != head and not git.is_ancestor(repo, head, current)
+    if current == head or git.is_ancestor(repo, current, head):
+        # Nothing on it that HEAD lacks: catching it up adds only the user's own commits.
+        if current != head:
+            git.update_ref(repo, branch, head, current)
+        record_tip(repo, branch, head)
+        return Integration(branch, head, caught_up=current != head)
+    require_own_tip(repo, branch, current)
+    diverged = not git.is_ancestor(repo, head, current)
     return Integration(branch, current, diverged=diverged)
 
 
@@ -168,6 +220,7 @@ def integrate(repo: Path, wt: Path, branch: str, commit: str, base: str) -> str 
             hint="The task's work tree was changed outside aipm. Review it before going on.",
         )
     git.update_ref(repo, branch, commit, head)
+    record_tip(repo, branch, commit)
     return commit
 
 

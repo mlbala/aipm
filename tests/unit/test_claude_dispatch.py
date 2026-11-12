@@ -353,3 +353,30 @@ def test_a_huge_result_keeps_its_end(tmp_path: Path) -> None:
     text = "x" * 200_000 + "\nAIPM-BLOCKED: need a key"
     parsed = claude_code.create().parse_result(run(result_line(result=text)))
     assert parsed.blocked_question == "need a key"
+
+
+def test_a_script_claude_runs_its_interpreter_from_outside_the_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An npm-installed `claude` is `#!/usr/bin/env node`: a `node` planted in the repository
+    (an active `.venv/bin`) must never run, not even for `--version` (step 07 review)."""
+    repo, outside = tmp_path / "repo", tmp_path / "tools"
+    (repo / "bin").mkdir(parents=True)
+    outside.mkdir()
+    marker = tmp_path / "planted-ran"
+    planted = repo / "bin" / "fakenode"
+    planted.write_text(f"#!/bin/sh\ntouch '{marker}'\nexec /bin/sh \"$@\"\n")
+    planted.chmod(0o755)
+    real = outside / "fakenode"
+    real.write_text('#!/bin/sh\nexec /bin/sh "$@"\n')
+    real.chmod(0o755)
+    claude = outside / "claude"
+    claude.write_text(
+        '#!/usr/bin/env fakenode\n[ "$1" = --version ] && echo "2.1.300 (Claude Code)"\nexit 0\n'
+    )
+    claude.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{repo / 'bin'}:{outside}:/usr/bin:/bin")
+    caps = ClaudeCodeAdapter(which=lambda _n: str(claude)).detect(repo=repo)
+    assert caps.version == "2.1.300"
+    assert caps.launcher == (str(real), str(claude))
+    assert not marker.exists()

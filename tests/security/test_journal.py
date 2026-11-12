@@ -226,3 +226,20 @@ def test_replay_sums_spend_attempts_commits_and_merges() -> None:
     )
     assert (two.committed, two.merged, two.blocked) == (None, None, False)
     assert three.blocked
+
+
+def test_an_agent_that_never_finished_is_charged_its_task_budget() -> None:
+    now = datetime.now(UTC)
+    events = [
+        JournalEvent(seq=0, ts=now, run=RUN, type=JournalEventType.RUN_STARTED,
+                     data={"kind": "build", "task_usd": 2.0}),
+        JournalEvent(seq=1, ts=now, run=RUN, type=JournalEventType.AGENT_STARTED, task="T-001",
+                     attempt=1),
+        JournalEvent(seq=2, ts=now, run=RUN, type=JournalEventType.AGENT_FINISHED, task="T-001",
+                     attempt=1, data={"cost_usd": 0.4}),
+        JournalEvent(seq=3, ts=now, run=RUN, type=JournalEventType.AGENT_STARTED, task="T-002",
+                     attempt=1),
+    ]  # fmt: skip
+    state = replay(RUN, events)
+    assert state.spent_usd == pytest.approx(2.4)  # 0.4 reported, 2.0 for the one killed
+    assert state.tasks["T-002"].dispatches == 1

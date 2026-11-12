@@ -195,7 +195,8 @@ def _detect(adapter: ToolAdapter, root: Path, cfg: Config, *, dry_run: bool) -> 
             f"{missing}",
             hint="Upgrade it, or run tasks yourself with `aipm prompt` and `aipm verify`.",
         )
-    if caps.path is not None and is_inside(caps.path, WorktreeManager(root).root):
+    worktrees = WorktreeManager(root).root
+    if any(is_inside(part, worktrees) for part in (*caps.launcher, caps.path or "")):
         raise PolicyViolation(f"the {adapter.name.value} found on PATH is inside a task worktree")
     claude = cfg.dispatch.tools.get(ToolName.CLAUDE)
     bare = claude.bare if claude is not None else True

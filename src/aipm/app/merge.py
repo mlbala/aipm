@@ -27,7 +27,11 @@ from aipm.config.loader import load_config
 from aipm.domain.errors import UsageError
 from aipm.domain.phase import prompt_inputs
 from aipm.execution import git
-from aipm.execution.worktree import INTEGRATION_PREFIX, check_integration_branch
+from aipm.execution.worktree import (
+    INTEGRATION_PREFIX,
+    check_integration_branch,
+    require_own_tip,
+)
 from aipm.security.sanitize import sanitize_text
 
 MAX_LOG_LINES = 200
@@ -89,6 +93,7 @@ def _plan(root: Path, into: str | None, warnings: tuple[str, ...]) -> MergePlan:
     integration_sha = git.ref_sha(root, integration)
     if integration_sha is None:
         raise UsageError(f"there is no {integration} yet", hint="Run `aipm build` first.")
+    require_own_tip(root, integration, integration_sha)
     target_sha = git.ref_sha(root, target)
     if target_sha is None:
         raise UsageError(f"there is no branch {target}")

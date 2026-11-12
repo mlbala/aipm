@@ -1,4 +1,4 @@
-#!/usr/bin/env -S python3 -I
+#!/usr/bin/env python3
 """Stub Claude Code for aipm's tests (ARCHITECTURE §20, SECURITY.md §14.3, build prompt 07).
 
 `--version` and `--help` answer like Claude Code 2.1.x. Any other call is a dispatch, and the
@@ -228,8 +228,11 @@ def dispatch(args):
         fail("--resume names a session this stub never started: " + resume)
     sid = resume or str(uuid.uuid5(NAMESPACE, "%s-%d-%s" % (task, index, os.getcwd())))
     with (stub_dir() / "calls.jsonl").open("a", encoding="utf-8") as handle:
+        home = os.environ.get("CLAUDE_CONFIG_DIR", "")
         handle.write(json.dumps({"task": task, "call": index + 1, "argv": args,
-                                 "cwd": os.getcwd(), "resume": resume}) + "\n")
+                                 "cwd": os.getcwd(), "resume": resume, "config_home": home,
+                                 "settings_seen": os.path.exists(os.path.join(home, "settings.json"))
+                                 }) + "\n")
     emit({"type": "system", "subtype": "init", "session_id": sid, "model": "stub"})
     for step in attempt.get("steps", []):
         run_step(step)

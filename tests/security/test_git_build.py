@@ -5,6 +5,7 @@ moved under aipm is never overwritten; a repository merge driver is refused befo
 run it.
 """
 
+import os
 from pathlib import Path
 
 import pytest
@@ -286,3 +287,32 @@ def test_clean_removes_untracked_and_ignored_files(repo: Path) -> None:
     assert not (repo / "build").exists()
     assert not (repo / "loose.txt").exists()
     assert (repo / ".gitignore").exists()
+
+
+def test_reverting_cannot_be_raced_out_of_the_work_tree(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child the agent left behind swaps a checked directory for a link to $HOME between
+    aipm's check and the delete (step 07 review): nothing outside the tree is deleted."""
+    base = git.head_sha(repo)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret").write_text("keep\n", encoding="utf-8")
+    (repo / "x").mkdir()
+    (repo / "x" / "secret").write_text("agent\n", encoding="utf-8")
+    real_open = os.open
+    swapped: list[bool] = []
+
+    def racing_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        fd = real_open(path, flags, *args, **kwargs)  # type: ignore[arg-type]
+        if path == "x" and not swapped:
+            swapped.append(True)
+            (repo / "x").rename(repo / "x-moved")
+            (repo / "x").symlink_to(outside)
+        return fd
+
+    monkeypatch.setattr(git.os, "open", racing_open)
+    git.restore_paths(repo, base, ["x/secret"])
+    assert swapped
+    assert (outside / "secret").read_text(encoding="utf-8") == "keep\n"
+    assert not (repo / "x-moved" / "secret").exists()  # the file aipm meant was removed

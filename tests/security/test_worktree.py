@@ -16,6 +16,7 @@ from aipm.execution.worktree import (
     ensure_integration,
     find_task_commit,
     integrate,
+    record_tip,
     task_branch,
 )
 from tests.conftest import run_git
@@ -134,6 +135,7 @@ def test_an_integration_branch_ahead_of_head_is_kept(repo: Path, tmp_path: Path)
     git.worktree_add(repo, wt, "aipm/task/T-001", head)
     ahead = task_commit(wt, "a.txt", "a\n", "T-001")
     git.update_ref(repo, INTEGRATION, ahead, head)
+    record_tip(repo, INTEGRATION, ahead)  # as a build that merged it would
     state = ensure_integration(repo, INTEGRATION)
     assert (state.head, state.diverged) == (ahead, False)
 
@@ -145,6 +147,7 @@ def test_a_diverged_integration_branch_is_reported(repo: Path, tmp_path: Path) -
     git.worktree_add(repo, wt, "aipm/task/T-001", head)
     ahead = task_commit(wt, "a.txt", "a\n", "T-001")
     git.update_ref(repo, INTEGRATION, ahead, head)
+    record_tip(repo, INTEGRATION, ahead)
     run_git(repo, "commit", "-q", "--allow-empty", "-m", "user work")
     state = ensure_integration(repo, INTEGRATION)
     assert (state.head, state.diverged) == (ahead, True)
@@ -220,3 +223,21 @@ def test_a_since_commit_not_on_the_branch_searches_the_whole_branch(
     run_git(repo, "commit", "-q", "--allow-empty", "-m", "unrelated")
     elsewhere = git.head_sha(repo)
     assert find_task_commit(repo, INTEGRATION, task="T-001", run=RUN, since=elsewhere) == first
+
+
+def test_an_integration_branch_aipm_did_not_make_is_refused(repo: Path, tmp_path: Path) -> None:
+    """A copied `.git` can ship `aipm/integration` with commits no check saw (step 07 review)."""
+    head = git.head_sha(repo)
+    wt = tmp_path / "wt"
+    git.worktree_add(repo, wt, "aipm/task/T-001", head)
+    planted = task_commit(wt, ".github/workflows/x.yml", "on: push\n", "T-001")
+    git.update_ref(repo, INTEGRATION, planted, None)
+    with pytest.raises(PolicyViolation, match="aipm did not put there"):
+        ensure_integration(repo, INTEGRATION)
+    assert git.ref_sha(repo, INTEGRATION) == planted
+
+
+def test_an_unrecorded_branch_that_head_contains_is_adopted(repo: Path) -> None:
+    head = git.head_sha(repo)
+    git.update_ref(repo, INTEGRATION, head, None)  # nothing on it HEAD lacks
+    assert ensure_integration(repo, INTEGRATION).head == head

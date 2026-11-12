@@ -22,6 +22,9 @@ class Capabilities:
     version: str | None = None
     flags_checked: bool = False
     missing: tuple[str, ...] = ()
+    launcher: tuple[str, ...] = ()
+    """How to start the tool: its interpreter (resolved outside the repository), then the tool;
+    or just the tool."""
 
     @property
     def dispatchable(self) -> bool:

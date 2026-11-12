@@ -55,7 +55,7 @@ from aipm.execution.process import (
     is_inside,
     run_safe,
 )
-from aipm.execution.sandbox import which_outside
+from aipm.execution.sandbox import launcher_for, which_outside
 from aipm.security.command_policy import check_forbidden_flags
 from aipm.security.sanitize import sanitize_text
 from aipm.security.untrusted import (
@@ -67,6 +67,7 @@ from aipm.security.untrusted import (
 )
 
 DETECT_TIMEOUT_S = 10.0
+_HINT = "Install Claude Code, or run tasks yourself with `aipm prompt` and `aipm verify`."
 HELP_TIMEOUT_S = 15.0
 MAX_HELP_BYTES = 262_144
 API_DOMAINS: tuple[str, ...] = ("api.anthropic.com",)
@@ -126,32 +127,34 @@ def missing_flags(text: str) -> tuple[str, ...]:
     return tuple(missing)
 
 
-def _version(path: str) -> Capabilities:
+def _version(path: str, launcher: tuple[str, ...]) -> Capabilities:
     try:
         with tempfile.TemporaryDirectory(prefix="aipm-detect-") as scratch:
             result = run_safe(
-                [path, "--version"],
+                [*launcher, "--version"],
                 cwd=Path(scratch),
                 env=build_env(),
                 timeout_s=DETECT_TIMEOUT_S,
                 max_output_bytes=4096,
             )
     except (AipmError, OSError):
-        return Capabilities(ToolName.CLAUDE, found=True, path=path)
+        return Capabilities(ToolName.CLAUDE, found=True, path=path, launcher=launcher)
     lines = result.stdout.decode("utf-8", errors="replace").splitlines()
     match = _VERSION.search(lines[0]) if result.returncode == 0 and lines else None
-    caps = Capabilities(ToolName.CLAUDE, True, path, match.group(1) if match else None)
-    _detected[path] = caps
+    version = match.group(1) if match else None
+    caps = Capabilities(ToolName.CLAUDE, True, path, version, launcher=launcher)
+    _detected[_key(path, launcher)] = caps
     return caps
 
 
 def _flags(caps: Capabilities) -> Capabilities:
     """`caps`, with the flags `claude --help` lists checked; cached with it."""
     path = cast("str", caps.path)
+    launcher = caps.launcher or (path,)
     try:
         with tempfile.TemporaryDirectory(prefix="aipm-detect-") as scratch:
             result = run_safe(
-                [path, "--help"],
+                [*launcher, "--help"],
                 cwd=Path(scratch),
                 env=build_env(),
                 timeout_s=HELP_TIMEOUT_S,
@@ -164,16 +167,25 @@ def _flags(caps: Capabilities) -> Capabilities:
     checked = replace(
         caps, flags_checked=True, missing=missing_flags(text) if text else ("--help",)
     )
-    _detected[path] = checked
+    _detected[_key(path, launcher)] = checked
     return checked
 
 
-def _detect(which: Callable[[str], str | None], *, flags: bool = False) -> Capabilities:
+def _key(path: str, launcher: tuple[str, ...]) -> str:
+    return "\0".join((path, *launcher))
+
+
+def _detect(
+    which: Callable[[str], str | None], *, flags: bool = False, repo: Path | None = None
+) -> Capabilities:
     found = which("claude")
     if found is None:
         return Capabilities(ToolName.CLAUDE, found=False)
     path = os.path.realpath(found)
-    caps = _detected.get(path) or _version(path)
+    # An npm-installed `claude` is a `#!/usr/bin/env node` script: with a repository, `node` is
+    # resolved outside it and started explicitly, never looked up on PATH (step 07 review).
+    launcher = (path,) if repo is None else launcher_for(path, repo, name="claude", hint=_HINT)
+    caps = _detected.get(_key(path, launcher)) or _version(path, launcher)
     if flags and caps.version is not None and not caps.flags_checked:
         caps = _flags(caps)
     return caps
@@ -365,7 +377,7 @@ class ClaudeCodeAdapter:
         With `repo`, `claude` is looked up on PATH outside the repository only, so a planted
         `.venv/bin/claude` is never run. A dispatchable result is kept for `build_invocation`.
         """
-        caps = _detect(self._lookup(repo), flags=flags)
+        caps = _detect(self._lookup(repo), flags=flags, repo=repo)
         if caps.dispatchable:
             self._ready = caps
         return caps
@@ -398,7 +410,7 @@ class ClaudeCodeAdapter:
                 "Claude Code has not been checked for the flags dispatch needs",
                 hint="This is a bug in aipm: detect(flags=True) must run first.",
             )
-        argv: list[str] = [caps.path]
+        argv: list[str] = list(caps.launcher or (caps.path,))
         if limits.bare:
             argv.append("--bare")
         argv += [

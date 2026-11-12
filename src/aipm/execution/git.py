@@ -1490,19 +1490,37 @@ def clean(wt: Path) -> None:
 
 
 def _remove_new(wt: Path, path: str) -> None:
-    """Delete what `path` holds in the work tree, never following a link out of it."""
-    target = wt / path
-    # Resolved, so a directory reached through a link that leads out of the tree is outside.
-    if not _real_within(target.parent, wt):
-        raise PolicyViolation(f"{path} does not lie inside the work tree")
+    """Delete what `path` holds in the work tree, never following a link out of it.
+
+    aipm runs this outside any sandbox, in a tree an agent could write, and a child the agent
+    left behind could swap a directory for a link between a check and the delete (step 07
+    review). So nothing is resolved through the tree: each leading directory is opened with
+    `O_NOFOLLOW` relative to the one before, and the last name is removed relative to that.
+    """
+    parts = path.rstrip("/").split("/")
+    fd = os.open(wt, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        info = os.lstat(target)
-    except FileNotFoundError:
-        return
-    if stat.S_ISDIR(info.st_mode):
-        shutil.rmtree(target)
-    else:
-        target.unlink()
+        for part in parts[:-1]:
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            try:
+                inner = os.open(part, flags, dir_fd=fd)
+            except FileNotFoundError:
+                return
+            except OSError:  # a link or a file where a directory should be
+                raise PolicyViolation(f"{path} does not lie inside the work tree") from None
+            os.close(fd)
+            fd = inner
+        name = parts[-1]
+        try:
+            info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if stat.S_ISDIR(info.st_mode):
+            shutil.rmtree(name, dir_fd=fd)
+        else:
+            os.unlink(name, dir_fd=fd)
+    finally:
+        os.close(fd)
 
 
 def restore_paths(wt: Path, base: str, paths: Sequence[str]) -> None:

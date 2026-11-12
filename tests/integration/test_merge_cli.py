@@ -14,6 +14,7 @@ import pytest
 
 from aipm.app import merge as merge_app
 from aipm.domain.errors import UsageError
+from aipm.execution.worktree import record_tip
 from aipm.llm.fake import FakeLLM
 from tests.conftest import FakeSecrets, run_git
 from tests.integration.build_flow import copy_t002, fake_registry, prepare_project, scenario
@@ -139,6 +140,7 @@ def test_a_branch_that_moved_after_the_log_was_shown_is_not_merged(built: Path) 
     tip = head(built, "aipm/integration")
     newer = run_git(built, "commit-tree", f"{tip}^{{tree}}", "-p", tip, "-m", "another task")
     run_git(built, "update-ref", "refs/heads/aipm/integration", newer.strip(), tip)
+    record_tip(built, "aipm/integration", newer.strip())  # as another build would
     with pytest.raises(UsageError, match="moved since the log was shown"):
         merge_app.apply(built, shown)
     assert head(built, "main") == before
@@ -160,3 +162,12 @@ def test_a_planted_cost_record_is_not_believed(built: Path) -> None:
     (planted / "cost.json").write_text(json.dumps({"spent_usd": 0.0, "tokens_used": 0}))
     spend = json.loads(ok(aipm(built, "status", flags=["--json"])).stdout)["data"]["spend"]
     assert spend["usd"] == pytest.approx(0.25)
+
+
+def test_merge_refuses_an_integration_branch_aipm_did_not_set(built: Path) -> None:
+    tip = head(built, "aipm/integration")
+    planted = run_git(built, "commit-tree", f"{tip}^{{tree}}", "-p", tip, "-m", "aipm: T-009 x")
+    run_git(built, "update-ref", "refs/heads/aipm/integration", planted.strip(), tip)
+    code, env = envelope(built)
+    assert code == 6, env
+    assert "aipm did not put there" in env["errors"][0]["message"]

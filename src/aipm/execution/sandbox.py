@@ -278,13 +278,16 @@ def which_outside(name: str, repo: Path) -> str | None:
     return None
 
 
-def launcher_for(srt: str, repo: Path) -> tuple[str, ...]:
-    """How to start `srt` without trusting PATH for its interpreter (step 06 review).
+def launcher_for(
+    srt: str, repo: Path, *, name: str = "srt", hint: str = INSTALL_HINT
+) -> tuple[str, ...]:
+    """How to start a script without trusting PATH for its interpreter (step 06 review).
 
-    `srt` is a `#!/usr/bin/env node` script: the kernel would look `node` up on the PATH aipm
-    passes on, where a repository-local entry (an active `.venv/bin`) could come first. So the
-    interpreter is resolved here, outside the repository, and started explicitly. An absolute
-    interpreter inside the repository exits 6; a first line aipm cannot read exits 8.
+    `srt` (and an npm-installed `claude`) is a `#!/usr/bin/env node` script: the kernel would
+    look `node` up on the PATH aipm passes on, where a repository-local entry (an active
+    `.venv/bin`, `node_modules/.bin`) could come first. So the interpreter is resolved here,
+    outside the repository, and started explicitly. An absolute interpreter inside the
+    repository exits 6; a first line aipm cannot read exits 8. A native binary starts as is.
     """
     from aipm.execution.process import is_inside  # noqa: PLC0415 - process imports us
 
@@ -292,24 +295,24 @@ def launcher_for(srt: str, repo: Path) -> tuple[str, ...]:
         with Path(srt).open("rb") as handle:
             first = handle.read(256).split(b"\n", 1)[0]
     except OSError:
-        raise MissingCapability(f"cannot read {srt}", hint=INSTALL_HINT) from None
+        raise MissingCapability(f"cannot read {srt}", hint=hint) from None
     if not first.startswith(b"#!"):
         return (srt,)
     words = first[2:].decode("utf-8", errors="replace").split()
     if not words:
-        raise MissingCapability(f"cannot tell how to start {srt}", hint=INSTALL_HINT)
+        raise MissingCapability(f"cannot tell how to start {srt}", hint=hint)
     if Path(words[0]).name == "env":
         if len(words) != 2 or words[1].startswith("-"):
             raise MissingCapability(f"cannot tell how to start {srt}: {first[:80]!r}")
         found = which_outside(words[1], repo)
         if found is None:
             raise MissingCapability(
-                f"srt needs {words[1]}, which is not on PATH outside the repository",
-                hint=INSTALL_HINT,
+                f"{name} needs {words[1]}, which is not on PATH outside the repository",
+                hint=hint,
             )
         return (found, srt)
     if is_inside(words[0], repo):
-        raise PolicyViolation(f"srt's interpreter {words[0]} is inside the repository")
+        raise PolicyViolation(f"{name}'s interpreter {words[0]} is inside the repository")
     return (srt,)
 
 

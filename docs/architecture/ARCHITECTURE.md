@@ -672,7 +672,7 @@ All of these must hold, or `aipm build` exits with the code shown:
 
 ### 12.2 Branches and worktrees
 
-- **Integration branch.** `git.integration_branch` (default `aipm/integration`) is created from the current HEAD at the first build. The base SHA is recorded in the journal. Its name must start with `aipm/` and must not be under `aipm/task/`, because a repository's config can set it (exit 6 otherwise), and it must not be checked out in any worktree (exit 2). When it is an ancestor of the current HEAD at the start of a build, it is fast-forwarded to HEAD; when the two have diverged, build warns.
+- **Integration branch.** `git.integration_branch` (default `aipm/integration`) is created from the current HEAD at the first build. The base SHA is recorded in the journal. Its name must start with `aipm/` and must not be under `aipm/task/`, because a repository's config can set it (exit 6 otherwise), and it must not be checked out in any worktree (exit 2). When it is an ancestor of the current HEAD at the start of a build, it is fast-forwarded to HEAD; when the two have diverged, build warns. aipm records, outside the repository, every tip it gives the branch, and refuses (exit 6) one it did not set unless HEAD contains it.
 - **Task attempts.** Each task attempt runs on branch `aipm/task/<TASK>`, in a worktree outside the repo (§6.1), created from the integration branch's HEAD.
 - **User branches.** aipm never commits to the user's branches. Integration into them happens only through `aipm merge` (fast-forward only, after confirmation).
 - **No remotes.** aipm never pushes and never edits remotes.

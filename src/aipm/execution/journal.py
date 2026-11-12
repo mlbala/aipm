@@ -125,6 +125,7 @@ class RunReplay:
     integration: str | None = None
     base: str | None = None
     spent_usd: float = 0.0
+    task_usd: float = 0.0
     next_seq: int = 0
     tasks: dict[str, TaskReplay] = field(default_factory=dict[str, TaskReplay])
 
@@ -157,9 +158,11 @@ def _cost(data: Mapping[str, JsonValue]) -> float:
 
 
 def replay(run_id: str, events: Sequence[JournalEvent]) -> RunReplay:
-    """Sum up the events of one run: spend, and per task its attempts, its last commit, whether
+    """Sum up the events of one run: spend (each attempt's own cost, and the task budget for an
+    agent that started but never finished), and per task its attempts, its last commit, whether
     it was merged and whether it was blocked. Pure."""
     state = RunReplay(run_id)
+    unfinished = 0
     for event in events:
         state.next_seq = max(state.next_seq, event.seq + 1)
         data = event.data
@@ -167,8 +170,12 @@ def replay(run_id: str, events: Sequence[JournalEvent]) -> RunReplay:
             state.kind = _text(data, "kind")
             state.integration = _text(data, "integration")
             state.base = _sha(data, "base")
+            state.task_usd = _cost({"cost_usd": data.get("task_usd")})
             continue
+        if event.type is JournalEventType.AGENT_STARTED:
+            unfinished += 1
         if event.type is JournalEventType.AGENT_FINISHED:
+            unfinished = max(unfinished - 1, 0)
             state.spent_usd += _cost(data)
         if event.task is None or not is_valid_id("task", event.task):
             continue
@@ -185,4 +192,6 @@ def replay(run_id: str, events: Sequence[JournalEvent]) -> RunReplay:
             task.merged = _sha(data, "commit")
         elif event.type is JournalEventType.TASK_BLOCKED:
             task.blocked = True
+    # An agent started but never reported (aipm was killed): charged its whole task budget.
+    state.spent_usd += unfinished * state.task_usd
     return state

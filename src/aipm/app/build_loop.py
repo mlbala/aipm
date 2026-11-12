@@ -104,6 +104,7 @@ from aipm.state.store import FileStateStore
 from aipm.state.yamlio import dump_yaml
 
 GRACE_S = 30.0
+STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 """How long running attempts may go on after the first Ctrl-C (ARCHITECTURE §12.6)."""
 
 
@@ -211,6 +212,7 @@ class _Attempted:
     session: str | None = None
     session_total: float = 0.0
     timed_out: bool = False
+    cost: float = 0.0
 
 
 def _clean(text: str, limit: int) -> str:
@@ -265,7 +267,8 @@ class BuildLoop:
         self.run_id = ""
         self.run_base: str | None = None
         self.journal: Journal | None = None
-        self.config_home = Path()
+        self.agent_root = Path()
+        self.homes: dict[str, Path] = {}
         self.resumed = False
         self.resumable: set[str] = set()
         self.run_attempts: dict[str, int] = {}
@@ -296,13 +299,17 @@ class BuildLoop:
             await self._schedule()
         finally:
             if installed:
-                loop.remove_signal_handler(signal.SIGINT)
+                for sig in STOP_SIGNALS:
+                    loop.remove_signal_handler(sig)
             self._finish()
         return self._summary()
 
     def _install_signals(self, loop: asyncio.AbstractEventLoop) -> bool:
+        """Ctrl-C, and SIGTERM or SIGHUP from a supervisor or a closed terminal, stop the build
+        the same way: agents and gates run in their own sessions and would outlive aipm."""
         try:
-            loop.add_signal_handler(signal.SIGINT, self._on_interrupt)
+            for sig in STOP_SIGNALS:
+                loop.add_signal_handler(sig, self._on_interrupt)
         except (NotImplementedError, RuntimeError, ValueError):
             return False
         return True
@@ -453,9 +460,18 @@ class BuildLoop:
         )
 
     def _home_dir(self) -> None:
-        base = cache_root() / AGENT_HOMES_DIR / repo_id(self.root) / self.run_id / "claude"
-        self.config_home = outside_repo(base, self.root, "the agent's config home")
-        self.config_home.mkdir(mode=0o700, parents=True, exist_ok=True)
+        base = cache_root() / AGENT_HOMES_DIR / repo_id(self.root) / self.run_id
+        self.agent_root = outside_repo(base, self.root, "the agents' config homes")
+        self.agent_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    def _fresh_home(self, task_id: str) -> Path:
+        """The task's own config home, empty: one per task, so no agent sees settings another
+        planted, and a resumed task starts from nothing (step 07 review)."""
+        home = self.agent_root / task_id / "claude"
+        shutil.rmtree(home, ignore_errors=True)
+        home.mkdir(mode=0o700, parents=True)
+        self.homes[task_id] = home
+        return home
 
     async def _reconcile(self, task_id: str, committed: str | None, dispatches: int) -> None:
         """Resume one task of the interrupted run (ARCHITECTURE §12.6)."""
@@ -508,7 +524,7 @@ class BuildLoop:
             self._journal(JournalEventType.INTERRUPTED, spent_usd=round(self.spend.spent_usd, 6))
         else:
             self._journal(JournalEventType.RUN_FINISHED, spent_usd=round(self.spend.spent_usd, 6))
-            shutil.rmtree(self.config_home, ignore_errors=True)
+            shutil.rmtree(self.agent_root, ignore_errors=True)
         self._write_cost()
 
     def _summary(self) -> BuildSummary:
@@ -601,7 +617,7 @@ class BuildLoop:
             )
         )
         integrity = await asyncio.to_thread(git.integrity_snapshot, wt, self.home)
-        agent_before = config_home_hashes(self.config_home)
+        agent_before = config_home_hashes(await asyncio.to_thread(self._fresh_home, task_id))
         last = _Attempted(passed=False)
         while True:
             if self.stopping:
@@ -699,7 +715,7 @@ class BuildLoop:
                 root=wt,
                 temp_dir=dirs["agent"],
                 context_dir=dirs["context"],
-                config_home=self.config_home,
+                config_home=self.homes[task_id],
                 context_text=self.context_text,
                 resume_session=last.session,
             )
@@ -756,8 +772,9 @@ class BuildLoop:
         if result.saw_result and result.session_id and result.cost_usd is not None:
             session, total = result.session_id, result.cost_usd
         return _Attempted(
-            passed=False, session=session, session_total=total, timed_out=done.process.timed_out
-        )
+            passed=False, session=session, session_total=total, timed_out=done.process.timed_out,
+            cost=cost,
+        )  # fmt: skip
 
     def _save_agent(self, task_id: str, number: int, done: Dispatch) -> None:
         base = ["agent", task_id, str(number)]
@@ -802,7 +819,7 @@ class BuildLoop:
             saw_result=result.saw_result,
             is_error=result.is_error,
             subtype=result.subtype,
-            cost_usd=round(self.cost_by_task.get(task_id, 0.0), 6),
+            cost_usd=round(attempted.cost, 6),
         )
         self._write_cost()
         if self.interrupted:
@@ -810,7 +827,7 @@ class BuildLoop:
         self._emit(task_id, "checks", number)
         changes = await asyncio.to_thread(self._changes, wt, base, integrity)
         violations = check_changes(changes, self.tasks[task_id], self.policy)
-        if config_home_hashes(self.config_home) != agent_before:
+        if config_home_hashes(self.homes[task_id]) != agent_before:
             violations.append(
                 Violation(
                     Kind.GIT_INTEGRITY,
@@ -919,7 +936,7 @@ class BuildLoop:
             runtime=self.runtime,
             withheld=ignore_spec(wt, also=ignores).match_file,
             changed_during_gates=lambda: moved_since(wt, scanned),
-            deny_read=(self.config_home,),
+            deny_read=(self.homes[task_id],),
         )
         gate_run = await asyncio.to_thread(
             lambda: run_gates(

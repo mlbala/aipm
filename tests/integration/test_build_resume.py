@@ -188,3 +188,20 @@ def test_a_first_ctrl_c_lets_running_work_finish_and_starts_nothing_new(
     assert status(project, "T-002") is TaskStatus.DONE  # finished within the grace period
     assert status(project, "T-005") is TaskStatus.TODO  # never started
     assert [c["task"] for c in calls(user_dirs.home)] == ["T-002"]
+
+
+def test_sigterm_stops_a_build_like_ctrl_c(project: Path, user_dirs: UserDirs) -> None:
+    """A supervisor's SIGTERM (or a closed terminal's SIGHUP) must not orphan the agent."""
+    scenario(user_dirs.home, {"T-002": [{"steps": [{"sleep": 3}, *copy_t002()]}]})
+    thread, results = in_background(project, "build", "--only", FOUR)
+    deadline = time.monotonic() + 60
+    while not calls(user_dirs.home):
+        assert time.monotonic() < deadline, "the agent never started"
+        time.sleep(0.05)
+    (pid,) = running_groups()
+    os.kill(pid, signal.SIGTERM)
+    thread.join(timeout=120)
+    (result,) = results
+    assert result.returncode == 130, result.stdout[-2000:]
+    assert status(project, "T-002") is TaskStatus.DONE
+    assert status(project, "T-005") is TaskStatus.TODO

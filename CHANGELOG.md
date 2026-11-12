@@ -40,6 +40,14 @@ Dispatch (v0.3):
 - A repository config naming `merge.<driver>.driver` is refused (exit 6), since a rebase would run it; every git call turns off signature checks, submodule recursion, rerere, autostash and update-refs. Reverting a new file never follows a link out of the work tree.
 - Build gates may not read the agent's configuration home; a resumed run reads only a journal the write ledger says aipm wrote, and checks every claim against the commit trailers in git.
 
+Fixes from the step 07 security review:
+
+- Reverting a minor violation could be raced into deleting files outside the worktree, as aipm and unsandboxed, by a process the agent left behind swapping a directory for a link between the check and the delete. Paths are now walked from a directory descriptor with `O_NOFOLLOW` and deleted relative to it.
+- Each task gets its own empty agent config home, so settings one agent plants (a severe violation) can never reach another task's agent or a resumed run.
+- An npm-installed `claude` (`#!/usr/bin/env node`) has its interpreter resolved outside the repository and started explicitly, for detection and dispatch, so a `node` planted in an active `.venv/bin` never runs.
+- aipm records the tips it gives the integration branch outside the repository; `build` and `merge` refuse one it did not set (a branch that came with a copied `.git`), unless HEAD already contains it.
+- SIGTERM and SIGHUP stop a build like Ctrl-C, instead of orphaning running agents; the journal records each attempt's own cost, and a resumed run charges the task budget for an agent that started but never finished.
+
 The v0.2 red-team pass ([docs/security/reviews/v0.2.md](docs/security/reviews/v0.2.md)) found eight problems and one robustness bug, all fixed:
 
 - A repository copied with its `.git` directory (a tarball, a copied checkout) could make `aipm prompt` and `aipm verify` run a program through git, outside the sandbox and without trust: a filter driver in `.git/config` or in a submodule's config, a git 2.5x config hook (`hook.<name>.command`, which `core.hooksPath=/dev/null` and `--no-verify` do not stop), or a lazy fetch from an `ext::` promisor remote. Every git call now turns hooks off for every event, never fetches or uses a transport, and aipm refuses (exit 6) a repository whose own git config names such a program (ADR-0022). Move git-lfs or git-crypt filters from `.git/config` to your global config.
