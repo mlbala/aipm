@@ -78,14 +78,15 @@ V03_COMMANDS: dict[str, list[str]] = {
     "merge": ["merge"],
 }
 
-LATER_COMMANDS: dict[str, tuple[list[str], str]] = {
-    "auto": (["auto"], "v0.4"),
+V04_COMMANDS: dict[str, list[str]] = {
+    "auto": ["auto"],
 }
 
 
 def test_command_tables_cover_every_command() -> None:
-    built = set(V01_COMMANDS) | set(V02_COMMANDS) | set(V03_COMMANDS)
-    assert built | set(LATER_COMMANDS) == set(COMMAND_FLAGS)
+    """Build prompt 08 built `auto`, the last command of a later milestone."""
+    built = set(V01_COMMANDS) | set(V02_COMMANDS) | set(V03_COMMANDS) | set(V04_COMMANDS)
+    assert built == set(COMMAND_FLAGS)
 
 
 def test_help_lists_every_command_and_global_flag() -> None:
@@ -112,12 +113,14 @@ def test_version() -> None:
     assert result.stdout == f"aipm {__version__}\n"
 
 
-@pytest.mark.parametrize(("command", "case"), sorted(LATER_COMMANDS.items()))
-def test_later_milestone_commands_say_when(command: str, case: tuple[list[str], str]) -> None:
-    argv, milestone = case
-    result = runner.invoke(app, argv)
+@pytest.mark.parametrize("command", sorted(V04_COMMANDS))
+def test_v04_commands_are_no_longer_stubs(command: str, tmp_path: Path) -> None:
+    """Built in prompt 08: `auto` answers like every built command (it replaces the test that
+    it said "available in v0.4")."""
+    result = runner.invoke(app, ["-C", str(tmp_path), *V04_COMMANDS[command]])
     assert result.exit_code == 2
-    assert f"aipm {command}: available in {milestone}" in result.stderr
+    assert "available in" not in result.stderr
+    assert "is not inside a git repository" in result.stderr
     assert result.stdout == ""
 
 
@@ -167,8 +170,9 @@ def test_bare_aipm_is_no_longer_a_stub() -> None:
     assert "is not inside a git repository" in result.stderr
 
 
-def test_json_envelope_for_a_stub_command() -> None:
-    result = runner.invoke(app, ["--json", "auto"])
+def test_json_envelope_for_an_error(tmp_path: Path) -> None:
+    """One error envelope on stdout (this used `auto` as a stub command until v0.4)."""
+    result = runner.invoke(app, ["--json", "-C", str(tmp_path), "auto"])
     assert result.exit_code == 2
     assert result.stderr == ""
     lines = result.stdout.splitlines()
@@ -183,8 +187,8 @@ def test_json_envelope_for_a_stub_command() -> None:
     assert len(env["errors"]) == 1
     error = env["errors"][0]
     assert set(error) == {"code", "message", "hint"}
-    assert error["code"] == "NOT_AVAILABLE"
-    assert error["message"] == "available in v0.4"
+    assert error["code"] == "USAGE"
+    assert "is not inside a git repository" in error["message"]
 
 
 def test_approve_rejects_an_unknown_artifact() -> None:
