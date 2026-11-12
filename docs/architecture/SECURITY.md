@@ -475,7 +475,7 @@ Fake `claude`/`codex`/`copilot`/`gemini` binaries placed on `PATH`. Each scenari
 | Emits 50 MB of output | Capped |
 | Modifies its global config file | Severe violation (when there is no isolated config home) |
 
-In v0.2 (manual mode, no dispatch) each scenario is applied to the working tree and checked with `aipm verify` (`tests/integration/test_verify_cli.py`); the timeout, daemon and output scenarios run as gates (`tests/security/test_gates.py`). "Prints `AIPM-DONE`" needs dispatch and arrives with build prompt 07.
+In v0.2 (manual mode, no dispatch) each scenario is applied to the working tree and checked with `aipm verify` (`tests/integration/test_verify_cli.py`); the timeout, daemon and output scenarios run as gates (`tests/security/test_gates.py`). From v0.3 every scenario also runs end to end through `aipm build` with the stub agent (`tests/security/test_build_scenarios.py`), together with planting settings in the agent's own configuration home (severe); with an isolated configuration home the agent's global config is out of its reach under `srt`, and a change to it is still a severe violation without one.
 
 ### 14.4 Other testing
 

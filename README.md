@@ -7,7 +7,7 @@
 
 **An AI product manager for your terminal.** aipm interviews you for requirements, designs the architecture, splits the work into tasks, and writes prompts and `AGENTS.md` for Claude Code, Codex, Copilot and Gemini CLI. It then verifies every task with tests and security gates.
 
-> **Status: pre-alpha, v0.2 in progress.** The commands are built step by step from the prompts in [`docs/prompts/`](docs/prompts/README.md). These work: `aipm`, `init`, `doctor`, `trust`, `discover`, `design`, `plan`, `approve`, `status`, `prompt`, `sync-context`, and from v0.2 `verify`, `scan` and `task`. The later commands (`run`, `build`, `merge`, `auto`) are registered and exit with code 2, naming the milestone that brings them.
+> **Status: pre-alpha, v0.3 in progress.** The commands are built step by step from the prompts in [`docs/prompts/`](docs/prompts/README.md). These work: `aipm`, `init`, `doctor`, `trust`, `discover`, `design`, `plan`, `approve`, `status`, `prompt`, `sync-context`, from v0.2 `verify`, `scan` and `task`, and from v0.3 `run`, `build` and `merge` (Claude Code only). `auto` is registered and exits with code 2, naming the milestone that brings it.
 
 ## Install
 
@@ -128,6 +128,21 @@ In manual mode aipm cannot tell your edits from your agent's: anything changed a
 
 For full coverage install [`srt`](https://github.com/anthropic-experimental/sandbox-runtime) (`npm install -g @anthropic-ai/sandbox-runtime`; macOS also needs ripgrep, Linux bubblewrap, socat and ripgrep), gitleaks, semgrep, osv-scanner and, for `aipm scan`, trivy.
 
+### Building with an agent: `run`, `build` and `merge`
+
+`aipm build` hands every ready task to Claude Code and verifies it, unattended; `aipm run T-002` does the same for one task. A task is ready when it is `todo` and its dependencies are done or skipped. Each attempt runs in its own worktree outside your repository (`<cache dir>/aipm/worktrees/`), on a branch `aipm/task/<T-ID>` made from the integration branch (`aipm/integration`, created from your HEAD on the first build). Your own branches never get a commit from aipm.
+
+For each task: Claude Code runs in the `srt` sandbox (it may write only its worktree and reach only `api.anthropic.com`), with `--bare`, `--permission-mode dontAsk`, no permission prompts, no repository or local settings and no MCP servers (`--setting-sources user --strict-mcp-config`, with a configuration home of its own), the file tools plus exactly the task's gate commands, and `--max-budget-usd` set to `budget.task_usd`. Then the same post-change checks and gates as `verify` run. A severe violation blocks the task at once (exit 6 at the end, a security event, never retried); a minor one is reverted and the attempt fails. A failed attempt gets a fix prompt with the failures, in the same agent session (`--resume`), up to `--max-retries` (default 3). A passing task is committed with `Aipm-Task`, `Aipm-Run` and `Aipm-Attempt` trailers and fast-forwarded onto the integration branch (rebased first if another task landed meanwhile; a conflict blocks the task). `AIPM-BLOCKED: <question>` in the agent's last message blocks the task with the question; nothing else the agent says counts.
+
+- `--parallel N` (at most 8) runs up to N tasks at once, never two that own the same files or touch the same serialized path (`plan.serialized_paths`, a lockfile).
+- `budget.run_usd` (or `--budget`) is checked before every dispatch, holding `task_usd` for each attempt still running; when the next one would not fit, nothing new starts, running tasks finish, and the build exits 5. An attempt whose cost Claude Code does not report is charged its whole task budget.
+- `--timeout` (default `20m`) bounds each attempt; `--only T-001,T-004` limits the build; `--dry-run` prints the batches and every argv and dispatches nothing.
+- Ctrl-C stops scheduling and gives running tasks 30 seconds; a second Ctrl-C stops them at once (exit 130). `aipm build` again resumes the run: merged tasks stay done, nothing is committed twice.
+
+`aipm build` needs trust (exit 6), `dispatch.enabled`, an approved plan that is not stale, a clean working tree (`.pm/` aside), a Claude Code that has every flag above (exit 8 otherwise; check with `claude --help`) and `ANTHROPIC_API_KEY`: bare mode never reads a subscription login, so **give agents a dedicated API key with a spend limit**. `dispatch.tools.claude.bare: false` drops `--bare` only; the repository's hooks and MCP servers are then listed in `aipm trust` but still never loaded. Agent output, prompts, gate reports and `cost.json` are saved in `.pm/runs/<run-id>/`, and `aipm status` shows the spend against the budget.
+
+`aipm merge` shows `git log --oneline <your branch>..aipm/integration`, asks you, then fast-forwards your branch (`--into BRANCH` for another one). It never pushes, never makes a merge commit, and refuses a branch with commits of its own (merge those by hand); without a terminal it exits 4.
+
 ### Models and providers
 
 aipm talks to a model through one gateway, with the official `anthropic` SDK or any OpenAI-compatible server (OpenAI, Azure OpenAI, OpenRouter, Ollama, vLLM, LM Studio). It asks for JSON that matches a strict schema, validates every reply, and gives a model one chance to repair an invalid reply; nothing is written from a reply that fails twice. It never sends `temperature`, `top_p` or `top_k`. Set the provider in your user config:
@@ -241,14 +256,14 @@ Tasks: 7 (todo 6, in progress 1, blocked 0, done 0, skipped 0)
 
 ## Tested tool versions
 
-aipm v0.1 renders prompts and context files for Claude Code; it starts no coding agent yet (dispatch arrives in v0.3). These are the versions this release was tested with, on macOS 27 (arm64), on 2026-10-29.
+From v0.3 aipm dispatches Claude Code (`run`, `build`). These are the versions this release was tested with, on macOS 27 (arm64); the Claude Code flags were checked on 2026-11-12 ([ADR-0023](docs/architecture/adr/0023-claude-code-dispatch-flags.md)).
 
 | Tool | Version | What was checked |
 |---|---|---|
 | Python | 3.13.5 (CI: 3.13 and 3.14) | the whole test suite |
 | uv | 0.13.6 | install, `uv run`, the python-uv gate commands |
-| git | 2.55.0 | `init` and the base commit (`rev-parse`, hooks and fsmonitor off) |
-| Claude Code | 1.0.80 installed; formats checked against the Claude Code docs of 2026-10-29 | `claude --version` parsing (`detect`); `CLAUDE.md` with an `@AGENTS.md` import (imports are not read inside code spans or fenced blocks); subagent and skill front matter, for v0.2 |
+| git | 2.55.0 | worktrees, rebase, fast-forward, compare-and-swap ref updates, trailers (hooks and fsmonitor off) |
+| Claude Code | 2.1.314, flags checked against the Claude Code docs of 2026-11-12 | `--version` and `--help` (`detect`): `--bare`, `-p`, `--output-format stream-json`, `--permission-mode dontAsk`, `--permission-prompts none`, `--setting-sources`, `--strict-mcp-config`, `--allowedTools`, `--max-budget-usd`, `--append-system-prompt[-file]`, `--resume`; `CLAUDE_CONFIG_DIR`; exit 143 on SIGTERM; `CLAUDE.md` with an `@AGENTS.md` import |
 
 ## Security model
 
@@ -258,7 +273,7 @@ aipm reads untrusted text (your repository, LLM output, agent output) and launch
 - **Trust lives outside the repository.** A cloned repo cannot pre-approve its own commands or redirect your API key: `aipm trust` records your approval of the exact commands per user and machine, and repo config can only make security settings stricter.
 - **Untrusted text is always wrapped and sanitized** before it reaches a model, a file or your terminal.
 - **Deterministic gates decide when a task is done.** An LLM reviewer can veto, never pass.
-- **Coding agents run sandboxed**, with a scrubbed environment and limited network, when `srt` is installed.
+- **Coding agents run sandboxed**, with a scrubbed environment and limited network, when `srt` is installed. A dispatched agent reads no repository settings, hooks or MCP servers, works in a worktree outside your repository, and its work reaches your branch only through `aipm merge`, after you have seen the log.
 
 Give coding agents a dedicated API key with a spend limit. To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
