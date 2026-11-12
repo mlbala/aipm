@@ -644,14 +644,16 @@ Flags were checked against vendor documentation in October 2026. Because CLIs ch
 | Headless | `claude --bare -p` | `codex exec` | `copilot -p` | `gemini -p` |
 | Prompt delivery | stdin (capped at 10 MB by Claude Code) | stdin, or argument (verify `-` support) | Short `-p` plus `--attachment <run>/prompt.md` | stdin |
 | Context in headless mode | `--append-system-prompt-file <run>/agents.md`, because bare mode skips `CLAUDE.md` | `AGENTS.md` read from the worktree | `AGENTS.md` read from the worktree | `GEMINI.md` / settings in the worktree |
-| Least privilege | `--permission-mode dontAsk`, `--permission-prompts none`, `--allowedTools "Read,Edit,Write,Glob,Grep,Bash(<gate argv> *)…"` | `--sandbox workspace-write` (network off by default) | `--allow-tool 'write'`, `--allow-tool 'shell(<gate cmd>)'`, `--no-ask-user`, `--secret-env-vars` | `--approval-mode auto_edit`, `--allowed-tools "ShellTool(<gate cmd>)"`, `--sandbox` |
+| Least privilege | `--permission-mode dontAsk`, `--permission-prompts none`, `--setting-sources user`, `--strict-mcp-config`, `--allowedTools "Read,Edit,Write,Glob,Grep,Bash(<gate argv>),Bash(<gate argv> *)…"`, an isolated `CLAUDE_CONFIG_DIR` ([ADR-0023](adr/0023-claude-code-dispatch-flags.md)) | `--sandbox workspace-write` (network off by default) | `--allow-tool 'write'`, `--allow-tool 'shell(<gate cmd>)'`, `--no-ask-user`, `--secret-env-vars` | `--approval-mode auto_edit`, `--allowed-tools "ShellTool(<gate cmd>)"`, `--sandbox` |
 | Budget | `--max-budget-usd <task_usd>` | timeout only | timeout only | timeout only |
 | Output | `--output-format stream-json --verbose`; final `result` event has `total_cost_usd` and `session_id` | JSON events (verify `--json`) and last message file (verify `-o`) | `--output-format json` (JSONL), `-s` | `--output-format json` |
-| Fix attempt | `--resume <session_id>` | new exec with the fix prompt | new run with the fix prompt | new run with the fix prompt |
+| Fix attempt | `--resume <session_id>`; `total_cost_usd` then covers the whole session, so aipm subtracts the previous total | new exec with the fix prompt | new run with the fix prompt | new run with the fix prompt |
 | Forbidden (policy rejects) | `--dangerously-skip-permissions`, `--permission-mode bypassPermissions`, `--permission-mode auto` (unless config opts in) | `--yolo`, `--dangerously-bypass-approvals-and-sandbox`, `danger-full-access` | `--allow-all`, `--yolo`, `--allow-all-tools`, `--allow-all-paths`, `--allow-all-urls`, `--trust-folder` | `--yolo`, `--approval-mode yolo` |
 | Milestone | v0.1 render, v0.3 dispatch | v0.4 | v0.4 | v0.4 |
 
-**Why `--bare` for Claude Code.** Without `--bare`, `claude -p` runs a repository's `.claude/settings.json` hooks and connects its `.mcp.json` servers without a trust prompt. Bare mode needs `ANTHROPIC_API_KEY`, or an `apiKeyHelper` passed in `--settings`. Users who sign in with a subscription can set `dispatch.tools.claude.bare: false`. In that case aipm first lists the repo's hooks and MCP servers, refuses if any exist and are not approved in the trust store, and records the decision.
+**Why `--bare` for Claude Code.** Without `--bare`, `claude -p` runs a repository's `.claude/settings.json` hooks and connects its `.mcp.json` servers without a trust prompt. Bare mode needs `ANTHROPIC_API_KEY`, or an `apiKeyHelper` passed in `--settings`. Bare mode still applies a repository's settings `env` block and helper commands, so every dispatch also passes `--setting-sources user --strict-mcp-config`, with `CLAUDE_CONFIG_DIR` set to a configuration home aipm creates for the run ([ADR-0023](adr/0023-claude-code-dispatch-flags.md)). `dispatch.tools.claude.bare: false` drops `--bare` only: the repo's hooks and MCP servers are listed in the execution surface and need trust (SECURITY.md §6 rule 7), and are still never loaded. Bare mode reads no subscription login, so give agents an API key.
+
+**Verified versions.** Claude Code 2.1.314, checked against code.claude.com/docs on 2026-11-12 (ADR-0023). `--append-system-prompt-file` appears in `claude --help` only as `--append-system-prompt[-file]`; detection accepts that form.
 
 **Adding a tool:** implement `ToolAdapter`, add templates, and register it through the `aipm.adapters` entry point (§18). Contract tests (§20) run against stub binaries that imitate the tool's flags and output.
 
@@ -665,12 +667,12 @@ All of these must hold, or `aipm build` exits with the code shown:
 - The execution surface is trusted (exit 6 otherwise).
 - `dispatch.enabled` is true (exit 2 otherwise).
 - The adapter's capabilities are present (exit 8 otherwise).
-- The working tree is clean (exit 2 otherwise).
+- The working tree is clean (exit 2 otherwise). aipm's own state under `.pm/` does not count, because aipm itself updates `tasks.yaml` and the worksheet.
 - A budget is configured.
 
 ### 12.2 Branches and worktrees
 
-- **Integration branch.** `git.integration_branch` (default `aipm/integration`) is created from the current HEAD at the first build. The base SHA is recorded in the journal.
+- **Integration branch.** `git.integration_branch` (default `aipm/integration`) is created from the current HEAD at the first build. The base SHA is recorded in the journal. Its name must start with `aipm/` and must not be under `aipm/task/`, because a repository's config can set it (exit 6 otherwise), and it must not be checked out in any worktree (exit 2). When it is an ancestor of the current HEAD at the start of a build, it is fast-forwarded to HEAD; when the two have diverged, build warns.
 - **Task attempts.** Each task attempt runs on branch `aipm/task/<TASK>`, in a worktree outside the repo (§6.1), created from the integration branch's HEAD.
 - **User branches.** aipm never commits to the user's branches. Integration into them happens only through `aipm merge` (fast-forward only, after confirmation).
 - **No remotes.** aipm never pushes and never edits remotes.
