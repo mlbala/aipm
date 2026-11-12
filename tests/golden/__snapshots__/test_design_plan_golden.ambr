@@ -313,7 +313,7 @@
     features: F-001 (must): Book an appointment with a one-time code; F-002 (must): WhatsApp confirmation and reminders; F-003 (must): Move or cancel from a link; F-004 (must): Reception schedule view; F-005 (should): Monthly report
     threats (medium or higher): TM-01 (high): One-time code brute force; TM-02 (medium): Forged WhatsApp webhook calls; TM-03 (high): Patient data exposed through move and cancel links
   
-  Spend: not recorded yet (arrives with builds in v0.3); budget $10.00 per run, $2.00 per task, 2000000 tokens per run
+  Spend: not recorded yet (no build has run); budget $10.00 per run, $2.00 per task, 2000000 tokens per run
   
   All tasks:
     T-001 [done] S Project skeleton and settings

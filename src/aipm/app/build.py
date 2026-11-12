@@ -144,7 +144,7 @@ def _flags(options: BuildOptions) -> dict[str, object]:
     return flags
 
 
-def _require_clean(root: Path) -> None:
+def require_clean(root: Path) -> None:
     """Exit 2 when anything outside `.pm/` differs from HEAD or is untracked."""
     dirty = [
         e.path or "(a name aipm cannot read)"
@@ -321,7 +321,7 @@ def run(
             raise UsageError("there is no plan to build", hint="Run `aipm plan` first.")
         if options.kind == "run" and options.task_id is not None:
             _check_run_task(tasks, options.task_id)
-        _require_clean(root)
+        require_clean(root)
         git.check_repo_config(root)
         settings = _settings(root, cfg, options, only, approval)
         _detect(adapter, root, cfg, dry_run=options.dry_run)

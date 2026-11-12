@@ -5,8 +5,11 @@ it appends an `ack` event for an ID this machine recorded in `.pm/events.jsonl` 
 itself an acknowledgement and is not acknowledged yet (§6.1).
 """
 
+import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from aipm.app import runtime
 from aipm.app.snapshot import load_state
@@ -16,7 +19,13 @@ from aipm.domain.errors import UsageError
 from aipm.domain.ids import is_valid_id
 from aipm.domain.models import SecurityEventKind, Task
 from aipm.domain.phase import derive_phase
-from aipm.reporting.status import StatusView, build_status, render_status, render_task
+from aipm.reporting.status import (
+    SpendRecord,
+    StatusView,
+    build_status,
+    render_status,
+    render_task,
+)
 from aipm.state.store import FileStateStore
 
 
@@ -62,6 +71,31 @@ def _ack(store: FileStateStore, event_id: str) -> StatusResult:
     return StatusResult(lines=(f"Acknowledged {event_id}.",), acked=event_id)
 
 
+MAX_COST_BYTES = 65_536
+
+
+def latest_spend(store: FileStateStore) -> SpendRecord | None:
+    """The newest build's `cost.json`, read only if aipm wrote it (the write ledger)."""
+    for run_id in reversed(store.run_ids()):
+        text = store.read_run_text(run_id, ["cost.json"], limit=MAX_COST_BYTES)
+        if text is None:
+            continue
+        try:
+            raw: object = json.loads(text)
+        except ValueError:
+            continue
+        data = cast("dict[str, object]", raw) if isinstance(raw, dict) else {}
+        usd, tokens = data.get("spent_usd"), data.get("tokens_used")
+        if isinstance(usd, bool) or not isinstance(usd, int | float):
+            continue
+        value = float(usd)
+        if not math.isfinite(value) or value < 0:
+            continue
+        count = tokens if isinstance(tokens, int) and not isinstance(tokens, bool) else 0
+        return SpendRecord(run_id, value, max(count, 0))
+    return None
+
+
 def run(
     project: Path | None, *, show_all: bool, task_id: str | None, ack: str | None
 ) -> StatusResult:
@@ -76,7 +110,9 @@ def run(
     loaded = load_config(root)
     state = load_state(store, loaded=loaded)
     phase = derive_phase(state.snapshot)
-    view = build_status(state.snapshot, phase, store.read_events(), loaded.config.budget)
+    view = build_status(
+        state.snapshot, phase, store.read_events(), loaded.config.budget, latest_spend(store)
+    )
     if task_id is not None:
         task = next((t for t in view.tasks if t.id == task_id), None)
         if task is None:

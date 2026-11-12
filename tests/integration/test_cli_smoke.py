@@ -75,10 +75,10 @@ V02_COMMANDS: dict[str, list[str]] = {
 V03_COMMANDS: dict[str, list[str]] = {
     "run": ["run", "T-001"],
     "build": ["build"],
+    "merge": ["merge"],
 }
 
 LATER_COMMANDS: dict[str, tuple[list[str], str]] = {
-    "merge": (["merge"], "v0.3"),
     "auto": (["auto"], "v0.4"),
 }
 
@@ -152,7 +152,7 @@ def test_v02_commands_are_no_longer_stubs(command: str, tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("command", sorted(V03_COMMANDS))
 def test_v03_commands_are_no_longer_stubs(command: str, tmp_path: Path) -> None:
-    """Built in prompt 07: run and build answer like every built command."""
+    """Built in prompt 07: run, build and merge answer like every built command."""
     result = runner.invoke(app, ["-C", str(tmp_path), *V03_COMMANDS[command]])
     assert result.exit_code == 2
     assert "available in" not in result.stderr
