@@ -101,6 +101,9 @@ def main(
         no_cache=no_cache,
         trace=trace,
     )
+    from aipm.app import session
+
+    session.configure(project=project, plugins=not no_plugins)
     if ctx.invoked_subcommand is None:
         phase.show(ctx)
 
