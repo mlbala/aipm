@@ -9,6 +9,10 @@ delay the call by at most `DRAIN_S`, and only the sandbox contains it.
 Each of stdout and stderr is capped at `max_output_bytes`; the excess is read and dropped, and
 the drop is recorded. A sandbox profile is applied here through `sandbox.wrap`, so a caller cannot
 forget it; a profile that names no sandbox program is refused (exit 8), never ignored.
+
+Every process group started here is registered while it runs, so `signal_running` can stop all
+of them at once, whichever thread or event loop started them: the build loop's Ctrl-C handling
+sends SIGTERM, then SIGKILL (ARCHITECTURE §12.6). A stopped call returns its result as usual.
 """
 
 import asyncio
@@ -153,6 +157,37 @@ def _signal_group(pid: int, sig: signal.Signals) -> None:
         os.killpg(pid, sig)
 
 
+_running: set[int] = set()
+_running_lock = threading.Lock()
+
+
+def _track(pid: int) -> None:
+    with _running_lock:
+        _running.add(pid)
+
+
+def _untrack(pid: int) -> None:
+    with _running_lock:
+        _running.discard(pid)
+
+
+def running_groups() -> tuple[int, ...]:
+    """The process groups started here that have not finished yet, in PID order."""
+    with _running_lock:
+        return tuple(sorted(_running))
+
+
+def signal_running(sig: signal.Signals) -> int:
+    """Send `sig` to every process group started here that is still running; return how many.
+
+    The calls that started them notice their leader's exit and return as they would otherwise.
+    """
+    groups = running_groups()
+    for pid in groups:
+        _signal_group(pid, sig)
+    return len(groups)
+
+
 def _result(
     argv: tuple[str, ...],
     returncode: int | None,
@@ -238,6 +273,22 @@ def run_safe(
         close_fds=True,
         shell=False,
     )
+    _track(proc.pid)
+    try:
+        return _finish(proc, checked, captures, stdin, timeout_s=timeout_s, start=start)
+    finally:
+        _untrack(proc.pid)
+
+
+def _finish(
+    proc: "subprocess.Popen[bytes]",
+    checked: tuple[str, ...],
+    captures: tuple[_Capture, _Capture],
+    stdin: bytes | None,
+    *,
+    timeout_s: float,
+    start: float,
+) -> ProcessResult:
     # Popen with PIPE always creates these streams.
     out, err = cast("IO[bytes]", proc.stdout), cast("IO[bytes]", proc.stderr)
     threads = [
@@ -361,6 +412,22 @@ async def run_safe_async(
         start_new_session=True,
         close_fds=True,
     )
+    _track(proc.pid)
+    try:
+        return await _afinish(proc, checked, captures, stdin, timeout_s=timeout_s, start=start)
+    finally:
+        _untrack(proc.pid)
+
+
+async def _afinish(
+    proc: asyncio.subprocess.Process,  # noqa: TID251
+    checked: tuple[str, ...],
+    captures: tuple[_Capture, _Capture],
+    stdin: bytes | None,
+    *,
+    timeout_s: float,
+    start: float,
+) -> ProcessResult:
     out = cast("asyncio.StreamReader", proc.stdout)
     err = cast("asyncio.StreamReader", proc.stderr)
     tasks = [
