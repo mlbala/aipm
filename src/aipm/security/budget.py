@@ -2,7 +2,9 @@
 
 - **Run USD.** Checked before each dispatch: the spend so far, plus `task_usd` for every
   attempt still running, plus `task_usd` for the next one, may not pass `run_usd`. When it
-  would, the build stops scheduling, lets the running attempts finish and exits 5.
+  would, the build stops scheduling, lets the running attempts finish and exits 5. A task holds
+  its `task_usd` from the moment it is scheduled, so a parallel batch never starts more tasks
+  than the budget can dispatch (red-team v0.3).
 - **Task USD.** Passed to the agent (`--max-budget-usd`); an attempt whose cost is unknown is
   charged in full.
 - **Tokens.** `run_tokens` bounds aipm's own LLM roles (the AC reviewer) for the whole run;
@@ -68,13 +70,18 @@ class Spend:
         """`task_usd` for each attempt still running."""
         return sum(self.reserved.values())
 
-    def may_dispatch(self) -> bool:
-        """Whether one more attempt fits in the run budget."""
-        total = self.spent_usd + self.reserved_usd + self.budget.task_usd
+    def may_dispatch(self, *, held: str | None = None) -> bool:
+        """Whether one more attempt fits in the run budget; `held` names a hold that attempt
+        would use (its task's, taken when the task was scheduled)."""
+        reserved = self.reserved_usd - (self.reserved.get(held, 0.0) if held else 0.0)
+        total = self.spent_usd + reserved + self.budget.task_usd
         return total <= self.budget.run_usd + _SLACK
 
-    def reserve(self, key: str) -> None:
-        """Hold `task_usd` for the attempt `key`; exit 5 when it does not fit."""
+    def reserve(self, key: str, *, held: str | None = None) -> None:
+        """Hold `task_usd` for the attempt `key`, in place of the hold `held` when given; exit
+        5 when it does not fit."""
+        if held is not None:
+            self.reserved.pop(held, None)
         check_budget(
             spent_usd=self.spent_usd,
             limit_usd=self.budget.run_usd,
@@ -82,6 +89,10 @@ class Spend:
             next_usd=self.budget.task_usd,
         )
         self.reserved[key] = self.budget.task_usd
+
+    def release(self, key: str) -> None:
+        """Drop the hold `key`, unspent (a scheduled task that never dispatched)."""
+        self.reserved.pop(key, None)
 
     def settle(self, key: str, cost_usd: float) -> None:
         """Release the hold of `key` and add what the attempt cost."""

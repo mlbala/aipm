@@ -47,6 +47,7 @@ from aipm.execution.process import is_inside
 from aipm.execution.sandbox import resolve_sandbox
 from aipm.execution.worktree import WorktreeManager, check_integration_branch
 from aipm.security.budget import RunBudget
+from aipm.state.done_record import claimed
 
 MAX_PARALLEL = 8
 MAX_ONLY = 200
@@ -326,6 +327,13 @@ def run(
             raise UsageError("there is no plan to build", hint="Run `aipm plan` first.")
         if options.kind == "run" and options.task_id is not None:
             _check_run_task(tasks, options.task_id)
+        claimed_ids = claimed(root, tasks.tasks)
+        if claimed_ids:
+            # They still unlock the tasks after them (red-team v0.3, the owner's choice).
+            warnings.append(
+                f"done by the repository's claim only, with no gate passed on this machine: "
+                f"{', '.join(claimed_ids)}; review them, or `aipm task reset` them"
+            )
         require_clean(root)
         git.check_repo_config(root)
         settings = _settings(root, cfg, options, only, approval)

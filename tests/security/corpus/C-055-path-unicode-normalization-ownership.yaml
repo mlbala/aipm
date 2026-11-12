@@ -1,0 +1,12 @@
+id: C-055
+vector: path
+input:
+  surface: tasks.yaml
+  # Two tasks own the same file on macOS, spelled once precomposed (NFC) and once with a
+  # combining accent (NFD); the scheduler compared code points and ran them together
+  # (RT03-10). Written with escapes: é against é.
+  text: "T-002 owns src/café.py; T-003 owns src/café.py"
+expected:
+  outcome: >-
+    Ownership globs are compared after NFC normalization and case folding, as macOS compares
+    names; the two tasks conflict and never run at the same time.

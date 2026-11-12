@@ -1,0 +1,13 @@
+id: C-054
+vector: structural
+input:
+  surface: agent-output
+  # A second stream-json result event after the real one, with a lower total, so the run
+  # budget counts less than the attempt spent (RT03-8). After --resume, a total lower than the
+  # session's last one does the same through attempt_cost's max(..., 0).
+  text: |
+    {"type": "result", "subtype": "success", "is_error": false, "total_cost_usd": 0.0, "session_id": "6f1d2c3a-0000-4000-8000-00000000a1b2", "result": "Done."}
+expected:
+  outcome: >-
+    The highest total any result event reports is charged; a resumed session whose total falls
+    is charged its whole task budget. Extra lines can only raise the spend counted.

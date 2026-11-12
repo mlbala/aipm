@@ -133,11 +133,13 @@ SIGNING_DEFAULTS: tuple[tuple[str, str], ...] = (
 AGENT_CONFIG_WATCH: tuple[str, ...] = (
     ".claude/settings.json", ".claude/settings.local.json", ".claude/CLAUDE.md",
     ".claude/hooks", ".claude/agents", ".claude/skills", ".claude/commands",
+    ".claude/daemon.json",
     ".codex/config.toml", ".codex/AGENTS.md", ".codex/skills",
     ".gemini/settings.json", ".gemini/GEMINI.md", ".copilot/config.json",
 )  # fmt: skip
 """Agents' global settings, hooks and skills hashed before and after an attempt (SECURITY.md
-§9.1). Plugin caches, which agents update on their own, are left out."""
+§9.1), and the workers Claude Code's background service starts (`daemon.json`, red-team v0.3).
+Plugin caches, which agents update on their own, are left out."""
 GLOBAL_GIT_FILES: tuple[str, ...] = (".gitconfig",)
 XDG_GIT_FILES: tuple[str, ...] = ("git/config", "git/attributes", "git/ignore")
 MAX_INCLUDE_DEPTH = 10
@@ -146,10 +148,108 @@ MAX_WATCHED_CONFIGS = 64
 _KEY = re.compile(r"([A-Za-z][A-Za-z0-9-]*)\s*(?:=(.*))?", re.DOTALL)
 
 
+CONFIG_HOOKS_FROM = (2, 54)
+"""The first git that runs hooks named in config (`hook.<name>.command`)."""
+HOOK_SWITCH_FROM = (2, 55)
+"""The first git that honours `hook.<event>.enabled=false`. git 2.54 (Apple Git-157 among them)
+ignores it and runs a hook the user's global config names during aipm's commits (red-team v0.3,
+tested; O-3 of the v0.2 review)."""
+_GIT_VERSION = re.compile(r"\bgit version (\d{1,4})\.(\d{1,4})")
+_HOOK_COMMAND = re.compile(r"hook\.(.+)\.command", re.DOTALL)
+_versions: dict[str, tuple[int, int] | None] = {}
+_hooks_seen: dict[tuple[str, str], tuple[str, ...]] = {}
+
+
+def parse_version(output: str) -> tuple[int, int] | None:
+    """`(major, minor)` from `git --version` output, or `None` when aipm cannot read it."""
+    match = _GIT_VERSION.search(output)
+    return None if match is None else (int(match.group(1)), int(match.group(2)))
+
+
+def version_problem(output: str) -> str | None:
+    """What limits the git that printed `output` (`git --version`), or `None`.
+
+    A version aipm cannot read is refused (fail closed). git 2.54 runs hooks named in config
+    and cannot be told not to, so aipm refuses it whenever a config it reads names one.
+    """
+    version = parse_version(output)
+    if version is None:
+        return "aipm cannot read the version git reports"
+    if CONFIG_HOOKS_FROM <= version < HOOK_SWITCH_FROM:
+        return (
+            f"git {version[0]}.{version[1]} cannot turn off hooks named in git config, so aipm "
+            "refuses to run it while one is configured"
+        )
+    return None
+
+
+def git_version(git: str) -> tuple[int, int]:
+    """The version of the git at `git`, checked once per path; exit 8 when aipm cannot read it.
+    `git --version` reads no repository, so it runs from the filesystem root."""
+    if git not in _versions:
+        result = run_safe(
+            [git, "--version"],
+            cwd=Path(os.sep),
+            env=build_env(extra=GIT_ENV),
+            timeout_s=GIT_TIMEOUT_S,
+            max_output_bytes=4096,
+        )
+        text = result.stdout.decode("utf-8", errors="replace") if result.returncode == 0 else ""
+        _versions[git] = parse_version(text)
+    version = _versions[git]
+    if version is None:
+        raise MissingCapability(
+            f"aipm cannot read the version git reports ({git})",
+            hint="Install git from your package manager or git-scm.com.",
+        )
+    return version
+
+
+def config_hooks(git: str, repo: Path) -> tuple[str, ...]:
+    """The config hooks git would run in `repo`: every `hook.<name>.command` in any config it
+    reads there (global and included files, conditional includes for this repository).
+    Checked once per git and repository."""
+    key = (git, os.path.realpath(repo))
+    if key not in _hooks_seen:
+        cwd = repo if repo.is_dir() else Path(os.sep)
+        result = run_safe(
+            [git, *HARDENING, "config", "--list", "--includes", "--name-only", "-z"],
+            cwd=cwd,
+            env=build_env(extra=GIT_ENV),
+            timeout_s=GIT_TIMEOUT_S,
+            max_output_bytes=1_048_576,
+        )
+        if result.returncode != 0 or result.timed_out or result.truncated:
+            raise MissingCapability(f"aipm cannot list the git config hooks in {repo}")
+        names = [n.decode("utf-8", errors="replace") for n in _fields(result.stdout)]
+        found = sorted({m.group(1) for n in names if (m := _HOOK_COMMAND.fullmatch(n))})
+        _hooks_seen[key] = tuple(found)
+    return _hooks_seen[key]
+
+
+def check_git_version(git: str, repo: Path) -> None:
+    """Exit 8 for a git aipm cannot make safe: one whose version it cannot read, or a git 2.54
+    in whose config (as `repo` sees it) a hook is named, since 2.54 ignores the switch aipm
+    sets on every call (red-team v0.3, the owner's choice for O-3)."""
+    version = git_version(git)
+    if not CONFIG_HOOKS_FROM <= version < HOOK_SWITCH_FROM:
+        return
+    hooks = config_hooks(git, repo)
+    if hooks:
+        names = ", ".join(repr(h)[:60] for h in hooks[:5])
+        raise MissingCapability(
+            f"git {version[0]}.{version[1]} ({git}) would run the hooks your git config names "
+            f"({names}) during aipm's git calls; it cannot be told not to",
+            hint="Install git 2.55 or later, or remove the hook.<name>.command settings from "
+            "your git config.",
+        )
+
+
 def git_argv(repo: Path, *args: str) -> list[str]:
     """`git` (resolved on PATH), the hardening options, then `args`.
 
-    Exit 8 without git; exit 6 if the `git` found on PATH lies inside the repository.
+    Exit 8 without git, or for a git aipm cannot make safe (`check_git_version`); exit 6 if
+    the `git` found on PATH lies inside the repository.
     """
     git = shutil.which("git")
     if git is None:
@@ -159,6 +259,7 @@ def git_argv(repo: Path, *args: str) -> list[str]:
             f"the git found on PATH ({git}) is inside the repository",
             hint="Remove relative or repository entries from PATH.",
         )
+    check_git_version(git, repo)
     return [git, *HARDENING, *args]
 
 

@@ -20,6 +20,7 @@ from aipm.config.loader import load_config
 from aipm.config.schema import Config
 from aipm.domain.errors import AipmError, LockHeld
 from aipm.domain.models import ArtifactKind
+from aipm.execution.git import version_problem
 from aipm.execution.process import build_env, run_safe
 from aipm.security.sanitize import sanitize_text
 from aipm.state.layout import ARTIFACT_FILES, pm_root, repo_id
@@ -73,7 +74,12 @@ def _tool(name: str, workdir: Path) -> dict[str, object]:
     output = (result.stdout or result.stderr).decode("utf-8", errors="replace")
     first = next((line for line in output.splitlines() if line.strip()), "")
     version = _clean(first) if result.returncode == 0 and first else None
-    return {"name": name, "found": True, "path": _clean(path), "version": version}
+    found: dict[str, object] = {"name": name, "found": True, "path": _clean(path),
+                                "version": version}  # fmt: skip
+    if name == "git":
+        # What limits this git (red-team v0.3, O-3): 2.54 runs only while no config hook is set.
+        found["problem"] = version_problem(output if result.returncode == 0 else "")
+    return found
 
 
 def _artifacts(root: Path) -> dict[str, str]:
@@ -195,6 +201,8 @@ class _Sections:
                 continue
             version = tool["version"] or "version unknown"
             lines.append(f"  {tool['name']!s:<12} {version}  ({tool['path']})")
+            if tool.get("problem"):
+                lines.append(f"    note: {tool['problem']}")
         lines.append("API key variables (values are never shown):")
         lines.extend(
             f"  {name}: {'set' if found else 'not set'}" for name, found in self.keys.items()

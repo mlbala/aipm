@@ -25,6 +25,9 @@ All notable changes to aipm are recorded here. The format follows [Keep a Change
 - `install.sh`.
 - ADR-0020 (`srt` runs commands through a shell) and ADR-0021 (attempt snapshots and the `.pm/` write ledger); residual risk R-10.
 
+- `aipm status`, `status --task` and `build --dry-run` flag a done task that this machine has no record of finishing as *claimed by the repository* (a cloned `tasks.yaml`). It still unlocks the tasks after it.
+- `aipm doctor` says when the git found is 2.54, which aipm refuses while a config hook is set.
+
 ### Fixed
 
 - `aipm status` with no build yet says "no build has run" instead of naming the milestone (the status snapshot changed on purpose).
@@ -32,6 +35,20 @@ All notable changes to aipm are recorded here. The format follows [Keep a Change
 - A directory where aipm expected a file (a `.gitignore` directory in a cloned repository, a trust store path) is refused instead of crashing.
 
 ### Security
+
+The v0.3 red-team pass ([docs/security/reviews/v0.3.md](docs/security/reviews/v0.3.md)) found ten problems (two medium, seven low, one info), all fixed, and settled O-3 of the v0.2 review (the last item):
+
+- A dispatched agent, and the gates and prepare step of a build, could read the main checkout's ignored `.env`, keys and data by absolute path: the sandbox denied only its `.pm/`. Every top-level entry of the main checkout except `.git` is now denied (ADR-0024).
+- A dispatched agent could read the coding agents' logins (`~/.claude.json`, which holds an API key typed at `/login`, `~/.claude/.credentials.json`, `~/.codex/auth.json`, `~/.gemini/oauth_creds.json`), other token files and shell histories. With its own config home it may no longer read the agent homes, and those files are credential paths for every process.
+- Under `--parallel`, an agent could read a task's worktree and transcript if that task started after it, and the rebase worktree. Every other task is now denied by name.
+- Files Claude Code runs or obeys without asking (`shell-snapshots/`, `session-env/`, `daemon.json`, `.claude.json`), written in the agent's config home by gate code it ran, survived into the `--resume` attempt. The config home is now emptied of everything but the session transcripts before each attempt.
+- `~/.claude/daemon.json`, whose workers Claude Code's background service starts outside any sandbox, was not watched; changing it is now a severe violation.
+- A git repository created inside the worktree was refused only by accident, after a commit. It is now a severe violation before any gate runs, and so is a changed submodule pointer.
+- A forged second `result` event with a lower total, or a resumed session whose total falls, under-counted the run budget. The highest total is charged, and a falling one costs the task budget.
+- Under `--parallel`, tasks scheduled past the budget were blocked (`budget_exceeded`) instead of left `todo`. A task now holds its budget from scheduling.
+- Ownership globs that differ only in Unicode normalization (`é` precomposed or with a combining accent) looked disjoint, so two tasks that own one macOS file ran together. Globs are now compared after NFC normalization and case folding.
+- A rebase that merged a verified file with another change of it was accepted. Every verified file must now keep the content the gates saw.
+- git 2.54 ignores `hook.<event>.enabled=false` (tested on Apple Git-157), so a hook in your global git config ran during aipm's commits. aipm now refuses git 2.54 (exit 8) while any config it reads names a hook (v0.2 review, O-3).
 
 Dispatch (v0.3):
 

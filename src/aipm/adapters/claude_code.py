@@ -243,28 +243,43 @@ class _ResultEvent(StrictModel):
 _RESULT_KEYS = ("type", "subtype", "is_error", "total_cost_usd", "session_id", "result")
 
 
+def _total(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) and number >= 0 else None
+
+
 def _last_result(stdout: bytes) -> _ResultEvent | None:
-    for raw in reversed(stdout.splitlines()):
+    """The last `result` event, charged the highest total any `result` event reports.
+
+    Claude Code prints one per `-p` run. A second line (forged after the real one, with a lower
+    total) could otherwise have lowered what the run budget counts; now extra lines can only
+    raise it (red-team v0.3).
+    """
+    found: list[dict[str, object]] = []
+    for raw in stdout.splitlines():
         if len(raw) > MAX_RESULT_LINE or b'"result"' not in raw:
             continue
         try:
             data: object = json.loads(raw)
         except ValueError:
             continue
-        if not isinstance(data, dict):
-            continue
-        fields = cast("dict[str, object]", data)
-        if fields.get("type") != "result":
-            continue
-        picked = {k: fields[k] for k in _RESULT_KEYS if k in fields}
-        text = picked.get("result")
-        if isinstance(text, str) and len(text) > MAX_RESULT_TEXT:
-            picked["result"] = text[-MAX_RESULT_TEXT:]  # the blocker line is at the end
-        try:
-            return _ResultEvent.model_validate(picked)
-        except ValidationError:
-            return None
-    return None
+        if isinstance(data, dict) and cast("dict[str, object]", data).get("type") == "result":
+            found.append(cast("dict[str, object]", data))
+    if not found:
+        return None
+    picked = {k: found[-1][k] for k in _RESULT_KEYS if k in found[-1]}
+    totals = [t for t in (_total(f.get("total_cost_usd")) for f in found) if t is not None]
+    if _total(picked.get("total_cost_usd")) is not None:
+        picked["total_cost_usd"] = max(totals)
+    text = picked.get("result")
+    if isinstance(text, str) and len(text) > MAX_RESULT_TEXT:
+        picked["result"] = text[-MAX_RESULT_TEXT:]  # the blocker line is at the end
+    try:
+        return _ResultEvent.model_validate(picked)
+    except ValidationError:
+        return None
 
 
 def blocked_question(text: str) -> str | None:
@@ -463,12 +478,15 @@ class ClaudeCodeAdapter:
             names += REQUIRED_ENV
         extra = {"CLAUDE_CONFIG_DIR": str(ws.config_home), "TMPDIR": str(ws.temp_dir), **AGENT_ENV}
         context = ws.context_text or "Follow the task prompt.\n"
+        caps = self._ready
+        programs = () if caps is None else tuple(caps.launcher or (caps.path or "",))
         return Invocation(
             argv=tuple(argv),
             stdin=stdin,
             env=build_env(names, extra=extra),
             files=((context_file, context),),
             api_domains=API_DOMAINS,
+            programs=tuple(p for p in programs if p),
         )
 
     def parse_result(self, out: ProcessResult) -> AgentResult:

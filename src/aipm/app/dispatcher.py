@@ -6,14 +6,20 @@ the agent runs through `run_safe_async`: in its worktree, with the built environ
 attempt's timeout, a 2 MB output cap and, when `srt` is available, the agent sandbox profile:
 
 - writes: the worktree, the agent's temp dir and its config home (not the settings there);
-- reads denied: credential directories, the main repository's `.pm/`, other tasks' worktrees;
+- reads denied: credential directories, the agents' own homes, every top-level entry of the
+  main checkout except `.git`, every other task's worktree and config home, and the rebase
+  directory (ADR-0024);
 - network: the agent's profile (`api-only`: the tool's API domains only).
+
+Before each attempt the config home is emptied of everything but the session transcripts, so
+nothing Claude Code would run or obey without asking survives from one attempt to the next.
 
 Without a sandbox the caller has already printed the warning (SECURITY.md §9.1), and the
 post-change checks still decide what the agent's changes are worth.
 """
 
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +33,8 @@ from aipm.execution.sandbox import (
     ProcessKind,
     ProfilePaths,
     Runtime,
+    main_repo_entries,
+    path_dirs,
     profile_for,
 )
 from aipm.security.command_policy import check_forbidden_flags
@@ -46,13 +54,19 @@ class Dispatch:
 
 @dataclass(frozen=True, slots=True)
 class Isolation:
-    """What the agent's sandbox keeps it from: everything but its own worktree."""
+    """What the agent's sandbox keeps it from: everything but its own worktree.
+
+    `other_worktrees` names every other task's worktree and config home, whether it exists yet
+    or not, and the directory rebases run in; `main_repo` is the main checkout, of which the
+    agent may read only `.git` (ADR-0024).
+    """
 
     runtime: Runtime | None
     home: Path
     main_pm: Path
     other_worktrees: tuple[Path, ...]
     network: NetworkProfile
+    main_repo: Path | None = None
 
 
 def agent_network(profile: NetworkProfile, api_domains: tuple[str, ...]) -> NetworkPolicy:
@@ -79,6 +93,33 @@ def config_home_hashes(config_home: Path) -> dict[str, str | None]:
     return {rel: git.hash_path(config_home / rel) for rel in CONFIG_HOME_PROTECTED}
 
 
+CONFIG_HOME_KEEP: frozenset[str] = frozenset({"projects"})
+"""What survives from one attempt to the next in the agent's config home: the session
+transcripts `--resume` reads (red-team v0.3)."""
+
+
+def reset_config_home(config_home: Path) -> None:
+    """Remove everything but `CONFIG_HOME_KEEP` from the agent's config home, never following a
+    link (red-team v0.3).
+
+    Claude Code runs `shell-snapshots/` and `session-env/` before every Bash command, its
+    background service starts what `daemon.json` and `daemon/` list, and `.claude.json` holds
+    per-project tool grants and trust. Gate code the agent ran can write any of them, so none
+    may reach the next attempt; Claude Code makes what it needs again.
+    """
+    try:
+        entries = list(os.scandir(config_home))
+    except FileNotFoundError:
+        return
+    for entry in entries:
+        if entry.name in CONFIG_HOME_KEEP and entry.is_dir(follow_symlinks=False):
+            continue
+        if entry.is_dir(follow_symlinks=False):
+            shutil.rmtree(entry.path)
+        else:
+            Path(entry.path).unlink()
+
+
 async def dispatch(
     adapter: ToolAdapter,
     prompt: RenderedTaskPrompt,
@@ -93,6 +134,11 @@ async def dispatch(
         write_new(path, text)
     profile = None
     if isolation.runtime is not None:
+        programs = tuple(Path(p) for p in invocation.programs)
+        keep = (ws.root, ws.temp_dir, ws.context_dir, ws.config_home, *programs, *path_dirs())
+        main = (
+            () if isolation.main_repo is None else main_repo_entries(isolation.main_repo, keep=keep)
+        )
         paths = ProfilePaths(
             workspace=ws.root,
             temp_dir=ws.temp_dir,
@@ -100,6 +146,8 @@ async def dispatch(
             config_home=ws.config_home,
             main_pm=isolation.main_pm,
             other_worktrees=isolation.other_worktrees,
+            extra_deny_read=main,
+            keep_readable=programs,
         )
         network = agent_network(isolation.network, invocation.api_domains)
         profile = profile_for(ProcessKind.AGENT, network, paths, runtime=isolation.runtime)

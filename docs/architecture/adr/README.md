@@ -27,6 +27,7 @@ One file per decision, using the template below. A new ADR is proposed in a pull
 | [ADR-0021](0021-attempt-snapshot-and-pm-write-ledger.md) | Manual-mode attempt snapshots and the `.pm/` write ledger live outside the repository | Accepted |
 | [ADR-0022](0022-repository-git-config-cannot-run-programs.md) | A repository's own git config cannot make aipm's git calls run a program | Accepted |
 | [ADR-0023](0023-claude-code-dispatch-flags.md) | Claude Code dispatch reads no repository or user settings | Accepted |
+| [ADR-0024](0024-a-dispatched-agent-reads-only-its-worktree.md) | A dispatched agent reads only its own worktree | Accepted |
 
 ## Template
 

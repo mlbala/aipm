@@ -93,6 +93,7 @@ from aipm.security.diff_checks import (
 )
 from aipm.security.sanitize import sanitize_text
 from aipm.state.attempts import AttemptSnapshot, load_snapshot
+from aipm.state.done_record import record_done
 from aipm.state.store import FileStateStore
 from aipm.state.yamlio import dump_yaml
 
@@ -404,6 +405,7 @@ class _Verify:
             data: dict[str, JsonValue] = {"gate": g.name, "status": g.status.value}
             events.append((JournalEventType.GATE_RESULT, data))
         update: dict[str, object] = {"attempts": result.attempt}
+        finished: Done | None = None
         if done:
             if options.commit:
                 result.commit = self._commit(task, result, changes)
@@ -414,7 +416,9 @@ class _Verify:
             update |= {"status": TaskStatus.DONE, "blocked": None, "done": finished}
         _save_run(self.store, result, gate_run.outputs, events)
         _save_tasks(self.store, tasks, task.model_copy(update=update))
-        if done:
+        if finished is not None:
+            # A local record that this machine saw it pass (red-team v0.3).
+            record_done(self.root, task.id, finished)
             return result
         raise self._failure(task, result, gate_run, held=held)
 

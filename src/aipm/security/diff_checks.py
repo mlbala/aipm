@@ -32,7 +32,14 @@ from functools import cache
 from typing import Any, cast
 
 from aipm.domain.dag import JS_TEST_RUNNER_CONFIG, TEST_FILE_PATTERNS
-from aipm.domain.models import ChangeSet, ChangeStatus, Ecosystem, FileChange, Task
+from aipm.domain.models import (
+    GITLINK_MODE,
+    ChangeSet,
+    ChangeStatus,
+    Ecosystem,
+    FileChange,
+    Task,
+)
 from aipm.security.paths import is_protected, protected_patterns
 
 
@@ -1084,6 +1091,12 @@ def _check_path(change: FileChange, task: Task, policy: CheckPolicy) -> list[Vio
     patterns = policy.protected()
     if is_protected(path, patterns):
         return [Violation(Kind.PROTECTED_PATH, path, f"protected path {change.status.value}")]
+    if path.endswith("/") or GITLINK_MODE in (change.mode, change.base_mode):
+        # git lists a repository made inside the work tree as `dir/`; committed, it would be a
+        # gitlink to code no gate saw in the commit, with an agent-written `.git/config` git
+        # treats as a submodule's (red-team v0.3). aipm never moves a submodule either.
+        detail = "a git repository or submodule inside the work tree changed"
+        return [Violation(Kind.GIT_INTEGRITY, path, detail)]
     found: list[Violation] = []
     if change.link_escapes:
         found.append(Violation(Kind.SYMLINK, path, "symbolic link resolves outside the workspace"))

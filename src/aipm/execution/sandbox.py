@@ -48,16 +48,33 @@ CREDENTIAL_PATHS: tuple[str, ...] = (
     "Library/Application Support/Google/Chrome", "Library/Application Support/Firefox",
     "Library/Application Support/BraveSoftware", "Library/Safari",
     ".config/google-chrome", ".config/chromium", ".mozilla",
+    # Red-team v0.3 (ADR-0024): the agents' login tokens, where Claude Code keeps an API key
+    # typed at /login (`~/.claude.json`), other well-known token files, and shell and REPL
+    # histories, where tokens typed on a command line end up.
+    ".claude.json", ".claude/.credentials.json", ".codex/auth.json",
+    ".gemini/oauth_creds.json", ".gemini/google_accounts.json",
+    ".vault-token", ".pgpass", ".my.cnf", ".terraform.d/credentials.tfrc.json", ".config/hub",
+    ".m2/settings.xml", ".gradle/gradle.properties", ".fly", ".config/doctl",
+    ".bash_history", ".zsh_history", ".zsh_sessions", ".local/share/fish/fish_history",
+    ".python_history", ".node_repl_history", ".psql_history", ".mysql_history",
+    ".sqlite_history",
 )  # fmt: skip
 """SECURITY.md §3 developer credentials, relative to the home directory."""
 
 AGENT_HOMES: tuple[str, ...] = (".claude", ".codex", ".gemini", ".copilot")
 """The coding agents' global config homes, relative to home. In manual mode they are the agent's
-config home, which gates may not read (SECURITY.md §9.1): some hold login tokens."""
+config home, which gates may not read (SECURITY.md §9.1): some hold login tokens. A dispatched
+agent with a config home of its own may not read them either (ADR-0024), unless its own program
+lies inside one (a Claude Code installed under `~/.claude/local`)."""
+
+MAX_MAIN_ENTRIES = 4096
+"""The most top-level entries of the main repository a profile denies one by one (ADR-0024)."""
 
 AGENT_GLOBAL_CONFIG: tuple[str, ...] = (
     ".claude/settings.json", ".claude/settings.local.json", ".claude/CLAUDE.md",
     ".claude/hooks", ".claude/agents", ".claude/skills", ".claude/commands", ".claude/plugins",
+    ".claude/daemon.json", ".claude/daemon", ".claude/jobs", ".claude/shell-snapshots",
+    ".claude/session-env",
     ".codex/config.toml", ".codex/AGENTS.md", ".codex/skills",
     ".gemini/settings.json", ".gemini/GEMINI.md", ".copilot/config.json",
 )  # fmt: skip
@@ -109,6 +126,9 @@ class ProfilePaths:
     output_dir: Path | None = None
     extra_deny_read: tuple[Path, ...] = ()
     """More paths no process of this profile may read (build gates: the agent's config home)."""
+    keep_readable: tuple[Path, ...] = ()
+    """Paths the process must read (its own program): an agent home that holds one is not
+    denied."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +169,12 @@ def profile_for(
         if paths.config_home is not None:
             allow.append(paths.config_home)
             agent_config = [paths.config_home / rel for rel in CONFIG_HOME_PROTECTED]
+            # With a config home of its own, the agent never needs the user's (ADR-0024).
+            deny_read += [
+                home / rel
+                for rel in AGENT_HOMES
+                if not any(holds(home / rel, keep) for keep in paths.keep_readable)
+            ]
         deny_read += [] if paths.main_pm is None else [paths.main_pm]
         deny_read += list(paths.other_worktrees)
     elif kind is ProcessKind.GATE:
@@ -177,6 +203,50 @@ def profile_for(
         deny_write=tuple(deny_write),
         deny_write_patterns=patterns,
     )
+
+
+def holds(parent: Path, path: Path) -> bool:
+    """Whether `path` is `parent` or lies under it, links resolved on both."""
+    outer = os.path.realpath(parent)
+    inner = os.path.realpath(path)
+    return inner == outer or inner.startswith(outer.rstrip(os.sep) + os.sep)
+
+
+def main_repo_entries(repo: Path, *, keep: Sequence[Path]) -> tuple[Path, ...]:
+    """What a process whose workspace is a task worktree may not read of the main repository
+    (ADR-0024): every top-level entry but `.git`, whose objects and config git in the worktree
+    reads, and the target of every top-level link. The worktree lives outside the repository,
+    so nothing in it needs the main checkout, which holds the user's ignored `.env` and keys.
+
+    An entry that holds a path in `keep` (the process's workspace, temp dir, config home and
+    programs, and the `PATH` directories) is left out, so a repository that is the home
+    directory still runs. More than `MAX_MAIN_ENTRIES` entries exits 6.
+    """
+    root = Path(os.path.realpath(repo))
+    try:
+        names = sorted(entry.name for entry in root.iterdir())
+    except OSError as exc:
+        raise PolicyViolation(f"aipm cannot list the repository {root}: {exc.strerror}") from None
+    if len(names) > MAX_MAIN_ENTRIES:
+        raise PolicyViolation(
+            f"the repository has more than {MAX_MAIN_ENTRIES} top-level entries, more than a "
+            "sandbox profile hides one by one",
+            hint="Move files into directories, or run tasks yourself with `aipm prompt`.",
+        )
+    denied: list[Path] = []
+    for name in names:
+        if name == ".git":
+            continue
+        entry = root / name
+        targets = [entry, Path(os.path.realpath(entry))] if entry.is_symlink() else [entry]
+        denied += [t for t in targets if not any(holds(t, k) for k in keep)]
+    return tuple(denied)
+
+
+def path_dirs() -> tuple[Path, ...]:
+    """The absolute directories on `PATH`, which the programs a process runs come from."""
+    found = (os.environ.get("PATH") or "").split(os.pathsep)
+    return tuple(Path(p) for p in found if p and Path(p).is_absolute())
 
 
 def _literal(paths: Sequence[Path]) -> list[dict[str, object]]:

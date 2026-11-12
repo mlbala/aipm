@@ -26,6 +26,7 @@ from aipm.reporting.status import (
     render_status,
     render_task,
 )
+from aipm.state.done_record import claimed
 from aipm.state.store import FileStateStore
 
 
@@ -110,14 +111,21 @@ def run(
     loaded = load_config(root)
     state = load_state(store, loaded=loaded)
     phase = derive_phase(state.snapshot)
+    tasks = state.snapshot.tasks.tasks if state.snapshot.tasks else []
     view = build_status(
-        state.snapshot, phase, store.read_events(), loaded.config.budget, latest_spend(store)
+        state.snapshot,
+        phase,
+        store.read_events(),
+        loaded.config.budget,
+        latest_spend(store),
+        claimed(root, tasks),
     )
     if task_id is not None:
         task = next((t for t in view.tasks if t.id == task_id), None)
         if task is None:
             raise UsageError(f"there is no task {task_id} in .pm/tasks.yaml")
-        return StatusResult(tuple(render_task(task)), view, task, warnings=state.warnings)
+        lines = render_task(task, claimed=task.id in view.claimed)
+        return StatusResult(tuple(lines), view, task, warnings=state.warnings)
     return StatusResult(
         tuple(render_status(view, show_all=show_all)), view, warnings=state.warnings
     )
