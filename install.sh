@@ -12,7 +12,7 @@
 #   uv tool install git+https://github.com/mlbala/aipm@TAG
 set -eu
 
-TAG="v0.2.0"
+TAG="v0.4.0"
 REPO="https://github.com/mlbala/aipm"
 UV_INSTALLER="https://github.com/astral-sh/uv/releases/download/0.13.6/uv-installer.sh"
 YES=0
