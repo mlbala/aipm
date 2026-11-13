@@ -19,6 +19,7 @@ from aipm.domain.errors import UsageError
 from aipm.domain.ids import is_valid_id
 from aipm.domain.models import SecurityEventKind, Task
 from aipm.domain.phase import derive_phase
+from aipm.execution.journal import build_runs_newest_first
 from aipm.reporting.status import (
     SpendRecord,
     StatusView,
@@ -76,8 +77,9 @@ MAX_COST_BYTES = 65_536
 
 
 def latest_spend(store: FileStateStore) -> SpendRecord | None:
-    """The newest build's `cost.json`, read only if aipm wrote it (the write ledger)."""
-    for run_id in reversed(store.run_ids()):
+    """The newest build's `cost.json`, read only if aipm wrote it (the write ledger). Builds
+    are ordered by their `run_started` time, as resume orders them (RT04-20)."""
+    for run_id, _ in build_runs_newest_first(store):
         text = store.read_run_text(run_id, ["cost.json"], limit=MAX_COST_BYTES)
         if text is None:
             continue

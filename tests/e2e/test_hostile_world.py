@@ -416,8 +416,10 @@ def denied(settings: dict[str, Any]) -> set[str]:
 
 
 def last_journal(repo: Path) -> list[JournalEvent]:
-    run = max((repo / ".pm" / "runs").glob("r-*"), key=lambda p: p.name)
-    return journal(repo, run.name)
+    """The newest build's journal, by its first event's time: run IDs name the minute and a
+    random suffix, and Gemini's flow builds twice in one minute."""
+    runs = [journal(repo, p.name) for p in (repo / ".pm" / "runs").glob("r-*")]
+    return max((r for r in runs if r), key=lambda events: events[0].ts)
 
 
 def check_build(world: World) -> None:
