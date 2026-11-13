@@ -7,7 +7,8 @@
 #   -t TAG  the aipm release to install (default below)
 #
 # It prints what it will do first. If uv is missing, it asks before installing it with uv's
-# official installer; it never pipes a download into a shell. Then it runs
+# official installer; it never pipes a download into a shell. A uv from a relative PATH
+# entry or the active virtualenv is refused. Then it runs
 #   uv tool install git+https://github.com/mlbala/aipm@TAG
 set -eu
 
@@ -17,6 +18,20 @@ UV_INSTALLER="https://astral.sh/uv/install.sh"
 YES=0
 
 fail() { echo "install.sh: $1" >&2; exit "${2:-1}"; }
+
+# The first uv on PATH, but never from a relative entry or the active virtualenv (RT04-18).
+find_uv() {
+  UV=""; IFS=:; set -f
+  for d in $PATH; do
+    [ -f "${d:-.}/uv" ] && [ -x "${d:-.}/uv" ] || continue
+    case "$d" in /*) UV="$d/uv"; break ;; esac
+    fail "refusing the uv in the relative PATH entry '${d:-.}'; remove it from PATH" 2
+  done
+  unset IFS; set +f
+  case "$UV" in "${VIRTUAL_ENV:-/nonexistent}"/*)
+    fail "refusing $UV inside the active virtualenv; deactivate it and run this again" 2 ;;
+  esac
+}
 
 while getopts "yt:h" opt; do
   case "$opt" in
@@ -30,7 +45,7 @@ if ! printf '%s\n' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$
   fail "the tag must look like v1.2.3, not '$TAG'" 2
 fi
 
-UV=$(command -v uv 2>/dev/null || true)
+find_uv
 echo "This will:"
 if [ -n "$UV" ]; then
   echo "  1. use uv at $UV"
@@ -56,7 +71,7 @@ if [ -z "$UV" ]; then
   sh "$installer"
   PATH="$HOME/.local/bin:$PATH"
   export PATH
-  UV=$(command -v uv 2>/dev/null || true)
+  find_uv
   [ -n "$UV" ] || fail "uv was installed but is not on PATH; open a new shell and run this again"
 fi
 

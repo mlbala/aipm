@@ -16,6 +16,8 @@ import pytest
 from ruamel.yaml import YAML
 
 from tests.conftest import REPO_ROOT
+from tests.integration.test_install_sh import env as env  # noqa: PLC0414 - the fixture
+from tests.integration.test_install_sh import run, stub
 
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 RELEASE = WORKFLOWS / "release.yml"
@@ -191,3 +193,47 @@ def test_pin_the_release_job_runs_no_project_code() -> None:
         if run:
             first = shlex.split(run.replace("\\\n", " "))[0]
             assert first in {"sha256sum", "gh"}, run
+
+
+# ------------------------------------------------------------------ RT04-18 (install.sh)
+
+
+def planted_uv(directory: Path, marker: Path) -> Path:
+    """A `uv` a hostile repository ships: it records that it ran."""
+    directory.mkdir(parents=True, exist_ok=True)
+    return stub(directory / "uv", f'echo ran >> "{marker}"')
+
+
+@pytest.mark.parametrize("entry", [".", "", "node_modules/.bin"])
+def test_install_sh_never_runs_uv_from_a_relative_path_entry(
+    env: dict[str, str], tmp_path: Path, entry: str
+) -> None:
+    """RT04-18: the script ran whatever `uv` came first on PATH, without asking. With `.`, an
+    empty entry or another relative entry in PATH, that is the current directory's, which
+    the attacker controls when the user runs it inside a cloned repository."""
+    repo = tmp_path / "repo"
+    marker = tmp_path / "planted.log"
+    planted_uv(repo / (entry or "."), marker)
+    real = tmp_path / "real.log"
+    planted_uv(Path(env["PATH"].split(":")[0]), real)  # the user's uv, later on PATH
+    env = {**env, "PATH": f"{entry}:{env['PATH']}"}
+    code, _, err = run(env, "-t", "v0.4.0", cwd=repo)
+    assert code == 2, err
+    assert "relative" in err
+    assert not marker.exists()
+    assert not real.exists()
+
+
+def test_install_sh_never_runs_uv_from_the_active_virtualenv(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    """RT04-18: an activated virtualenv of a cloned repository puts its `bin` first on PATH."""
+    repo = tmp_path / "repo"
+    venv = repo / ".venv"
+    marker = tmp_path / "planted.log"
+    planted_uv(venv / "bin", marker)
+    env = {**env, "PATH": f"{venv / 'bin'}:{env['PATH']}", "VIRTUAL_ENV": str(venv)}
+    code, _, err = run(env, "-t", "v0.4.0", cwd=repo)
+    assert code == 2, err
+    assert "virtualenv" in err
+    assert not marker.exists()
