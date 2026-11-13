@@ -45,7 +45,11 @@ jobs:
           enable-cache: false
 
       - name: Build the sdist and wheel
-        run: uv build --no-sources --out-dir dist
+        # The build backend is pinned with hashes: uv.lock does not cover it, and a new
+        # hatchling or hatch-vcs release would otherwise run here and be attested.
+        run: >-
+          uv build --no-sources --out-dir dist
+          --build-constraints .github/release/requirements-build.txt --require-hashes
 
       - name: SBOM (CycloneDX)
         run: uv export --frozen --format cyclonedx1.5 --no-dev --all-extras --output-file dist/aipm.cdx.json
