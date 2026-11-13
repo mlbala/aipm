@@ -7,21 +7,27 @@ fix. The "held" sections at the end pin controls the pass attacked without break
 """
 
 import hashlib
+import itertools
 import json
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 from ruamel.yaml import YAML
 
 from aipm.app import auto
 from aipm.app import build as build_use_case
 from aipm.cli import output as cli_output
+from aipm.cli.commands import design as design_command
 from aipm.cli.main import app
 from aipm.config import loader as config_loader
-from aipm.domain.errors import HumanInputRequired, PolicyViolation
+from aipm.config.schema import Config
+from aipm.config.stacks import StackTemplate
+from aipm.domain.errors import AipmError, HumanInputRequired, PolicyViolation
 from aipm.domain.models import (
     APPROVED_NAMES,
     ApprovalGate,
@@ -34,8 +40,10 @@ from aipm.execution import git, worktree
 from aipm.execution.sandbox import ProcessKind, ProfilePaths, profile_for
 from aipm.gates import command_gate
 from aipm.gates.command_gate import toolchain_env
+from aipm.observability import tracing
 from aipm.plugins import loader as plugin_loader
 from aipm.scanners import registry
+from aipm.security.command_policy import CommandPolicy, check_argv, compile_gate
 from aipm.security.network import NetworkPolicy
 from aipm.security.supply_chain import typosquat_of
 from aipm.state import done_record
@@ -54,8 +62,9 @@ from tests.integration.conftest import (
     UserDirs,
     user_dirs,  # noqa: F401 - an autouse fixture
 )
-from tests.integration.flow import aipm, approvals, discovered, ok, runner, trust
+from tests.integration.flow import aipm, approvals, discovered, ok, planned, runner, trust
 from tests.integration.test_verify_cli import edit_config
+from tests.security.test_auto_trust import change_the_surface
 from tests.security.test_dispatch_surface import bare_off
 from tests.security.test_plugins import install as install_plugin
 
@@ -585,3 +594,259 @@ def test_c070_shipped_stack_names_are_taken() -> None:
     names = case("C-070")["input"]["text"].split()
     for name in names:
         assert name in plugin_loader.builtin_names("aipm.stacks")
+
+
+# ================================================================ held: pinned, no change
+
+
+# ---------------------------------------------------------------- auto
+
+
+@pytest.fixture
+def sample(
+    tmp_repo: Path, fake_llm: Callable[[str], Any], fake_secrets: FakeSecrets, dirs: UserDirs
+) -> Path:
+    del fake_secrets, dirs
+    fake_llm("clinic")
+    planned(tmp_repo)
+    change_the_surface(tmp_repo)
+    return tmp_repo
+
+
+FLAG_SETS = [
+    [
+        flag
+        for flag, on in zip(("--yes", "--accept-risk", "--accept-stale"), bits, strict=True)
+        if on
+    ]
+    for bits in itertools.product((False, True), repeat=3)
+]
+
+
+@pytest.mark.parametrize("non_interactive", [False, True])
+@pytest.mark.parametrize("flags", FLAG_SETS, ids=lambda f: "+".join(f) or "none")
+def test_pin_no_auto_flag_combination_records_trust(
+    sample: Path, dirs: UserDirs, flags: list[str], non_interactive: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # fmt: skip
+    monkeypatch.setattr(cli_output, "stdin_is_terminal", lambda: not non_interactive)
+    store = dirs.trust_file
+    before = (store.read_bytes(), store.stat().st_mtime_ns)
+    mode = ["--non-interactive"] if non_interactive else []
+    result = runner.invoke(app, [*mode, "-C", str(sample), "auto", *flags], input="y\n" * 10)
+    assert result.exit_code == 6, result.output
+    assert (store.read_bytes(), store.stat().st_mtime_ns) == before
+
+
+@pytest.mark.parametrize("code", [2, 3, 4, 5, 6, 7, 8, 130])
+def test_pin_a_failed_step_keeps_its_exit_code(code: int) -> None:
+    assert int(auto.step_failed(code, "aipm plan").exit_code) == code
+
+
+@pytest.mark.parametrize("code", [1, 9, 255])
+def test_pin_an_unknown_exit_code_is_an_internal_error(code: int) -> None:
+    assert int(auto.step_failed(code, "aipm plan").exit_code) == int(AipmError.exit_code)
+
+
+@pytest.mark.parametrize("where", ["phase", "step"])
+def test_pin_ctrl_c_in_auto_exits_130_and_records_no_trust(
+    tmp_repo: Path, fake_llm: Callable[[str], Any], fake_secrets: FakeSecrets, dirs: UserDirs,
+    monkeypatch: pytest.MonkeyPatch, where: str,
+) -> None:  # fmt: skip
+    del fake_secrets
+    fake_llm("clinic")
+    discovered(tmp_repo)
+    trust(tmp_repo)
+    store = dirs.trust_file
+    before = (store.read_bytes(), store.stat().st_mtime_ns)
+
+    def interrupt(*_: object, **__: object) -> None:
+        raise KeyboardInterrupt
+
+    if where == "phase":
+        monkeypatch.setattr(auto, "_phase", interrupt)
+    else:
+        monkeypatch.setattr(design_command, "command", interrupt)
+    result = aipm(tmp_repo, "auto", "--yes")
+    assert result.exit_code == 130, result.output
+    assert (store.read_bytes(), store.stat().st_mtime_ns) == before
+
+
+# ---------------------------------------------------------------- plugins
+
+
+def test_pin_no_plugins_holds_in_doctor_and_auto(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sample: Path
+) -> None:
+    site = tmp_path / "site"
+    marker = tmp_path / "ran"
+    install_plugin(site, "probe-plugin", "probe_plugin_v04",
+                   "[aipm.stacks]\nprobe = probe_plugin_v04:STACK\n", marker)  # fmt: skip
+    monkeypatch.setattr(plugin_loader, "own_paths", lambda: (site,))
+    monkeypatch.delitem(sys.modules, "probe_plugin_v04", raising=False)
+    for args in (["doctor"], ["auto", "--yes"]):
+        runner.invoke(app, ["--no-plugins", "--non-interactive", "-C", str(sample), *args])
+        assert not marker.exists(), args
+    result = runner.invoke(app, ["--no-plugins", "-C", str(sample), "doctor"])
+    assert "Plugins: off" in result.output
+    runner.invoke(app, ["--non-interactive", "-C", str(sample), "doctor"])
+    assert marker.exists(), "the control: without --no-plugins doctor imports it"
+    sys.modules.pop("probe_plugin_v04", None)
+
+
+@pytest.mark.parametrize("where", ["pythonpath", "user-site", "repo-venv"])
+def test_pin_a_distribution_outside_aipms_site_packages_is_never_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    """PYTHONPATH, the user site (PYTHONUSERBASE) and a target repository's `.venv` all end up
+    on `sys.path`; the loader reads distributions from aipm's own site-packages only, and
+    imports with only those on the path, so a same-named module elsewhere never runs."""
+    own = tmp_path / "own"
+    good = tmp_path / "good-ran"
+    install_plugin(own, "good-v04", "shadowed_v04", "[aipm.stacks]\ngood = shadowed_v04:STACK\n",
+                   good)  # fmt: skip
+    other = tmp_path / where / "site-packages"
+    evil = tmp_path / "evil-ran"
+    install_plugin(other, "evil-v04", "shadowed_v04",
+                   "[aipm.stacks]\nevil = shadowed_v04:STACK\n", evil)  # fmt: skip
+    (other / "sitecustomize.py").write_text(f"open({str(evil)!r}, 'w')\n")
+    (other / "evil.pth").write_text(f"import os; open({str(evil)!r}, 'w')\n")
+    monkeypatch.syspath_prepend(str(other))
+    monkeypatch.delitem(sys.modules, "shadowed_v04", raising=False)
+    found = plugin_loader.load_plugins(enabled=True, paths=[own])
+    assert [p.name for p in found.plugins] == ["good"]
+    assert good.exists() and not evil.exists()
+    sys.modules.pop("shadowed_v04", None)
+
+
+@pytest.mark.parametrize("group", ["aipm.adapters", "aipm.gates", "aipm.scanners"])
+def test_pin_a_plugin_never_takes_a_built_in_name(tmp_path: Path, group: str) -> None:
+    site = tmp_path / "site"
+    marker = tmp_path / "ran"
+    name = sorted(plugin_loader.BUILTIN_NAMES[group])[0]
+    install_plugin(site, "taker-v04", "taker_v04", f"[{group}]\n{name} = taker_v04:ADAPTER\n",
+                   marker)  # fmt: skip
+    found = plugin_loader.load_plugins(enabled=True, paths=[site])
+    assert found.plugins == () and not marker.exists()
+    assert "taken" in found.warnings[0]
+
+
+@pytest.mark.parametrize(
+    "yaml_text",
+    [
+        "allowed_executables: [[bash]]\ngates:\n  unit: {run: [bash, -c, x], required: true}\n",
+        "allowed_executables: [[make]]\ngates:\n  unit: {run: [make, '{secret_file}'], "
+        "required: true}\n",
+        "allowed_executables: [[make]]\ngates:\n  unit: {run: [make, 'x{paths}'], "
+        "required: true}\n",
+    ],
+)
+def test_pin_a_plugin_stack_meets_the_command_policy(yaml_text: str) -> None:
+    """A plugin stack is validated as a shipped one and its argv still goes through the policy
+    at trust time: no hard-denied program, no placeholder beyond the known ones."""
+    data = YAML(typ="safe", pure=True).load(yaml_text)
+    try:
+        stack = StackTemplate.model_validate(data)
+    except ValidationError:
+        return
+    with pytest.raises(PolicyViolation):
+        prefixes = tuple(tuple(p) for p in stack.allowed_executables)
+        policy = CommandPolicy(allowed_prefixes=prefixes)
+        for gate in stack.gates.values():
+            compile_gate(gate, paths=["src/a.py"], policy=policy, report_file=None)
+
+
+# ---------------------------------------------------------------- OpenTelemetry
+
+
+def test_pin_the_exporter_headers_never_reach_doctor_or_logs(
+    sample: Path, monkeypatch: pytest.MonkeyPatch, dirs: UserDirs
+) -> None:
+    token = "aipm-fake-otlp-token-not-a-real-secret-0099"  # noqa: S105 - a fake
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_HEADERS", f"authorization=Bearer {token}")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://otel.evil.example")
+    for flags in (["--json"], []):
+        result = runner.invoke(app, [*flags, "--non-interactive", "-C", str(sample), "doctor"])
+        assert token not in result.output
+    logs = "".join(p.read_text(errors="replace") for p in dirs.home.rglob("*.log"))
+    assert token not in logs
+
+
+def test_pin_no_config_key_or_variable_turns_tracing_on() -> None:
+    """Tracing reads only `--trace` and the user's OTEL_* variables: the configuration has no
+    key for it, so a repository's .pm/config.yaml or an AIPM_* variable cannot set either."""
+
+    def keys(model: type[Any], prefix: str = "") -> set[str]:
+        found: set[str] = set()
+        for name, field in model.model_fields.items():
+            found.add(f"{prefix}{name}")
+            annotation = field.annotation
+            if isinstance(annotation, type) and hasattr(annotation, "model_fields"):
+                found |= keys(annotation, f"{prefix}{name}.")
+        return found
+
+    all_keys = keys(Config)
+    assert not [k for k in all_keys if "trace" in k or "otel" in k or "telemetry" in k]
+    source = (Path(tracing.__file__)).read_text(encoding="utf-8")
+    assert "AIPM_" not in source
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["x" * 81, "has space", "line\nbreak", "\x1b]52;c;evil\x07", "ünïcode", "a/b?c=d&e"],
+)
+def test_pin_span_values_are_short_plain_identifiers(value: str) -> None:
+    assert tracing.clean_attributes({"model": value, "gate": value}) == {}
+
+
+# ---------------------------------------------------------------- Go and Cargo
+
+
+def test_pin_toolchain_variables_in_aipms_environment_never_reach_a_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hostile = {
+        "GOFLAGS": "-toolexec=/evil/x", "GOENV": "/evil/goenv", "GOPROXY": "https://evil.example",
+        "GONOSUMDB": "*", "GONOSUMCHECK": "1", "GOTOOLCHAIN": "go1.99.0", "GOWORK": "/evil/go.work",
+        "CARGO_BUILD_RUSTC_WRAPPER": "/evil/x", "CARGO_HOME": "/evil/cargo",
+        "RUSTUP_TOOLCHAIN": "/evil/tc", "RUSTC_WRAPPER": "/evil/x", "NEXTEST_PROFILE": "evil",
+        "NEXTEST_TOOL_CONFIG_FILE": "evil:/evil/x.toml",
+    }  # fmt: skip
+    for key, value in hostile.items():
+        monkeypatch.setenv(key, value)
+    root = tmp_path / "wt"
+    root.mkdir()
+    ctx = SimpleNamespace(ws=SimpleNamespace(temp_dir=tmp_path / "t"), root=root)
+    env = command_gate.gate_env(ctx)  # type: ignore[arg-type]
+    for key, value in hostile.items():
+        assert env.get(key) != value, key
+    assert (env["GOTOOLCHAIN"], env["GOWORK"]) == ("local", "off")
+
+
+GO_CARGO_ALLOWED = (("go", "vet"), ("go", "test"), ("gotestsum", "--junitfile"),
+                    ("cargo", "clippy"), ("cargo", "nextest", "run"), ("cargo", "fmt"))  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["go", "vet", "-vettool=/evil/x", "./..."],
+        ["go", "test", "--toolexec", "/evil/x", "./..."],
+        ["go", "test", "-exec=/evil/x", "./..."],
+        ["gotestsum", "--junitfile", "r.xml", "--raw-command", "--", "x"],
+        ["gotestsum", "--junitfile", "r.xml", "--post-run-command=x"],
+        ["go", "vet", "env", "-w", "GOFLAGS=-toolexec=x"],
+        ["go", "test", "generate"],
+        ["cargo", "clippy", "--config=build.rustc-wrapper='/evil/x'"],
+        ["cargo", "clippy", "--config", "target.x.runner='/evil/x'"],
+        ["cargo", "clippy", "-Zunstable-options"],
+        ["cargo", "fmt", "+nightly"],
+        ["cargo", "nextest", "run", "--tool-config-file=x:/evil/t.toml"],
+        ["cargo", "nextest", "run", "--archive-file", "a.tar.zst"],
+        ["cargo", "clippy", "install", "x"],
+    ],
+)
+def test_pin_go_and_cargo_routes_to_another_program_are_refused(argv: list[str]) -> None:
+    policy = CommandPolicy(allowed_prefixes=GO_CARGO_ALLOWED)
+    with pytest.raises(PolicyViolation):
+        check_argv(argv, policy, stage="gate")
