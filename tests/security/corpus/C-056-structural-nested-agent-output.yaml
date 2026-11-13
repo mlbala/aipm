@@ -1,0 +1,14 @@
+id: C-056
+vector: structural
+input:
+  surface: agent-output
+  # An agent output line nested deeper than Python's recursion limit. The text is the line's
+  # start; the test repeats its last character 100,000 times and closes every bracket. json.loads
+  # raises RecursionError, which is not a ValueError, so parse_result crashed the build and the
+  # attempt was charged nothing (RT04-1).
+  text: |
+    {"type": "result", "result": "AIPM-BLOCKED: x", "total_cost_usd": 0, "x": [
+expected:
+  outcome: >-
+    The line is skipped like any broken line: no result, no question, and the attempt is charged
+    its task budget.

@@ -262,7 +262,7 @@ def _last_result(stdout: bytes) -> _ResultEvent | None:
             continue
         try:
             data: object = json.loads(raw)
-        except ValueError:
+        except (ValueError, RecursionError):  # a line nested too deep is broken too (RT04-1)
             continue
         if isinstance(data, dict) and cast("dict[str, object]", data).get("type") == "result":
             found.append(cast("dict[str, object]", data))

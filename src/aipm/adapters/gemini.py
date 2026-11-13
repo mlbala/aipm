@@ -191,7 +191,7 @@ def _result_doc(stdout: bytes) -> dict[str, object] | None:
     if text.startswith(b"{") and len(text) <= MAX_OUTPUT_LINE:
         try:
             data: object = json.loads(text)
-        except ValueError:
+        except (ValueError, RecursionError):  # nested too deep is broken too (RT04-1)
             data = None
         if isinstance(data, dict):
             return data  # pyright: ignore[reportUnknownVariableType]

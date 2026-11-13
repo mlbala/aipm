@@ -193,7 +193,7 @@ def json_lines(stdout: bytes) -> Iterator[dict[str, object]]:
             continue
         try:
             data: object = json.loads(raw)
-        except ValueError:
+        except (ValueError, RecursionError):  # a line nested too deep is broken too (RT04-1)
             continue
         if isinstance(data, dict):
             yield cast("dict[str, object]", data)
