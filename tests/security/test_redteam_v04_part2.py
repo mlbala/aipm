@@ -15,14 +15,18 @@ import pytest
 from ruamel.yaml import YAML
 
 from aipm.app import build as build_use_case
+from aipm.cli import output as cli_output
+from aipm.cli.main import app
 from aipm.config import loader as config_loader
+from aipm.domain.models import APPROVED_NAMES, ApprovalGate, ArtifactKind
+from aipm.state.store import open_store
 from tests.conftest import FakeSecrets
 from tests.integration.build_flow import fake_registry, prepare_project
 from tests.integration.conftest import (
     UserDirs,
     user_dirs,  # noqa: F401 - an autouse fixture
 )
-from tests.integration.flow import aipm
+from tests.integration.flow import aipm, approvals, discovered, ok, runner, trust
 from tests.integration.test_verify_cli import edit_config
 
 pytestmark = pytest.mark.usefixtures("allow_unix_sockets")
@@ -115,3 +119,62 @@ def test_without_flags_is_the_same_read(tmp_repo: Path, tmp_path: Path) -> None:
     assert flagged.config.budget.run_usd == 3.0
     assert flagged.without_flags().config == plain.config
     assert plain.without_flags() is plain
+
+
+# ---------------------------------------------------------------- RT04-8: interactive auto trusted
+
+
+@pytest.fixture
+def discovered_trusted(
+    tmp_repo: Path,
+    fake_llm: Callable[[str], Any],
+    fake_secrets: FakeSecrets,
+    dirs: UserDirs,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Path:
+    """G1 approved and the surface before G2 trusted, so `auto` passes its first trust check;
+    G2 then copies the stack's gates, a surface nobody has trusted."""
+    del fake_secrets, dirs
+    fake_llm("clinic")
+    discovered(tmp_repo)
+    trust(tmp_repo)
+    monkeypatch.setattr(cli_output, "stdin_is_terminal", lambda: True)
+    return tmp_repo
+
+
+def _surface(repo: Path) -> dict[str, Any]:
+    shown: dict[str, Any] = json.loads(aipm(repo, "trust", "--show", flags=["--json"]).stdout)
+    return shown["data"]
+
+
+def test_interactive_auto_never_records_trust(discovered_trusted: Path, dirs: UserDirs) -> None:
+    repo = discovered_trusted
+    result = runner.invoke(app, ["-C", str(repo), "auto", "--dry-run"], input="y\n" * 20)
+    after = _surface(repo)
+    assert not after["trusted"], "auto recorded trust at G3"
+    assert "trust these exact commands" not in result.output
+    assert result.exit_code == 6, result.output
+    assert "aipm trust" in result.output
+    assert approvals(repo).has(ApprovalGate.G3, APPROVED_NAMES[ArtifactKind.TASKS],
+                               open_store(repo).sha256(ArtifactKind.TASKS) or "")  # fmt: skip
+    del dirs
+
+
+@pytest.mark.parametrize("command", ["plan", "approve plan"])
+def test_plan_and_approve_alone_still_trust_interactively(
+    discovered_trusted: Path, command: str
+) -> None:
+    """Outside auto, an interactive yes at G3 still records trust (SECURITY.md §6 rule 3)."""
+    repo = discovered_trusted
+    ok(aipm(repo, "design", flags=["--yes"]))
+    if command == "approve plan":
+        ok(aipm(repo, "plan"))
+    result = runner.invoke(app, ["-C", str(repo), *command.split()], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "trust these exact commands" in result.output
+    assert _surface(repo)["trusted"]
+
+
+def test_c063_auto_g3_records_no_trust() -> None:
+    data = case("C-063")
+    assert data["expected"]["exit_code"] == 6

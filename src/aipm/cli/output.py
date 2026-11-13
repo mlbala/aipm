@@ -39,6 +39,9 @@ class GlobalOptions:
     no_plugins: bool = False
     no_cache: bool = False
     trace: bool = False
+    in_auto: bool = False
+    """Set by `aipm auto` for its steps: an interactive G3 then records the approval only,
+    never trust (ADR-0028; red-team v0.4, RT04-8)."""
 
 
 def global_options(ctx: typer.Context) -> GlobalOptions:

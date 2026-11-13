@@ -98,9 +98,10 @@ def ask_design() -> bool:
     return typer.confirm("Approve the design (G2)?", default=False)
 
 
-def ask_plan(review: PlanReview) -> bool:
-    """The G3 question; an interactive yes also trusts the surface shown above."""
-    if review.trusted:
+def ask_plan(review: PlanReview, *, offer_trust: bool = True) -> bool:
+    """The G3 question; an interactive yes also trusts the surface shown above, except inside
+    `aipm auto` (`offer_trust` false), which never records trust."""
+    if review.trusted or not offer_trust:
         return typer.confirm("Approve the plan (G3)?", default=False)
     return typer.confirm(
         "Approve the plan (G3) and trust these exact commands for this repository?", default=False
@@ -108,7 +109,11 @@ def ask_plan(review: PlanReview) -> bool:
 
 
 class ReviewPrompter:
-    """`DesignPrompter` and `PlanPrompter` for a real terminal."""
+    """`DesignPrompter` and `PlanPrompter` for a real terminal. `offer_trust` false (inside
+    `aipm auto`): G3 asks about the plan only."""
+
+    def __init__(self, *, offer_trust: bool = True) -> None:
+        self.offer_trust = offer_trust
 
     def confirm_risk(self, role: str, excerpts: Sequence[str]) -> bool:
         """Warn about suspected prompt injection; True continues."""
@@ -124,4 +129,4 @@ class ReviewPrompter:
         show_plan(review, changes)
         if review.surface_hash is None:
             return False
-        return ask_plan(review)
+        return ask_plan(review, offer_trust=self.offer_trust)

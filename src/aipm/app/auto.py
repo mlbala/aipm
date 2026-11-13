@@ -9,10 +9,12 @@ The loop is the phase engine's `next_command`, one step at a time:
   approval, as `aipm approve <artifact> --yes` does.
 - `aipm trust`, a blocked plan (`aipm status`) and an uninitialized repository stop the loop.
 
-`auto` never records trust (SECURITY.md §6 rule 4): it checks the execution surface before its
-first step and exits 6 with `aipm trust` when it is not trusted, and the phase engine stops it
-again at the trust gate when G2 changed the surface. Any step that fails stops the loop with that
-step's exit code (4, 5, 6 and 8 among them) and the exact command to run next.
+`auto` never records trust (SECURITY.md §6 rule 4), not even when a person answers G3 in a
+terminal: its steps run with `in_auto`, so G3 records the approval only (RT04-8). It checks the
+execution surface before its first step and exits 6 with `aipm trust` when it is not trusted,
+and the phase engine stops it again at the trust gate when G2 changed the surface. Any step
+that fails stops the loop with that step's exit code (4, 5, 6 and 8 among them) and the exact
+command to run next.
 """
 
 from collections.abc import Callable
