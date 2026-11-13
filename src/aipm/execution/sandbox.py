@@ -61,6 +61,12 @@ CREDENTIAL_PATHS: tuple[str, ...] = (
     # Step 08 review: a dotenv file in the home directory, which tools that search upward for
     # `.env` (Gemini CLI) would load.
     ".env",
+    # Red-team v0.4 (RT04-4): the v0.4 agents' token files, which a build's gates and prepare
+    # step (agent-written and repository code) could still read: Gemini's documented key file,
+    # the dotenv Codex loads from its home, Gemini's MCP OAuth tokens, Copilot CLI's
+    # plain-text token fallback and the Copilot editor plugins' OAuth tokens.
+    ".gemini/.env", ".codex/.env", ".gemini/mcp-oauth-tokens.json", ".copilot/config.json",
+    ".config/github-copilot",
 )  # fmt: skip
 """SECURITY.md §3 developer credentials, relative to the home directory."""
 

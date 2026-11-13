@@ -266,3 +266,30 @@ def test_c058_every_planted_global_file_is_watched() -> None:
     for line in case_text("C-058").splitlines():
         rel = line.split(":", 1)[0].removeprefix("~/")
         assert any(rel == e or rel.startswith(f"{e}/") for e in entries), rel
+
+
+# ---------------------------------------------------------------- RT04-4: the agents' token files
+
+
+TOKEN_FILES = (".gemini/.env", ".codex/.env", ".gemini/mcp-oauth-tokens.json",
+               ".copilot/config.json", ".config/github-copilot")  # fmt: skip
+
+
+@pytest.mark.parametrize("kind", list(ProcessKind))
+def test_the_v04_agents_token_files_are_denied_to_every_process(
+    tmp_path: Path, kind: ProcessKind
+) -> None:
+    """A build's gates and prepare step run agent-written or repository code and may read the
+    user's agent homes; Gemini's documented key file, Codex's dotenv, Gemini's MCP OAuth tokens
+    and Copilot's plain-text token fallback were readable to them."""
+    paths = ProfilePaths(workspace=tmp_path / "wt", temp_dir=tmp_path / "t", home=tmp_path / "h",
+                         config_home=tmp_path / "cfg")  # fmt: skip
+    profile = profile_for(kind, NONE, paths, runtime="/bin/srt")
+    for rel in TOKEN_FILES:
+        assert paths.home / rel in profile.deny_read, (kind, rel)
+
+
+def test_c059_every_token_file_is_a_credential_path() -> None:
+    for line in case_text("C-059").splitlines():
+        rel = line.split(":", 1)[0].removeprefix("~/")
+        assert rel in sandbox.CREDENTIAL_PATHS, rel
