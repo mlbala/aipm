@@ -95,7 +95,17 @@ def env_guard(directory: Path) -> None:
     """An empty, read-only `.env` in `directory`, so Gemini's search for one, which walks up
     from its working directory, ends there and never loads the user's `~/.env` or
     `~/.gemini/.env` (security review of step 08). An existing one must be an empty regular
-    file, or dispatch is refused (exit 6)."""
+    file, or dispatch is refused (exit 6).
+
+    At each level Gemini looks for `.gemini/.env` before `.env`, so a `.gemini` entry in
+    `directory`, in any case, is refused too (exit 6; red-team v0.4, RT04-6)."""
+    planted = sorted(e.name for e in os.scandir(directory) if e.name.casefold() == ".gemini")
+    if planted:
+        raise PolicyViolation(
+            f"{directory / planted[0]} would give Gemini CLI an environment file before aipm's "
+            "empty .env",
+            hint="Remove it; nothing aipm writes there is named .gemini.",
+        )
     guard = directory / ".env"
     try:
         fd = os.open(guard, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)

@@ -365,3 +365,30 @@ def test_c060_every_spelling_is_refused() -> None:
         tool = ToolName.CODEX if argv[0] == "codex" else ToolName.GEMINI
         with pytest.raises(PolicyViolation):
             check_forbidden_flags(tool, argv)
+
+
+# ---------------------------------------------------------------- RT04-6: Gemini's .env search
+
+
+@pytest.mark.parametrize("name", [".gemini", ".GEMINI"])
+def test_a_gemini_directory_beside_the_worktrees_is_refused(tmp_path: Path, name: str) -> None:
+    """Gemini looks for `<dir>/.gemini/.env` before `<dir>/.env` at each level, so the empty
+    `.env` aipm leaves in the worktrees' parent did not stop a planted `.gemini/.env` there."""
+    (tmp_path / name).mkdir()
+    (tmp_path / name / ".env").write_text("GEMINI_CLI_SYSTEM_SETTINGS_PATH=/tmp/x.json\n")
+    with pytest.raises(PolicyViolation, match=r"(?i)\.gemini"):
+        gemini.env_guard(tmp_path)
+
+
+def test_the_guard_still_writes_an_empty_env(tmp_path: Path) -> None:
+    gemini.env_guard(tmp_path)
+    assert (tmp_path / ".env").read_bytes() == b""
+
+
+def test_c061_a_planted_gemini_env_is_refused(tmp_path: Path) -> None:
+    rel, text = case_text("C-061").strip().split(": ", 1)
+    planted = tmp_path / rel.removeprefix("<worktrees>/")
+    planted.parent.mkdir()
+    planted.write_text(text + "\n")
+    with pytest.raises(PolicyViolation):
+        gemini.env_guard(tmp_path)
