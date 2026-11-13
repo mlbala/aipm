@@ -80,8 +80,21 @@ AGENT_GLOBAL_CONFIG: tuple[str, ...] = (
     ".claude/session-env",
     ".codex/config.toml", ".codex/AGENTS.md", ".codex/skills",
     ".gemini/settings.json", ".gemini/GEMINI.md", ".copilot/config.json",
+    # Red-team v0.4 (RT04-3): everything each v0.4 adapter protects in its own config home
+    # (`ConfigHomeSpec.protected`), at the home the tool uses without aipm.
+    ".codex/AGENTS.override.md", ".codex/rules", ".codex/hooks", ".codex/hooks.json",
+    ".codex/prompts", ".codex/.env",
+    ".gemini/AGENTS.md", ".gemini/.env", ".gemini/commands", ".gemini/extensions",
+    ".gemini/policies", ".gemini/agents", ".gemini/skills", ".gemini/hooks",
+    ".gemini/trustedFolders.json", ".env",
+    ".copilot/settings.json", ".copilot/mcp-config.json", ".copilot/lsp-config.json",
+    ".copilot/permissions-config.json", ".copilot/providers.json", ".copilot/hooks",
+    ".copilot/agents", ".copilot/skills", ".copilot/extensions", ".copilot/instructions",
+    ".copilot/copilot-instructions.md",
 )  # fmt: skip
-"""Agents' global settings, hooks, plugins and skills, relative to home (SECURITY.md §9.1)."""
+"""Agents' global settings, hooks, plugins and skills, relative to home (SECURITY.md §9.1).
+`tests/security/test_redteam_v04.py` checks that every adapter's `ConfigHomeSpec.protected`
+is here (this layer cannot import the adapters)."""
 
 CONFIG_HOME_PROTECTED: tuple[str, ...] = (
     "settings.json", "settings.local.json", "CLAUDE.md", "hooks", "agents", "skills",

@@ -140,6 +140,22 @@ AGENT_CONFIG_WATCH: tuple[str, ...] = (
 """Agents' global settings, hooks and skills hashed before and after an attempt (SECURITY.md
 §9.1), and the workers Claude Code's background service starts (`daemon.json`, red-team v0.3).
 Plugin caches, which agents update on their own, are left out."""
+AGENT_DISPATCH_WATCH: tuple[str, ...] = (
+    ".codex/AGENTS.override.md", ".codex/rules", ".codex/hooks", ".codex/hooks.json",
+    ".codex/prompts", ".codex/.env",
+    ".gemini/AGENTS.md", ".gemini/.env", ".gemini/commands", ".gemini/extensions",
+    ".gemini/policies", ".gemini/agents", ".gemini/skills", ".gemini/hooks",
+    ".gemini/trustedFolders.json", ".env",
+    ".copilot/settings.json", ".copilot/mcp-config.json", ".copilot/lsp-config.json",
+    ".copilot/permissions-config.json", ".copilot/providers.json", ".copilot/hooks",
+    ".copilot/agents", ".copilot/skills", ".copilot/extensions", ".copilot/instructions",
+    ".copilot/copilot-instructions.md",
+)  # fmt: skip
+"""More of the agents' global instructions, rules, hooks, extensions and MCP configs, watched
+during a build only (red-team v0.4, RT04-3). A dispatched agent has a config home of its own
+and never needs to touch these. In manual mode they are the user's own agent's, which writes
+some itself (Codex adds `rules/` when the user answers "always allow"), so `verify` leaves them
+out (R-10)."""
 GLOBAL_GIT_FILES: tuple[str, ...] = (".gitconfig",)
 XDG_GIT_FILES: tuple[str, ...] = ("git/config", "git/attributes", "git/ignore")
 MAX_INCLUDE_DEPTH = 10
@@ -1135,13 +1151,16 @@ def config_paths(configs: Sequence[Path], home: Path, repo: Path) -> dict[str, P
     return found
 
 
-def integrity_snapshot(repo: Path, home: Path) -> dict[str, str | None]:
+def integrity_snapshot(
+    repo: Path, home: Path, *, extra: Sequence[str] = ()
+) -> dict[str, str | None]:
     """Hashes of what git and the agents read from outside the work tree (SECURITY.md §11).
 
     `.git/config`, `config.worktree`, `info/attributes`, `info/exclude`, `hooks/`, the linked
     work tree's `.git` file, files those configs include (nested), the excludes and attributes
     files they name, the user's global git config, and the agents' global settings, hooks and
-    skills. Read only; git is not run. git gets no `XDG_CONFIG_HOME` (`build_env`), so it reads
+    skills, and `extra` more of them relative to home (`AGENT_DISPATCH_WATCH` in a build). Read
+    only; git is not run. git gets no `XDG_CONFIG_HOME` (`build_env`), so it reads
     `~/.config/git/`; when aipm's own `XDG_CONFIG_HOME` points elsewhere, both are watched.
     """
     dirs = git_dirs(repo)
@@ -1168,7 +1187,7 @@ def integrity_snapshot(repo: Path, home: Path) -> dict[str, str | None]:
             watched[f"~/.config/{rel}"] = home / ".config" / rel
     configs += [xdg / "git" / "config", home / ".config" / "git" / "config"]
     watched.update(config_paths(configs, home, repo))
-    for rel in AGENT_CONFIG_WATCH:
+    for rel in (*AGENT_CONFIG_WATCH, *extra):
         watched[f"~/{rel}"] = home / rel
     return {label: _hash_followed(path) for label, path in watched.items()}
 
@@ -1300,6 +1319,8 @@ class ChangeInputs:
     files: Mapping[str, str]
     ledger: Mapping[str, str | None]
     extra_protected: Sequence[str] = ()
+    watch: Sequence[str] = ()
+    """More agent config to compare, relative to home (`integrity_snapshot`'s `extra`)."""
 
 
 def change_set(
@@ -1320,7 +1341,7 @@ def change_set(
     otherwise; lockfiles need more).
     """
     base = inputs.base_sha
-    moved = compare(inputs.integrity, integrity_snapshot(repo, home))
+    moved = compare(inputs.integrity, integrity_snapshot(repo, home, extra=inputs.watch))
     if moved:
         return ChangeSet(base_sha=base, integrity=tuple(moved), complete=False)
     seen = listing(repo, base)

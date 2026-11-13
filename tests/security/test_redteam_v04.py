@@ -20,6 +20,7 @@ from aipm.adapters.claude_code import ClaudeCodeAdapter
 from aipm.adapters.codex import CodexAdapter
 from aipm.adapters.gemini import GeminiAdapter
 from aipm.domain.models import NetworkProfile
+from aipm.execution import git, sandbox
 from aipm.execution.process import ProcessResult
 from aipm.execution.sandbox import ProcessKind, ProfilePaths, profile_for
 from aipm.llm.fake import FakeLLM
@@ -204,3 +205,64 @@ def test_c057_an_override_file_is_a_protected_path() -> None:
     for line in case_text("C-057").splitlines():
         path = line.split(":", 1)[0]
         assert is_protected(path), path
+
+
+# ---------------------------------------------------------------- RT04-3: the agents' global config
+
+
+def global_entries() -> set[str]:
+    """Each headless adapter's config-home settings, at the home the tool uses without aipm."""
+    found = {f".codex/{rel}" for rel in codex.CONFIG_HOME.protected}
+    found |= set(gemini.CONFIG_HOME.protected)  # GEMINI_CLI_HOME holds `.gemini/` itself
+    found |= {f".copilot/{rel}" for rel in copilot.CONFIG_HOME.protected}
+    return found
+
+
+def test_the_global_config_lists_cover_every_adapter() -> None:
+    """`AGENT_GLOBAL_CONFIG` (srt `denyWrite`) and the watch lists named only v0.3's set, so
+    without srt an agent or a gate could plant `~/.codex/AGENTS.override.md`, Codex rules or
+    hooks, Gemini extensions or commands, or a Copilot MCP config, unseen."""
+    watched = set(git.AGENT_CONFIG_WATCH) | set(getattr(git, "AGENT_DISPATCH_WATCH", ()))
+    for rel in sorted(global_entries()):
+        assert rel in sandbox.AGENT_GLOBAL_CONFIG, rel
+        assert rel in watched, rel
+
+
+def test_codex_protects_its_dotenv() -> None:
+    assert ".env" in codex.CONFIG_HOME.protected
+
+
+def test_manual_mode_watches_only_the_v03_set(tmp_repo: Path, tmp_path: Path) -> None:
+    """In manual mode the agent's home is the user's own, and Codex writes `rules/` itself when
+    the user answers "always allow" (R-10): the wider list applies to builds only."""
+    labels = set(git.integrity_snapshot(tmp_repo, tmp_path))
+    assert "~/.codex/rules" not in labels
+    wider = set(git.integrity_snapshot(tmp_repo, tmp_path, extra=git.AGENT_DISPATCH_WATCH))
+    assert {"~/.codex/rules", "~/.gemini/extensions", "~/.copilot/mcp-config.json"} <= wider
+
+
+GLOBAL_PLANTS = [
+    ("codex", ".codex/AGENTS.override.md"),
+    ("codex", ".gemini/extensions/x/gemini-extension.json"),
+    ("gemini", ".codex/rules/default.rules"),
+    ("gemini", ".copilot/mcp-config.json"),
+]
+
+
+@pytest.mark.parametrize(("tool", "rel"), GLOBAL_PLANTS, indirect=["tool"])
+def test_planting_a_v04_agents_global_config_is_severe(
+    project: Path, dirs: UserDirs, tool: str, rel: str
+) -> None:
+    write = {"home_write": rel, "text": 'prefix_rule(pattern=["curl"], decision="allow")\n'}
+    scenario(dirs.home, {"T-002": [{"steps": [*copy_t002(), write]}]})
+    code, envelope = build(project, tool, "--only", "T-002")
+    assert code == 6, envelope
+    (outcome,) = envelope["data"]["tasks"]
+    assert (outcome["status"], outcome["reason"]) == ("blocked", "policy_violation")
+
+
+def test_c058_every_planted_global_file_is_watched() -> None:
+    entries = set(git.AGENT_CONFIG_WATCH) | set(getattr(git, "AGENT_DISPATCH_WATCH", ()))
+    for line in case_text("C-058").splitlines():
+        rel = line.split(":", 1)[0].removeprefix("~/")
+        assert any(rel == e or rel.startswith(f"{e}/") for e in entries), rel

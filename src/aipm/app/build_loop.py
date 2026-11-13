@@ -28,6 +28,7 @@ import signal
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 
 from pydantic import JsonValue
@@ -661,7 +662,9 @@ class BuildLoop:
                 update={"status": TaskStatus.IN_PROGRESS, "base_sha": base, "blocked": None}
             )
         )
-        integrity = await asyncio.to_thread(git.integrity_snapshot, wt, self.home)
+        integrity = await asyncio.to_thread(
+            partial(git.integrity_snapshot, extra=git.AGENT_DISPATCH_WATCH), wt, self.home
+        )
         fresh = await asyncio.to_thread(self._fresh_home, task_id)
         agent_before = await asyncio.to_thread(prepare_config_home, fresh, self.adapter.config_home)
         last = _Attempted(passed=False)
@@ -707,6 +710,7 @@ class BuildLoop:
             files={},
             ledger={},
             extra_protected=policy.extra_protected,
+            watch=git.AGENT_DISPATCH_WATCH,
         )
         return git.change_set(
             wt,

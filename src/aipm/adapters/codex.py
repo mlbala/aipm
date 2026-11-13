@@ -48,9 +48,11 @@ CONFIG_HOME = ConfigHomeSpec(
         "hooks",
         "hooks.json",
         "prompts",
+        ".env",
     ),
 )
-"""What Codex would read as user settings, instructions, skills, rules or hooks."""
+"""What Codex would read as user settings, instructions, skills, rules or hooks, and the
+`.env` it loads from its home (red-team v0.4)."""
 DETECT = DetectSpec(
     tool=ToolName.CODEX,
     program="codex",
