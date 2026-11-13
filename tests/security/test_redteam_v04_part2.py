@@ -8,6 +8,7 @@ fix. The "held" sections at the end pin controls the pass attacked without break
 
 import hashlib
 import json
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,7 @@ from aipm.execution import git, worktree
 from aipm.execution.sandbox import ProcessKind, ProfilePaths, profile_for
 from aipm.gates import command_gate
 from aipm.gates.command_gate import toolchain_env
+from aipm.plugins import loader as plugin_loader
 from aipm.scanners import registry
 from aipm.security.network import NetworkPolicy
 from aipm.security.supply_chain import typosquat_of
@@ -55,6 +57,7 @@ from tests.integration.conftest import (
 from tests.integration.flow import aipm, approvals, discovered, ok, runner, trust
 from tests.integration.test_verify_cli import edit_config
 from tests.security.test_dispatch_surface import bare_off
+from tests.security.test_plugins import install as install_plugin
 
 pytestmark = pytest.mark.usefixtures("allow_unix_sockets")
 CORPUS = Path(__file__).parent / "corpus"
@@ -550,3 +553,35 @@ def test_a_quick_registry_answer_is_read(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_c069_the_deadline_is_bounded() -> None:
     assert "1 byte" in case("C-069")["input"]["text"]
     assert registry.DEADLINE_S <= 60
+
+
+# ---------------------------------------------------------------- RT04-15: plugin stacks dropped
+
+
+def test_a_plugin_stack_that_cannot_be_used_is_refused_aloud(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stack plugin under a shipped stack's name, under a name no stack may have, or naming
+    something other than YAML text was dropped without a word, and `doctor` listed it as
+    loaded. Shipped stacks still win; the plugin is now refused with a warning, before its code
+    is imported when the name alone decides."""
+    site = tmp_path / "site"
+    marker = tmp_path / "ran"
+    install_plugin(site, "stack-shadow", "stack_shadow_v04",
+                   "[aipm.stacks]\npython-uv = stack_shadow_v04:STACK\n"
+                   "my_stack = stack_shadow_v04:STACK\nnot-yaml = stack_shadow_v04:ADAPTER\n",
+                   marker)  # fmt: skip
+    monkeypatch.delitem(sys.modules, "stack_shadow_v04", raising=False)
+    found = plugin_loader.load_plugins(enabled=True, paths=[site])
+    assert found.plugins == ()
+    warnings = "\n".join(found.warnings)
+    for name in ("python-uv", "my_stack", "not-yaml"):
+        assert f"'{name}'" in warnings, warnings
+    assert "a shipped stack" in warnings and "YAML text" in warnings
+    sys.modules.pop("stack_shadow_v04", None)
+
+
+def test_c070_shipped_stack_names_are_taken() -> None:
+    names = case("C-070")["input"]["text"].split()
+    for name in names:
+        assert name in plugin_loader.builtin_names("aipm.stacks")

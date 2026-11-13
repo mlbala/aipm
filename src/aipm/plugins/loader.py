@@ -14,8 +14,10 @@ Plugins are Python code, trusted like aipm itself, so where they come from is th
   comes from anywhere else is refused.
   The import is the one `importlib.import_module` call allowed in `src/aipm` besides
   `execution/process.py`, exempted from TID251 on its own line only (ARCHITECTURE §5.1).
-- A plugin whose name is a built-in name of its group is refused; a plugin that fails to load
-  is skipped with a warning. `--no-plugins` turns loading off.
+- A plugin whose name is a built-in name of its group (for stacks, a shipped template) is
+  refused before it is imported, and so is a stack plugin with a name no stack may have or an
+  object that is not YAML text; each with a warning `doctor` shows (RT04-15). A plugin that
+  fails to load is skipped with a warning. `--no-plugins` turns loading off.
 
 Loading is lazy: `configure` records whether plugins are on (the CLI's `--no-plugins`), and the
 first `loaded()` call imports them, so `aipm --help` imports none.
@@ -23,6 +25,7 @@ first `loaded()` call imports them, so `aipm --help` imports none.
 
 import importlib
 import importlib.metadata
+import importlib.resources
 import os
 import re
 import sys
@@ -47,10 +50,12 @@ BUILTIN_NAMES: Mapping[str, frozenset[str]] = {
     "aipm.llm_providers": frozenset({"anthropic", "openai", "fake"}),
     "aipm.stacks": frozenset(),
 }
-"""Names a plugin may not take: a plugin adds, it never replaces (stacks are checked against
-the shipped templates when they are listed)."""
+"""Names a plugin may not take: a plugin adds, it never replaces. The shipped stack templates
+are added by `builtin_names`."""
 MAX_PLUGINS = 64
 _NAME = re.compile(r"[a-z][a-z0-9_\-]{0,39}")
+_STACK_NAME = re.compile(r"[a-z0-9][a-z0-9\-]{0,39}")
+"""A stack template's name, as `aipm.config.stacks` accepts it."""
 _DOTTED = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
 
 
@@ -89,6 +94,33 @@ class Loaded:
     def of(self, group: str) -> tuple[Plugin, ...]:
         """The plugins of one group."""
         return tuple(p for p in self.plugins if p.group == group)
+
+
+def builtin_names(group: str) -> frozenset[str]:
+    """The names a plugin of `group` may not take: for stacks, every template aipm ships, read
+    as package resources (red-team v0.4, RT04-15)."""
+    names = BUILTIN_NAMES[group]
+    if group == "aipm.stacks":
+        root = importlib.resources.files("aipm.config") / "stacks"
+        names = names | {
+            e.name.removesuffix(".yaml") for e in root.iterdir() if e.name.endswith(".yaml")
+        }
+    return names
+
+
+def _refusal(group: str, name: str, obj: object | None = None) -> str | None:
+    """Why a plugin cannot be used (`None` when it can): by name before it is imported, and for
+    stacks also by what it names once it is."""
+    if name in builtin_names(group):
+        what = "a shipped stack" if group == "aipm.stacks" else "a built-in"
+        return f"the name is taken by {what}; the built-in one is used"
+    if group != "aipm.stacks":
+        return None
+    if not _STACK_NAME.fullmatch(name):
+        return "a stack name is lower-case letters, digits and hyphens"
+    if obj is not None and not isinstance(obj, str):
+        return "a stack plugin must name the template's YAML text"
+    return None
 
 
 def own_paths() -> tuple[Path, ...]:
@@ -189,7 +221,11 @@ def load_plugins(
         if not _NAME.fullmatch(name):
             warnings.append(f"{label} skipped: the name is not plain lower-case words")
             continue
-        if name in BUILTIN_NAMES[group] or (group, name) in seen:
+        refused = _refusal(group, name)
+        if refused is not None:
+            warnings.append(f"{label} skipped: {refused}")
+            continue
+        if (group, name) in seen:
             warnings.append(f"{label} skipped: the name is taken")
             continue
         if len(plugins) >= MAX_PLUGINS:
@@ -199,6 +235,10 @@ def load_plugins(
             obj = _resolve(target, where)
         except Exception as exc:  # a plugin is third-party code: any failure skips it
             warnings.append(f"{label} skipped: {type(exc).__name__}: {str(exc)[:200]}")
+            continue
+        refused = _refusal(group, name, obj)
+        if refused is not None:
+            warnings.append(f"{label} skipped: {refused}")
             continue
         seen.add((group, name))
         plugins.append(Plugin(group, name, target, dist, version, obj))
