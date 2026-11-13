@@ -9,15 +9,16 @@ docs/security/reviews/v0.4.md §8.
 import fnmatch
 import re
 import shlex
+import shutil
 from pathlib import Path
 from typing import Any
 
 import pytest
 from ruamel.yaml import YAML
 
-from tests.conftest import REPO_ROOT
+from tests.conftest import REPO_ROOT, run_program
+from tests.integration.test_install_sh import SCRIPT, run, stub
 from tests.integration.test_install_sh import env as env  # noqa: PLC0414 - the fixture
-from tests.integration.test_install_sh import run, stub
 
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 RELEASE = WORKFLOWS / "release.yml"
@@ -237,3 +238,63 @@ def test_install_sh_never_runs_uv_from_the_active_virtualenv(
     assert code == 2, err
     assert "virtualenv" in err
     assert not marker.exists()
+
+
+# ------------------------------------------------------------------ RT04-19 (install.sh)
+
+
+def ci_uv_version() -> str:
+    versions = {
+        str(step["with"]["version"])
+        for job in load(WORKFLOWS / "ci.yml")["jobs"].values()
+        for step in steps(job)
+        if str(step.get("uses", "")).startswith("astral-sh/setup-uv@")
+    }
+    assert len(versions) == 1, versions
+    return versions.pop()
+
+
+def curl_stub(env: dict[str, str], log: Path, body: str) -> None:
+    """A `curl` that logs its URL and output path, writes `body` there, then runs `then`."""
+    script = (
+        'out=""; url=""\n'
+        'while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift ;; https://*) url="$1" ;; esac; '
+        "shift; done\n"
+        f'echo "$url $out" >> "{log}"\n'
+        f"{body}"
+    )
+    stub(Path(env["PATH"].split(":")[0]) / "curl", script)
+
+
+def test_install_sh_fetches_one_pinned_uv_installer(env: dict[str, str], tmp_path: Path) -> None:
+    """RT04-19: the script ran whatever installer astral.sh served as "latest". It now fetches
+    the installer of one uv release, the one CI uses, from that release's assets."""
+    log = tmp_path / "curl.log"
+    curl_stub(env, log, "exit 22")  # curl -f on an HTTP error: nothing is run
+    code, _, _ = run(env, "-y", "-t", "v0.4.0", cwd=tmp_path)
+    assert code != 0
+    url = log.read_text(encoding="utf-8").split()[0]
+    assert url == (
+        f"https://github.com/astral-sh/uv/releases/download/{ci_uv_version()}/uv-installer.sh"
+    )
+
+
+@pytest.mark.parametrize("shell", ["sh", "dash"])
+def test_install_sh_leaves_no_partial_installer_when_interrupted(
+    env: dict[str, str], tmp_path: Path, shell: str
+) -> None:
+    """RT04-19: a download stopped by a signal leaves no temporary file and runs nothing. dash
+    (`sh` on Debian and Ubuntu) runs no EXIT trap on a signal, so the file was left there."""
+    path = shutil.which(shell, path="/usr/bin:/bin")
+    if path is None:
+        pytest.skip(f"no {shell} here")
+    log = tmp_path / "curl.log"
+    ran = tmp_path / "ran.log"
+    partial = f'printf "echo ran >> {ran}\\n" > "$out"\nkill -TERM $PPID\nsleep 5\n'
+    curl_stub(env, log, partial)
+    result = run_program([path, str(SCRIPT), "-y", "-t", "v0.4.0"], env=env, cwd=tmp_path)
+    assert result.returncode != 0
+    installer = Path(log.read_text(encoding="utf-8").split()[1])
+    assert installer.is_absolute()
+    assert not installer.exists()
+    assert not ran.exists()

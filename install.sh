@@ -7,14 +7,14 @@
 #   -t TAG  the aipm release to install (default below)
 #
 # It prints what it will do first. If uv is missing, it asks before installing it with uv's
-# official installer; it never pipes a download into a shell. A uv from a relative PATH
-# entry or the active virtualenv is refused. Then it runs
+# official installer for one pinned uv version; it never pipes a download into a shell. A uv
+# from a relative PATH entry or the active virtualenv is refused. Then it runs
 #   uv tool install git+https://github.com/mlbala/aipm@TAG
 set -eu
 
 TAG="v0.2.0"
 REPO="https://github.com/mlbala/aipm"
-UV_INSTALLER="https://astral.sh/uv/install.sh"
+UV_INSTALLER="https://github.com/astral-sh/uv/releases/download/0.13.6/uv-installer.sh"
 YES=0
 
 fail() { echo "install.sh: $1" >&2; exit "${2:-1}"; }
@@ -67,6 +67,7 @@ if [ -z "$UV" ]; then
   command -v curl >/dev/null 2>&1 || fail "curl is needed to download the uv installer"
   installer=$(mktemp)
   trap 'rm -f "$installer"' EXIT
+  trap 'exit 130' INT TERM HUP
   curl --proto '=https' --tlsv1.2 -fsSL "$UV_INSTALLER" -o "$installer"
   sh "$installer"
   PATH="$HOME/.local/bin:$PATH"

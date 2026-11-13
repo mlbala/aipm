@@ -1,0 +1,13 @@
+id: C-074
+vector: structural
+input:
+  surface: install.sh
+  # install.sh downloaded uv's "latest" installer and ran it, so whatever astral.sh served on
+  # the day ran with the user's rights; under dash a download stopped by a signal left the
+  # partial installer in the temporary directory (RT04-19).
+  text: |
+    curl -fsSL https://astral.sh/uv/install.sh -o "$installer" && sh "$installer"
+expected:
+  outcome: >-
+    The installer of one uv release, the one CI uses, is fetched from that release's assets on
+    GitHub; a signal removes the partial file and nothing runs.
