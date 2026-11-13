@@ -33,6 +33,7 @@ from aipm.execution import git, worktree
 from aipm.execution.sandbox import ProcessKind, ProfilePaths, profile_for
 from aipm.gates import command_gate
 from aipm.gates.command_gate import toolchain_env
+from aipm.scanners import registry
 from aipm.security.network import NetworkPolicy
 from aipm.security.supply_chain import typosquat_of
 from aipm.state import done_record
@@ -492,3 +493,60 @@ def test_real_go_modules_are_not_typosquats(name: str) -> None:
 def test_c068_owner_lookalike_is_flagged() -> None:
     name = case("C-068")["input"]["text"].strip()
     assert typosquat_of(Ecosystem.GO, name) == "github.com/stretchr/testify"
+
+
+# ---------------------------------------------------------------- RT04-14: slow registry answers
+
+
+class _SlowReply:
+    """An HTTP 200 whose body arrives at one byte per second of the fake clock: each `read`
+    returns what was asked for, and moves the clock on by that many seconds."""
+
+    status = 200
+
+    def __init__(self, body: bytes, clock: list[float]) -> None:
+        self.body = body
+        self.clock = clock
+
+    def read(self, n: int = -1) -> bytes:
+        chunk, self.body = (self.body, b"") if n < 0 else (self.body[:n], self.body[n:])
+        self.clock[0] += len(chunk)
+        return chunk
+
+    def __enter__(self) -> "_SlowReply":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+
+def _slow_registry(monkeypatch: pytest.MonkeyPatch, body: bytes) -> None:
+    clock = [0.0]
+
+    class Opener:
+        def open(self, request: object, timeout: float) -> _SlowReply:
+            del request, timeout
+            return _SlowReply(body, clock)
+
+    monkeypatch.setattr(registry, "_clock", lambda: clock[0])
+    monkeypatch.setattr(registry.urllib.request, "build_opener", lambda *_: Opener())
+
+
+def test_a_registry_answer_has_a_total_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each socket read had a 15 s timeout, but nothing bounded the whole answer: a body that
+    keeps trickling in held the deps gate for as long as the registry liked (up to 32 MB)."""
+    body = json.dumps({"crate": {"created_at": "2020-01-01T00:00:00Z"}, "pad": "x" * 4096})
+    _slow_registry(monkeypatch, body.encode())
+    with pytest.raises(registry.RegistryError, match="too long"):
+        registry.first_release(Ecosystem.CRATES, "serde")
+
+
+def test_a_quick_registry_answer_is_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = json.dumps({"crate": {"created_at": "2020-01-01T00:00:00Z"}})
+    _slow_registry(monkeypatch, body.encode())
+    assert registry.first_release(Ecosystem.CRATES, "serde").exists
+
+
+def test_c069_the_deadline_is_bounded() -> None:
+    assert "1 byte" in case("C-069")["input"]["text"]
+    assert registry.DEADLINE_S <= 60

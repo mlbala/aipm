@@ -22,6 +22,7 @@ reports as an error: a lookup that fails never passes a package.
 
 import json
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -34,6 +35,11 @@ from aipm.domain.models import Ecosystem
 from aipm.security.supply_chain import check_package_name, normalize_name
 
 TIMEOUT_S = 15.0
+DEADLINE_S = 60.0
+"""The most one answer may take in total: `TIMEOUT_S` bounds each socket read only, so a body
+that keeps trickling in would otherwise hold the deps gate (red-team v0.4, RT04-14)."""
+_CHUNK = 65_536
+_clock = time.monotonic
 MAX_RESPONSE_BYTES = 32 * 1_048_576
 PYPI_SIMPLE = "https://pypi.org/simple/{name}/"
 NPM_DOC = "https://registry.npmjs.org/{name}"
@@ -85,19 +91,37 @@ def _fetch(url: str, headers: Mapping[str, str]) -> Response:
     """GET over HTTPS with no redirects; 404 is an answer, anything else but 200 an error."""
     if not url.startswith("https://"):
         raise RegistryError("registry lookups use HTTPS only")
+    deadline = _clock() + DEADLINE_S
     opener = urllib.request.build_opener(_NoRedirect())
     request = urllib.request.Request(url, headers=dict(headers), method="GET")  # noqa: S310
     try:
         with opener.open(request, timeout=TIMEOUT_S) as reply:
-            body = reply.read(MAX_RESPONSE_BYTES + 1)
+            body = _read_body(reply, deadline)
             status = reply.status
     except urllib.error.HTTPError as exc:
         return Response(exc.code, b"")
+    except RegistryError:
+        raise
     except Exception as exc:  # any failure to ask fails closed
         raise RegistryError(f"cannot reach the registry ({type(exc).__name__})") from None
     if len(body) > MAX_RESPONSE_BYTES:
         raise RegistryError("the registry's answer is larger than aipm reads")
     return Response(status, body)
+
+
+def _read_body(reply: Any, deadline: float) -> bytes:
+    """At most `MAX_RESPONSE_BYTES + 1` bytes, read in chunks until `deadline`."""
+    parts: list[bytes] = []
+    size = 0
+    while size <= MAX_RESPONSE_BYTES:
+        chunk: bytes = reply.read(min(_CHUNK, MAX_RESPONSE_BYTES + 1 - size))
+        if not chunk:
+            break
+        parts.append(chunk)
+        size += len(chunk)
+        if _clock() > deadline:
+            raise RegistryError(f"the registry took too long to answer (over {DEADLINE_S:.0f} s)")
+    return b"".join(parts)
 
 
 def _url(ecosystem: Ecosystem, name: str) -> str:
