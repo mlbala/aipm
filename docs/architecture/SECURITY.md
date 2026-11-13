@@ -309,7 +309,7 @@ Also protected:
 
 ### 9.3 Tool flags
 
-Each adapter builds its argv in code from fixed fragments. The policy rejects any invocation containing a forbidden flag (ARCHITECTURE §11, "Forbidden" row), even when the flag comes from user config. `--permission-mode auto` for Claude Code requires an explicit `dispatch.tools.claude.allow_auto_mode: true` in the user-level config. It is a user-only key, so a repo value is ignored (§6 rule 5).
+Each adapter builds its argv in code from fixed fragments. The policy rejects any invocation containing a forbidden flag (ARCHITECTURE §11, "Forbidden" row), even when the flag comes from user config. It reads every spelling the tool's parser accepts: `--flag=value` and `-fVALUE` (clap, Codex), and camelCase names and short-flag groups (`--approvalMode`, `-sy`; yargs, Gemini). For Codex it accepts only the three `-c`/`--config` overrides aipm passes, only `workspace-write` and `never` for `--sandbox` and `--ask-for-approval`, and no `--add-dir`, `--search` or `--profile` (red-team v0.4, RT04-5). `--permission-mode auto` for Claude Code requires an explicit `dispatch.tools.claude.allow_auto_mode: true` in the user-level config. It is a user-only key, so a repo value is ignored (§6 rule 5).
 
 ## 10. Command execution policy
 

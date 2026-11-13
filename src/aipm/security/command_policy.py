@@ -197,6 +197,19 @@ _FORBIDDEN_VALUES: dict[ToolName, tuple[tuple[str, frozenset[str]], ...]] = {
 }
 _CODEX_APPROVAL = re.compile(r"approval_policy\s*=\s*(.*)", re.IGNORECASE)
 """A Codex `-c approval_policy=<v>` override: only `never` keeps every command in the sandbox."""
+_CODEX_CONFIG: dict[str, str] = {
+    "approval_policy": "never",
+    "analytics.enabled": "false",
+    "check_for_update_on_startup": "false",
+}
+"""The only `-c`/`--config` overrides a Codex argv may hold, with their one allowed value
+(red-team v0.4, RT04-5). Any other key could widen the sandbox (`sandbox_workspace_write.*`),
+pick a profile with its own policy (`profiles.*`), pass the environment through
+(`shell_environment_policy.*`) or start an MCP server outside the sandbox (`mcp_servers.*`)."""
+_CODEX_OPTIONS = ("--add-dir", "--search", "--profile")
+"""Codex options that widen what the agent may write or reach, or load a profile."""
+_CAMEL = re.compile(r"[A-Z]")
+_SHORT_GROUP = re.compile(r"-[A-Za-z]{2,}")
 
 
 def _deny(message: str) -> PolicyViolation:
@@ -557,6 +570,65 @@ def compile_prepare(prepare: PrepareDef, *, policy: CommandPolicy) -> Argv:
     return check_argv(prepare.run, policy, stage="prepare")
 
 
+def _option_values(argv: Argv, long: str, short: str) -> list[str | None]:
+    """Every value given to an option, in each spelling clap accepts: `--long v`, `--long=v`,
+    `-s v` and `-sv`; `None` for one that ends the argv without a value."""
+    found: list[str | None] = []
+    for index, arg in enumerate(argv):
+        if arg in (long, short):
+            found.append(argv[index + 1] if index + 1 < len(argv) else None)
+        elif arg.startswith(f"{long}="):
+            found.append(arg.split("=", 1)[1])
+        elif arg.startswith(short) and not arg.startswith("--"):
+            found.append(arg[len(short) :])
+    return found
+
+
+def _plain(value: str) -> str:
+    return value.strip().strip("'\"").strip().casefold()
+
+
+def _check_codex_options(argv: Argv) -> None:
+    """Every spelling of `--sandbox`, `--ask-for-approval` and `--config`, and the options that
+    widen Codex's reach (red-team v0.4, RT04-5)."""
+    for value in _option_values(argv, "--sandbox", "-s"):
+        if value is not None and _plain(value) != "workspace-write":
+            raise PolicyViolation(f"codex: sandbox mode {value[:40]!r} is forbidden")
+    for value in _option_values(argv, "--ask-for-approval", "-a"):
+        if value is not None and _plain(value) != "never":
+            raise PolicyViolation(f"codex: approval policy {value[:40]!r} is forbidden")
+    for value in _option_values(argv, "--config", "-c"):
+        if value is None:
+            continue
+        key, _, setting = value.partition("=")
+        key = "".join(ch for ch in key if ch not in " '\"").casefold()
+        if key == "approval_policy" and _plain(setting) != "never":
+            raise PolicyViolation(f"codex: approval policy {setting[:40]!r} is forbidden")
+        if _CODEX_CONFIG.get(key) != _plain(setting):
+            raise PolicyViolation(f"codex: the config override {key[:60]!r} is forbidden")
+    for arg in argv:
+        name = arg.split("=", 1)[0]
+        attached = arg.startswith("-p") and not arg.startswith("--")
+        if name in _CODEX_OPTIONS or attached:
+            raise PolicyViolation(f"codex: option {name[:40]} is forbidden")
+
+
+def _yargs_argv(argv: Argv) -> Argv:
+    """`argv` as yargs reads its option names: `--approvalMode` is `--approval-mode`, and a
+    short group `-sy` is `-s -y` (red-team v0.4, RT04-5)."""
+    out: list[str] = []
+    for arg in argv:
+        if arg.startswith("--"):
+            name, sep, value = arg.partition("=")
+            kebab = _CAMEL.sub(lambda m: "-" + m.group(0).lower(), name[2:])
+            out.append(f"--{kebab}{sep}{value}")
+        elif _SHORT_GROUP.fullmatch(arg):
+            out.extend(f"-{ch}" for ch in arg[1:])
+        else:
+            out.append(arg)
+    return tuple(out)
+
+
 def _check_codex(argv: Argv) -> None:
     """No full access, and no approval policy but `never`: an approval would let a command run
     outside the sandbox, and nobody is there to answer one."""
@@ -573,13 +645,17 @@ def _check_codex(argv: Argv) -> None:
             value = match.group(1) if match else None
         if value is not None and value.strip(" '\"").casefold() != "never":
             raise PolicyViolation(f"codex: approval policy {value[:40]!r} is forbidden")
+    _check_codex_options(argv)
 
 
 def check_forbidden_flags(tool: ToolName, argv: Argv, *, allow_auto_mode: bool = False) -> None:
     """Raise `PolicyViolation` if `argv` holds a forbidden flag (ARCHITECTURE §11).
 
     `allow_auto_mode` is `dispatch.tools.claude.allow_auto_mode` from the user-level config.
+    Gemini's argv is read as yargs reads it (camelCase names, short groups).
     """
+    if tool is ToolName.GEMINI:
+        argv = _yargs_argv(argv)
     for arg in argv:
         for flag in _FORBIDDEN_FLAGS[tool]:
             if arg == flag or arg.startswith(f"{flag}="):

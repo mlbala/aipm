@@ -1,0 +1,21 @@
+id: C-060
+vector: config-redirection
+input:
+  surface: agent-argv
+  # Spellings of a forbidden Codex or Gemini option that the CLI parsers accept and that
+  # check_forbidden_flags did not catch (RT04-5): clap's --opt=value and -oVALUE, Codex config
+  # overrides that widen its sandbox, approvals or MCP servers, and yargs camelCase and short
+  # flag groups.
+  text: |
+    codex exec --config=approval_policy=on-request
+    codex exec -capproval_policy=untrusted
+    codex exec -c sandbox_workspace_write.network_access=true
+    codex exec -c mcp_servers.x.command="sh"
+    codex exec --add-dir /
+    gemini --approvalMode yolo
+    gemini -sy
+expected:
+  outcome: >-
+    Each is refused before any process starts. Codex accepts only the three fixed -c overrides;
+    Gemini options are matched after camelCase is folded and short groups are split.
+  exit_code: 6

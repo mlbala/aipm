@@ -19,11 +19,13 @@ from aipm.adapters.base import AgentResult
 from aipm.adapters.claude_code import ClaudeCodeAdapter
 from aipm.adapters.codex import CodexAdapter
 from aipm.adapters.gemini import GeminiAdapter
-from aipm.domain.models import NetworkProfile
+from aipm.domain.errors import PolicyViolation
+from aipm.domain.models import NetworkProfile, ToolName
 from aipm.execution import git, sandbox
 from aipm.execution.process import ProcessResult
 from aipm.execution.sandbox import ProcessKind, ProfilePaths, profile_for
 from aipm.llm.fake import FakeLLM
+from aipm.security.command_policy import check_forbidden_flags
 from aipm.security.network import NetworkPolicy
 from aipm.security.paths import is_protected
 from tests.conftest import FakeSecrets, run_git
@@ -293,3 +295,73 @@ def test_c059_every_token_file_is_a_credential_path() -> None:
     for line in case_text("C-059").splitlines():
         rel = line.split(":", 1)[0].removeprefix("~/")
         assert rel in sandbox.CREDENTIAL_PATHS, rel
+
+
+# ---------------------------------------------------------------- RT04-5: forbidden-flag forms
+
+
+CODEX_FORMS = [
+    ("--config=approval_policy=on-request",),
+    ("-capproval_policy=untrusted",),
+    ("-auntrusted",),
+    ("--ask-for-approval", "on-failure"),
+    ("-c", "profiles.p.approval_policy=on-request", "--profile", "p"),
+    ("--profile=p",),
+    ("-p", "p"),
+    ("-c", "sandbox_workspace_write.network_access=true"),
+    ("-c", 'mcp_servers.x.command="sh"'),
+    ("-c", "shell_environment_policy.inherit=all"),
+    ("-c", "approval_policy"),
+    ("--add-dir", "/"),
+    ("--add-dir=/",),
+    ("--search",),
+    ("-s", "read-only"),
+    ("-sdanger-full-access",),
+    ("--sandbox=read-only",),
+]
+
+
+@pytest.mark.parametrize("extra", CODEX_FORMS, ids=" ".join)
+def test_every_form_of_a_forbidden_codex_option_is_caught(extra: tuple[str, ...]) -> None:
+    """Defense in depth: the argv is fixed in code, but the check must catch every spelling
+    clap accepts (`--opt=value`, `-oVALUE`) and every override that widens Codex's sandbox,
+    approvals or MCP servers, not only the names it listed."""
+    with pytest.raises(PolicyViolation):
+        check_forbidden_flags(ToolName.CODEX, ("codex", "exec", *extra, "-"))
+
+
+GEMINI_FORMS = [
+    ("--approvalMode", "yolo"),
+    ("--approvalMode=YOLO",),
+    ("--skipTrust",),
+    ("--skipTrust=true",),
+    ("-sy",),
+    ("-ys",),
+    ("--yolo=true",),
+]
+
+
+@pytest.mark.parametrize("extra", GEMINI_FORMS, ids=" ".join)
+def test_every_form_of_a_forbidden_gemini_option_is_caught(extra: tuple[str, ...]) -> None:
+    """yargs reads `--approvalMode` as `--approval-mode` and `-sy` as `-s -y`."""
+    with pytest.raises(PolicyViolation, match="forbidden"):
+        check_forbidden_flags(ToolName.GEMINI, ("gemini", *extra, "--prompt", "x"))
+
+
+def test_the_argv_aipm_builds_still_passes() -> None:
+    for harmless in (("-c",), ("-s",), ("-a",), ("-c", "analytics.enabled=false")):
+        check_forbidden_flags(ToolName.CODEX, ("codex", "exec", *harmless))
+    check_forbidden_flags(ToolName.CODEX, ("/opt/codex", *codex.FIXED, "-"))
+    rule = "run_shell_command(uv run --frozen --offline pytest)"
+    check_forbidden_flags(ToolName.GEMINI, (
+        "/opt/gemini", "--approval-mode", "auto_edit", "--output-format", "json", "--extensions",
+        "none", "--allowed-tools", rule, "--sandbox", "--prompt", gemini.PROMPT_TAIL,
+    ))  # fmt: skip
+
+
+def test_c060_every_spelling_is_refused() -> None:
+    for line in case_text("C-060").splitlines():
+        argv = tuple(line.split())
+        tool = ToolName.CODEX if argv[0] == "codex" else ToolName.GEMINI
+        with pytest.raises(PolicyViolation):
+            check_forbidden_flags(tool, argv)
