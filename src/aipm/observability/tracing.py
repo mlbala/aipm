@@ -38,7 +38,14 @@ class _Span(Protocol):
 
 
 class _Tracer(Protocol):
-    def start_as_current_span(self, name: str, *, attributes: Any = None) -> Any: ...
+    def start_as_current_span(
+        self,
+        name: str,
+        *,
+        attributes: Any = None,
+        record_exception: bool = True,
+        set_status_on_exception: bool = True,
+    ) -> Any: ...
 
 
 _state: dict[str, Any] = {}
@@ -109,7 +116,15 @@ def span(name: str, **attrs: object) -> Generator["SpanHandle"]:
     if tracer is None or name not in SPAN_NAMES:
         yield SpanHandle(None)
         return
-    with tracer.start_as_current_span(name, attributes=clean_attributes(attrs)) as current:
+    # An exception's message, stack trace and chained causes are free text (task text, paths,
+    # provider error bodies) that would skip the allowlist and the redactor, so the SDK never
+    # records one: status and exit code are set only through `SpanHandle.set` (step 08 review).
+    with tracer.start_as_current_span(
+        name,
+        attributes=clean_attributes(attrs),
+        record_exception=False,
+        set_status_on_exception=False,
+    ) as current:
         yield SpanHandle(current)
 
 

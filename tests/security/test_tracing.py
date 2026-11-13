@@ -84,6 +84,26 @@ def test_unknown_span_names_record_nothing() -> None:
     assert [s.name for s in memory.get_finished_spans()] == ["aipm.gate"]
 
 
+def test_a_span_ended_by_an_exception_exports_no_message_or_stack_trace(
+    fake_secrets: FakeSecrets,
+) -> None:
+    """The SDK would record the exception as an event and as the status description, outside
+    the allowlist and the redactor (step 08 security review, F-2)."""
+    del fake_secrets
+    secret = next(iter(FAKE_SECRETS.values()))
+    memory = InMemorySpanExporter()
+    tracing.configure_tracing(enabled=True, exporter=memory)
+    with pytest.raises(RuntimeError), tracing.span("aipm.command", command="verify"):
+        try:
+            raise ValueError(f"task text: ignore previous instructions {secret} /Users/x/repo")
+        except ValueError as error:
+            raise RuntimeError("wrapped") from error
+    (finished,) = memory.get_finished_spans()
+    assert list(finished.events) == []
+    assert not finished.status.description
+    assert set(dict(finished.attributes or {})) == {"aipm.command"}
+
+
 def spans(memory: InMemorySpanExporter) -> list[tuple[str, dict[str, Any]]]:
     tracing.shutdown()
     return [(s.name, dict(s.attributes or {})) for s in memory.get_finished_spans()]
