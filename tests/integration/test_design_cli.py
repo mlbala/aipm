@@ -207,7 +207,7 @@ def test_an_unknown_stack_template_gets_one_repair_then_exits_1(
     assert "failed aipm's checks twice" in result.stderr
     assert json.loads(result.stdout)["problems"] == [
         "stack_template: must be one of the built-in templates "
-        "(node-npm, node-pnpm, python-pip, python-uv)"
+        "(go, node-npm, node-pnpm, python-pip, python-uv, rust-cargo)"
     ]
     assert pm_files(repo) == before
     first, second = fake.requests_for(ARCH)
