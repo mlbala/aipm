@@ -16,7 +16,7 @@
 uv tool install git+https://github.com/mlbala/aipm
 ```
 
-Or run [`install.sh`](install.sh) (`sh install.sh [-y] [-t TAG]`): it prints what it will do, asks before installing uv with uv's official installer if uv is missing, then runs the same `uv tool install` for a release tag.
+Or run [`install.sh`](install.sh) (`sh install.sh [-y] [-t TAG]`): it prints what it will do, refuses to run with a relative or empty PATH entry or an active virtualenv (run it from a shell with no repository environment loaded), asks before installing uv with the official installer of one pinned uv release if uv is missing, then runs the same `uv tool install` for a release tag (`v0.4.0` by default). It builds from the tag; to install the attested files instead, see [Verifying a release](#verifying-a-release).
 
 aipm needs Python 3.13 or later. It is distributed from GitHub only ([ADR-0001](docs/architecture/adr/0001-distribute-from-github.md)).
 
