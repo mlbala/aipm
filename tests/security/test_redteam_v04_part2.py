@@ -14,11 +14,14 @@ from typing import Any
 import pytest
 from ruamel.yaml import YAML
 
+from aipm.app import auto
 from aipm.app import build as build_use_case
 from aipm.cli import output as cli_output
 from aipm.cli.main import app
 from aipm.config import loader as config_loader
+from aipm.domain.errors import HumanInputRequired
 from aipm.domain.models import APPROVED_NAMES, ApprovalGate, ArtifactKind
+from aipm.domain.phase import Phase, PhaseReport
 from aipm.state.store import open_store
 from tests.conftest import FakeSecrets
 from tests.integration.build_flow import fake_registry, prepare_project
@@ -178,3 +181,58 @@ def test_plan_and_approve_alone_still_trust_interactively(
 def test_c063_auto_g3_records_no_trust() -> None:
     data = case("C-063")
     assert data["expected"]["exit_code"] == 6
+
+
+# ---------------------------------------------------------------- RT04-9: auto cycles
+
+
+class _CountingSteps:
+    def __init__(self) -> None:
+        self.ran: list[str] = []
+
+    def run(self, step: auto.AutoStep, *, yes: bool) -> None:
+        del yes
+        self.ran.append(step.command)
+
+
+def _cycle(*commands: str) -> Callable[[Path | None], PhaseReport]:
+    """Phase reports that go round `commands` for ever: each step "succeeds" but the state
+    comes back."""
+    reports = [PhaseReport(Phase.DESIGN_DRAFT, next_command=c) for c in commands]
+    count = [0]
+
+    def report(_: Path | None) -> PhaseReport:
+        count[0] += 1
+        return reports[(count[0] - 1) % len(reports)]
+
+    return report
+
+
+@pytest.mark.parametrize(
+    "commands",
+    [
+        ("aipm design --regenerate", "aipm plan"),
+        ("aipm plan", "aipm approve plan", "aipm design --regenerate"),
+    ],
+)
+def test_auto_stops_when_a_state_comes_back(commands: tuple[str, ...]) -> None:
+    steps = _CountingSteps()
+    with pytest.raises(HumanInputRequired, match=r"changed nothing|came back"):
+        auto.run(None, auto.AutoOptions(yes=True), steps, report=_cycle(*commands),
+                 trust=lambda _: None)  # fmt: skip
+    assert len(steps.ran) == len(commands), steps.ran
+
+
+def test_auto_still_runs_a_plan_that_moves_forward() -> None:
+    order = ["aipm design", "aipm approve design", "aipm plan", "aipm approve plan"]
+    reports = [PhaseReport(Phase.PRD_APPROVED, next_command=c) for c in order]
+    reports.append(PhaseReport(Phase.BUILT))
+    steps = _CountingSteps()
+    it = iter(reports)
+    auto.run(None, auto.AutoOptions(yes=True), steps, report=lambda _: next(it),
+             trust=lambda _: None)  # fmt: skip
+    assert steps.ran == order
+
+
+def test_c064_a_cycle_stops_with_exit_4() -> None:
+    assert case("C-064")["expected"]["exit_code"] == int(HumanInputRequired.exit_code)

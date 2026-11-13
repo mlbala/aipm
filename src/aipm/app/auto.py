@@ -207,6 +207,7 @@ def run(
     derive = report or _phase
     result = AutoResult()
     last: tuple[str, str | None, tuple[str, ...]] | None = None
+    seen: set[tuple[str, str | None, tuple[str, ...]]] = set()
     for _ in range(MAX_STEPS):
         current = derive(project)
         result.phase = current.phase.value
@@ -217,7 +218,16 @@ def run(
                 "not approved, or a step that needs you)",
                 hint=f"Run `{current.next_command}` yourself to see what it needs.",
             )
+        if state in seen:
+            # Steps that undo each other would otherwise run, and spend, until MAX_STEPS
+            # (red-team v0.4, RT04-9).
+            raise HumanInputRequired(
+                f"aipm auto stopped: the plan came back to `{current.next_command}` without "
+                "getting further",
+                hint=f"Run `{current.next_command}` yourself to see what it needs.",
+            )
         last = state
+        seen.add(state)
         step = next_step(current)
         if step.kind is StepKind.DONE:
             return result

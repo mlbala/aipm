@@ -1,0 +1,14 @@
+id: C-064
+vector: structural
+input:
+  surface: llm-output
+  # `aipm auto` stopped only when a step left the state exactly as the step before it. Steps
+  # whose results undo each other (a design that makes the plan stale, a plan that makes the
+  # design stale) went round until the 50-step limit, each one spending LLM money (RT04-9).
+  text: |
+    aipm design --regenerate -> aipm plan -> aipm design --regenerate -> aipm plan -> ...
+expected:
+  outcome: >-
+    auto stops the first time the run returns to a state it has already been in, and names the
+    command to run by hand.
+  exit_code: 4
