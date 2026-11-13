@@ -2,6 +2,8 @@
 
 The `examples/clinic-booking` flow with the fake LLM (ARCHITECTURE §20). `test_clinic_flow.py` runs `init` → `discover --answers` → `design` → `approve design` → `plan` → `approve plan` → `trust --confirm` → `status` (build prompt 04). `prompt` and `sync-context` join it with build prompt 05, then verify and build with stub agents.
 
+`test_hostile_world.py` (red-team v0.4) runs `aipm auto --yes` over the clinic example with everything the attacker controls hostile at once: `idea.md`, the repository (`.cargo/config.toml`, `.gemini/`, a `conftest.py` that phones home, a cloned `.pm/config.yaml`), every FakeLLM reply, and the coding agent, once per dispatchable tool (Claude Code, Codex, Gemini). It checks invariants I-1 to I-8 after every command, and each stop's exit code. About 10 s per tool.
+
 ## Live smoke test
 
 `test_live_smoke.py` makes one real interviewer call with the provider in your user config. It is skipped unless `AIPM_LIVE=1`, and never runs in CI:
