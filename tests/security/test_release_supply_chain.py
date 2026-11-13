@@ -87,6 +87,30 @@ def test_every_published_file_is_attested() -> None:
     assert set(published) <= set(attested), (published, attested)
 
 
+# ------------------------------------------------------------------ RT04-17
+
+
+def test_the_readme_verify_command_pins_the_release_workflow_and_the_tag() -> None:
+    """RT04-17: `--repo mlbala/aipm` alone accepts an attestation that any workflow run in the
+    repository signed (a branch push whose edited workflow grants `id-token: write`), not only
+    release.yml from the tag, which is what the README said it checks."""
+    commands = [
+        line.strip()
+        for line in README.read_text(encoding="utf-8").splitlines()
+        if line.strip().startswith("gh attestation verify")
+    ]
+    assert commands
+    for command in commands:
+        words = shlex.split(command.split("#", 1)[0])
+        assert "--signer-workflow" in words, command
+        assert words[words.index("--signer-workflow") + 1] == (
+            "mlbala/aipm/.github/workflows/release.yml"
+        )
+        assert "--source-ref" in words, command
+        assert re.fullmatch(r"refs/tags/v\d+\.\d+\.\d+", words[words.index("--source-ref") + 1])
+        assert "--deny-self-hosted-runners" in words, command
+
+
 # ------------------------------------------------------------------ pins
 
 

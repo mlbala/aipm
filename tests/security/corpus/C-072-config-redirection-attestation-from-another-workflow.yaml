@@ -1,0 +1,12 @@
+id: C-072
+vector: config-redirection
+input:
+  surface: release-verification
+  # The README's verify command named only the repository, so an attestation signed by any
+  # workflow run in mlbala/aipm passed, not only release.yml from the tag (RT04-17).
+  text: |
+    gh attestation verify aipm-0.4.0-py3-none-any.whl --repo mlbala/aipm
+expected:
+  outcome: >-
+    The documented command also pins --signer-workflow to release.yml, --source-ref to the
+    release tag and --deny-self-hosted-runners; an attestation from a branch run fails it.
