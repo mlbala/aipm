@@ -25,6 +25,7 @@ from aipm.domain.models import APPROVED_NAMES, ApprovalGate, ArtifactKind, Netwo
 from aipm.domain.phase import Phase, PhaseReport
 from aipm.execution import git, worktree
 from aipm.execution.sandbox import ProcessKind, ProfilePaths, profile_for
+from aipm.gates import command_gate
 from aipm.gates.command_gate import toolchain_env
 from aipm.security.network import NetworkPolicy
 from aipm.state import done_record
@@ -401,3 +402,44 @@ def test_c066_every_planted_toolchain_file_is_refused_or_watched() -> None:
     text = case("C-066")["input"]["text"]
     for rel in TOOLCHAIN_USER_FILES:
         assert rel in text
+
+
+# ---------------------------------------------------------------- RT04-12: borrowed Go network
+
+
+GO_HOSTS = {"proxy.golang.org", "sum.golang.org", "storage.googleapis.com"}
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["go", "test", "./..."],
+        ["/usr/local/go/bin/go", "build", "./..."],
+        ["go", "vet", "./..."],
+        ["go", "-C", "sub", "test", "./..."],
+        ["go", "run", "mod", "download"],
+        ["go", "mod", "verify"],
+        ["gotestsum", "--junitfile", "r.xml", "--", "./..."],
+        ["go", "test", "mod", "download"],
+    ],
+)
+def test_only_go_mod_download_opens_the_go_proxy_in_prepare(argv: list[str]) -> None:
+    """ADR-0029 opens the Go proxy and its storage host (anyone's bucket) to the prepare step
+    because `go mod download` runs no repository code; any other go or gotestsum prepare
+    command (a test run) borrowed that profile by its program name."""
+    policy = command_gate._network(NetworkProfile.REGISTRIES, argv, ProcessKind.PREPARE)  # pyright: ignore[reportPrivateUsage]
+    assert not GO_HOSTS & set(policy.domains), argv
+
+
+@pytest.mark.parametrize(
+    "argv", [["go", "mod", "download"], ["/opt/go/bin/go", "mod", "download", "-x"]]
+)
+def test_go_mod_download_keeps_the_go_proxy(argv: list[str]) -> None:
+    policy = command_gate._network(NetworkProfile.REGISTRIES, argv, ProcessKind.PREPARE)  # pyright: ignore[reportPrivateUsage]
+    assert set(policy.domains) == GO_HOSTS
+
+
+def test_c067_go_test_in_prepare_gets_no_go_hosts() -> None:
+    argv = case("C-067")["input"]["text"].split()
+    policy = command_gate._network(NetworkProfile.REGISTRIES, argv, ProcessKind.PREPARE)  # pyright: ignore[reportPrivateUsage]
+    assert not GO_HOSTS & set(policy.domains)

@@ -1,0 +1,13 @@
+id: C-067
+vector: exfiltration
+input:
+  surface: repo-config
+  # The prepare step's registries were chosen by its program name alone. A prepare command
+  # `go test ./...` runs repository test code, and got the Go proxy's storage host, where
+  # anyone can create a bucket to carry data out (RT04-12; ADR-0029 grants it to `go mod
+  # download`, which runs no repository code).
+  text: go test ./...
+expected:
+  outcome: >-
+    Only `go mod download` opens the Go hosts in the prepare step; any other go or gotestsum
+    command gets the Go proxy, its checksum database and its storage host closed.

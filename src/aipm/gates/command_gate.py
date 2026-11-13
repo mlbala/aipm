@@ -109,6 +109,11 @@ def ecosystems_for(argv: Sequence[str]) -> tuple[Ecosystem, ...]:
     return _ECOSYSTEMS.get(program_name(argv[0]), (Ecosystem.PYPI, Ecosystem.NPM))
 
 
+def _go_mod_download(argv: Sequence[str]) -> bool:
+    """`go mod download`, with nothing between `go` and `mod download`."""
+    return program_name(argv[0]) == "go" and list(argv[1:3]) == ["mod", "download"]
+
+
 def _network(profile: NetworkProfile, argv: Sequence[str], kind: ProcessKind) -> NetworkPolicy:
     if profile is NetworkProfile.API_ONLY:
         raise PolicyViolation(
@@ -116,9 +121,11 @@ def _network(profile: NetworkProfile, argv: Sequence[str], kind: ProcessKind) ->
             hint="Use none (the default), registries or open for gates and the prepare step.",
         )
     ecosystems = ecosystems_for(argv)
-    if kind is not ProcessKind.PREPARE:
+    if kind is not ProcessKind.PREPARE or not _go_mod_download(argv):
         # The Go proxy fetches any module path from its origin, and its storage host takes
         # anyone's bucket: test code could carry data out through either (step 08 review).
+        # Only `go mod download`, which runs no repository code, gets them (ADR-0029); a test
+        # run in the prepare step borrowed them by its program name (red-team v0.4, RT04-12).
         ecosystems = tuple(e for e in ecosystems if e is not Ecosystem.GO)
     return parse_network(profile.value, ecosystems=ecosystems)
 

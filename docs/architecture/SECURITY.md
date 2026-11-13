@@ -275,7 +275,7 @@ The coding agent and gate processes run in the sandbox (§9), with a scrubbed en
 |---|---|---|---|
 | Agent | The worktree; a per-attempt temp dir; the agent's isolated config home | Credential dirs (§3); with an isolated config home, the agents' own homes (`~/.claude`, `~/.codex`, `~/.gemini`, `~/.copilot`) unless its program lies inside one; every top-level entry of the main checkout except `.git`; every other task's worktree and config home, by name, whether it exists yet or not; the rebase directory ([ADR-0024](adr/0024-a-dispatched-agent-reads-only-its-worktree.md)) | `api-only`: the tool's API domains |
 | Gates | The worktree; temp dir | Credential dirs; the agent's config home. In a build, also the main checkout's entries and the other tasks, as for the agent | `none` |
-| Prepare | The worktree; the package-manager cache | Credential dirs. In a build, also the main checkout's entries and the other tasks | `registries`: e.g. `pypi.org`, `files.pythonhosted.org`, `registry.npmjs.org` |
+| Prepare | The worktree; the package-manager cache | Credential dirs. In a build, also the main checkout's entries and the other tasks | `registries`: the registries of the step's program, e.g. `pypi.org`, `files.pythonhosted.org`, `registry.npmjs.org`; the Go proxy and its storage host only for `go mod download`, which runs no repository code (ADR-0029; red-team v0.4, RT04-12) |
 | Scanners | Their own output dir | Credential dirs | Their rule registries only (e.g. `semgrep.dev`), run with `--metrics off` |
 
   `denyWrite` always includes `.git/` (except git internals that aipm itself manages) and the agent's global settings, hooks, plugins and skills files.
