@@ -6,6 +6,17 @@ All notable changes to aipm are recorded here. The format follows [Keep a Change
 
 ### Added
 
+- Codex CLI and Gemini CLI dispatch (v0.4): `aipm build|run --tool codex|gemini`. Codex runs `codex exec` in its `workspace-write` sandbox (network off) with approvals set to `never`, rules ignored and `CODEX_HOME` in the task's own empty directory; Gemini runs with `auto_edit` approvals, one `run_shell_command(<gate>)` rule per gate, no extensions, its own sandbox only when `srt` is not used, and an aipm-written `settings.json` in `GEMINI_CLI_HOME`. A worktree whose root holds `.gemini/` or `.env*` is refused for Gemini (exit 6). Every flag is checked against the installed tool's help; a missing one exits 8. Neither reports cost, so each attempt is charged its task budget ([ADR-0026](docs/architecture/adr/0026-codex-and-gemini-dispatch-flags.md)).
+- GitHub Copilot CLI, render-only (v0.4): `aipm prompt --tool copilot` and `aipm sync-context --tool copilot` work; dispatch exits 8 until its shell-rule matching and prompt delivery are documented ([ADR-0025](docs/architecture/adr/0025-copilot-ships-render-only.md)).
+- `aipm sync-context` writes `GEMINI.md` (an `@./AGENTS.md` import), a thin `.github/copilot-instructions.md`, and the Codex skills under `.agents/skills/`, all as managed blocks with the usual diff approval.
+- `docs/adapters.md`: the verification table for every coding agent, with sources and versions.
+- `aipm auto [--yes]` (v0.4): runs `discover`, `design`, `plan` and `build` in turn until the plan is built, pausing at G1–G3 unless `--yes`. It checks trust first and never records it (exit 6 with `aipm trust`), stops on any failing step with that step's exit code and the command to run next, and on a step that changes nothing ([ADR-0028](docs/architecture/adr/0028-auto-checks-trust-first.md)).
+- Entry-point plugins (v0.4): the `aipm.adapters`, `aipm.gates`, `aipm.scanners`, `aipm.llm_providers` and `aipm.stacks` groups, read only from aipm's own site-packages and imported with `sys.path` limited to them; `--no-plugins`; `aipm doctor` lists what loaded. Plugin stacks (YAML text) join the shipped templates.
+- OpenTelemetry spans (v0.4, the `otel` extra): `--trace` with `OTEL_EXPORTER_OTLP_ENDPOINT` records a span per command, LLM call, dispatch and gate, with allowlisted attributes only (IDs, durations, tokens, costs, statuses) ([ADR-0027](docs/architecture/adr/0027-opentelemetry-is-an-opt-in-network-path.md)).
+- The `go` (go vet, gofmt, gotestsum) and `rust-cargo` (clippy, cargo fmt, cargo nextest) stack templates, detected by `aipm init` from `go.mod` and `Cargo.toml`. Go modules and crates are dependency ecosystems: name rules, typosquat lists, registry age lookups (Go module proxy, crates.io), `go.mod`/`Cargo.toml` manifests, `go.sum`/`Cargo.lock` lockfiles, and `go.work`, `.cargo/config*` and toolchain files as package configuration. `ac_trace` maps Go test files to their packages; it is advisory for `rust-cargo` ([ADR-0029](docs/architecture/adr/0029-go-and-rust-cargo-test-reports.md)).
+- The release workflow (v0.4): on a `v*` tag, `uv build`, a CycloneDX SBOM, SHA-256 checksums, build-provenance attestations and a GitHub Release; and a weekly OpenSSF Scorecard workflow. The README explains how to verify a release with `gh attestation verify`.
+- Stub `codex`, `gemini` and `copilot` binaries and an adapter contract suite; every SECURITY.md §14.3 scenario now also runs against the Codex, Gemini and Copilot stubs.
+
 - `aipm build` (v0.3): every ready task, dispatched to Claude Code and verified, unattended. Each attempt runs in a worktree outside the repository on `aipm/task/<T-ID>`, made from the integration branch (`aipm/integration`); the agent is sandboxed with the `api-only` network profile and a configuration home of its own, and runs with `--bare`, `dontAsk`, no permission prompts, no repository or local settings and no MCP servers, the file tools plus the task's gate commands, and `--max-budget-usd` (ADR-0023). Then the post-change checks and gates of `verify` run: a severe violation blocks the task at once and is never retried; a minor one is reverted and the attempt retried with feedback in the same session (`--resume`), up to `--max-retries`. A passing task gets one commit with `Aipm-Task`, `Aipm-Run` and `Aipm-Attempt` trailers, checked against what was verified and fast-forwarded (rebased first if needed) onto the integration branch; a conflict blocks it with `merge_conflict`. `--parallel` (at most 8) never runs tasks that own the same files or a serialized path together; the run budget holds each running attempt's task budget and exits 5 when the next would not fit; the first Ctrl-C lets running tasks finish for 30 s, a second stops them (exit 130); a crashed or interrupted run resumes from its journal without committing anything twice. `--only`, `--timeout`, `--budget`, `--dry-run` (prints batches and argv, dispatches nothing), live progress on stderr and an end-of-run summary.
 - `aipm run <T-ID>` (v0.3): the same loop for one task.
 - `aipm merge` (v0.3): shows `git log --oneline <branch>..aipm/integration`, asks, then fast-forwards your branch (`--into`); never pushes, never makes a merge commit.
@@ -28,6 +39,12 @@ All notable changes to aipm are recorded here. The format follows [Keep a Change
 - `aipm status`, `status --task` and `build --dry-run` flag a done task that this machine has no record of finishing as *claimed by the repository* (a cloned `tasks.yaml`). It still unlocks the tasks after it.
 - `aipm doctor` says when the git found is 2.54, which aipm refuses while a config hook is set.
 
+### Changed
+
+- A `registries` network profile opens only the registries of the program the step runs (`uv`/`pip`: PyPI, `npm`/`pnpm`/`yarn`: npm, `go`: the Go proxy, `cargo`: crates.io).
+- The command policy refuses `go run|generate|tool|env|install`, `-exec`, `-toolexec`, `-vettool`, gotestsum's `--raw-command`, `--post-run-command` and `--watch`, and `cargo run|install`, `--config`, `-Z` and `+toolchain`; and the Codex flags `--full-auto`, `--approve-for-me`, `--not-so-yolo` and any approval policy but `never`, Copilot `--assisted-approval` and Gemini `--skip-trust`.
+- `aipm doctor` reports `CODEX_API_KEY` and `COPILOT_GITHUB_TOKEN` (set or not, never the values).
+
 ### Fixed
 
 - `aipm status` with no build yet says "no build has run" instead of naming the milestone (the status snapshot changed on purpose).
@@ -35,6 +52,12 @@ All notable changes to aipm are recorded here. The format follows [Keep a Change
 - A directory where aipm expected a file (a `.gitignore` directory in a cloned repository, a trust store path) is refused instead of crashing.
 
 ### Security
+
+The step 08 security review found one high and two medium problems in the v0.4 work, all fixed:
+
+- The rust-cargo unit gate (`cargo test`) passed on exit 0 alone, so a test calling `std::process::exit(0)`, or a `build.rs` killing cargo under `srt`, passed a task whose tests failed. It now runs `cargo nextest run` with a configuration aipm writes outside the work tree (the new `{nextest_config}` placeholder), and passes only when nextest's JUnit report shows tests ran and none failed. The command policy allows `run` only in `cargo nextest run`, and refuses nextest's prebuilt-binary and tool-config flags ([ADR-0030](docs/architecture/adr/0030-rust-unit-gate-runs-nextest.md)).
+- With `--trace`, a span ended by an exception exported the exception's message and stack trace (task text, paths, provider error bodies) as an event and as the status description, around the attribute allowlist and the redactor. Spans no longer record exceptions.
+- The release build resolved its build backend (hatchling, hatch-vcs) fresh from PyPI. It is now pinned with hashes in `.github/release/requirements-build.txt` (`uv build --build-constraints … --require-hashes`), kept current by Dependabot.
 
 The v0.3 red-team pass ([docs/security/reviews/v0.3.md](docs/security/reviews/v0.3.md)) found ten problems (two medium, seven low, one info), all fixed, and settled O-3 of the v0.2 review (the last item):
 

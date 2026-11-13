@@ -31,7 +31,7 @@ MAX_ARG_LENGTH = 512
 MAX_EXPANDED_VALUES = 256
 """Placeholder values per argv; the 32-element limit applies to the configured template."""
 
-PLACEHOLDERS = frozenset({"{paths}", "{test_paths}", "{report_file}"})
+PLACEHOLDERS = frozenset({"{paths}", "{test_paths}", "{report_file}", "{nextest_config}"})
 
 HARD_DENIED: frozenset[str] = frozenset(
     {
@@ -89,8 +89,9 @@ FETCH_AND_RUN: tuple[Argv, ...] = (
 """Spellings of the hard-denied `uvx`, `npx`, `pnpx` and `bunx`: refused in every stage."""
 
 _NEEDS_PROGRAM = frozenset(
-    {"uv", "npm", "pnpm", "yarn", "bun", "pip", "python", "node", "nodejs", "deno", "ruby", "perl"}
-)
+    {"uv", "npm", "pnpm", "yarn", "bun", "pip", "python", "node", "nodejs", "deno", "ruby", "perl",
+     "go", "cargo"}
+)  # fmt: skip
 """Package managers and interpreters: an allowed prefix starting with one must also name the
 program or subcommand it runs, so `[uv]` or `[uv, run]` can never allow everything."""
 _RUNNER_WORDS = frozenset({"run", "tool", "exec", "dlx", "x", "uvx"})
@@ -144,7 +145,25 @@ _INSTALL_WORDS: dict[str, frozenset[str]] = {
     "pnpm": frozenset({"dlx", "install", "i", "add", "update", "up"}),
     "yarn": frozenset({"dlx", "add", "install", "up", "upgrade"}),
     "uv": frozenset({"add", "sync"}),
+    "go": frozenset({"get", "download"}),
+    "cargo": frozenset({"fetch", "update", "add", "generate-lockfile"}),
 }
+
+# Go, gotestsum and cargo (the v0.4 stacks): routes that start a program other than the
+# repository's own code, or that read settings that do, refused at every stage.
+_GO_DENIED_WORDS = frozenset({"run", "generate", "tool", "env", "install"})
+"""`go run` builds and runs anything, `generate` runs the `//go:generate` lines, `tool` runs any
+tool, `env -w` rewrites the toolchain's settings and `install` puts programs on PATH."""
+_GO_EXEC_FLAGS = ("-exec", "-toolexec", "-vettool")
+"""Each names a program `go` starts in place of, or around, its own."""
+_GOTESTSUM_FLAGS = ("--raw-command", "--post-run-command", "--watch")
+_CARGO_DENIED_WORDS = frozenset({"run", "install"})
+_CARGO_FLAGS = ("--config",)
+"""`--config` can set `target.<triple>.runner` or `build.rustc-wrapper`: any program."""
+_NEXTEST_FLAGS = ("--archive-file", "--binaries-metadata", "--cargo-metadata", "--tool-config-file")
+"""The first three make `cargo nextest` run test binaries named in a file instead of the ones it
+builds from the repository's source; a tool configuration can add setup and wrapper scripts,
+which start any program (ADR-0030)."""
 _PIP_MODULES = frozenset({"pip", "pip3", "ensurepip"})
 # `python -m` modules that run code given as an argument, or serve the network.
 _CODE_MODULES = frozenset(
@@ -154,7 +173,13 @@ _CODE_MODULES = frozenset(
 
 _FORBIDDEN_FLAGS: dict[ToolName, tuple[str, ...]] = {
     ToolName.CLAUDE: ("--dangerously-skip-permissions", "--allow-dangerously-skip-permissions"),
-    ToolName.CODEX: ("--yolo", "--dangerously-bypass-approvals-and-sandbox"),
+    ToolName.CODEX: (
+        "--yolo",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--full-auto",
+        "--approve-for-me",
+        "--not-so-yolo",
+    ),
     ToolName.COPILOT: (
         "--allow-all",
         "--yolo",
@@ -162,13 +187,16 @@ _FORBIDDEN_FLAGS: dict[ToolName, tuple[str, ...]] = {
         "--allow-all-paths",
         "--allow-all-urls",
         "--trust-folder",
+        "--assisted-approval",
     ),
-    ToolName.GEMINI: ("--yolo", "-y"),
+    ToolName.GEMINI: ("--yolo", "-y", "--skip-trust"),
 }
 _FORBIDDEN_VALUES: dict[ToolName, tuple[tuple[str, frozenset[str]], ...]] = {
     ToolName.CLAUDE: (("--permission-mode", frozenset({"bypasspermissions", "auto"})),),
     ToolName.GEMINI: (("--approval-mode", frozenset({"yolo"})),),
 }
+_CODEX_APPROVAL = re.compile(r"approval_policy\s*=\s*(.*)", re.IGNORECASE)
+"""A Codex `-c approval_policy=<v>` override: only `never` keeps every command in the sandbox."""
 
 
 def _deny(message: str) -> PolicyViolation:
@@ -347,6 +375,57 @@ def _check_interpreters(argv: Argv) -> None:
                 raise _deny(f"inline code for {arg!r}: {later!r}")
 
 
+def _flag_named(arg: str, flags: Iterable[str]) -> str | None:
+    """The flag in `flags` that `arg` is, as `-f`, `--f`, `-f=v` or `--f=v`."""
+    bare = arg.lstrip("-")
+    if bare == arg:
+        return None
+    return next(
+        (f for f in flags if bare == f.lstrip("-") or bare.startswith(f"{f.lstrip('-')}=")), None
+    )
+
+
+def _check_toolchains(argv: Argv) -> None:
+    """Go, gotestsum and cargo may build and test the repository's code, and nothing else."""
+    for index, arg in enumerate(argv):
+        program = _program(arg)
+        rest = argv[index + 1 :]
+        if program in ("go", "gotestsum"):
+            for later in rest:
+                flag = _flag_named(later, _GO_EXEC_FLAGS)
+                if flag is not None:
+                    raise _deny(f"{flag} starts another program; it is refused")
+        if program == "go":
+            for later in rest:
+                if later.casefold() in _GO_DENIED_WORDS:
+                    raise _deny(f"`go {later}` runs code other than the tests; it is refused")
+        if program == "gotestsum":
+            for later in rest:
+                flag = _flag_named(later, _GOTESTSUM_FLAGS)
+                if flag is not None:
+                    raise _deny(f"gotestsum {flag} runs another command; it is refused")
+        if program == "cargo":
+            _check_cargo(rest)
+
+
+def _check_cargo(rest: Argv) -> None:
+    # `cargo nextest run` runs the tests, like `cargo test`; any other `run` is `cargo run`.
+    nextest = len(rest) >= 2 and rest[0] == "nextest" and rest[1] == "run"
+    for index, later in enumerate(rest):
+        if nextest and index == 1:
+            continue
+        if nextest and _flag_named(later, _NEXTEST_FLAGS) is not None:
+            raise _deny(f"cargo nextest {later} runs other programs; it is refused")
+        if later.casefold() in _CARGO_DENIED_WORDS:
+            raise _deny(f"`cargo {later}` runs or installs a program; it is refused")
+        if _flag_named(later, _CARGO_FLAGS) is not None:
+            raise _deny("cargo --config can name any program as a runner; it is refused")
+        if later.startswith("-Z"):
+            raise _deny("cargo -Z enables unstable features; it is refused")
+        if later.startswith("+"):
+            raise _deny(f"cargo {later} picks another toolchain; it is refused")
+
+
 def _check_install(argv: Argv) -> None:
     """Package installation is allowed only in the prepare step."""
     normalized = _normalized(argv)
@@ -390,6 +469,7 @@ def check_argv(
         _check_runner(checked)
     _check_interpreters(checked)
     _check_code_modules(checked)
+    _check_toolchains(checked)
     _check_denied_anywhere(checked, values)
     if stage == "gate":
         _check_install(checked)
@@ -409,12 +489,17 @@ def _test_paths(paths: Sequence[str], test_roots: Sequence[str]) -> list[str]:
     return owned or roots[:1]
 
 
-def _report_value(report_file: Path | None) -> str:
-    if report_file is None:
-        raise _deny("the gate uses {report_file}, but no report file was given")
-    value = str(report_file)
-    if not report_file.is_absolute():
-        raise _deny("{report_file} must be an absolute path that aipm generated")
+def nextest_config_path(report_file: Path) -> Path:
+    """Where aipm writes the nextest configuration for the gate whose report is `report_file`."""
+    return report_file.with_name(f"{report_file.name}.nextest.toml")
+
+
+def _report_value(path: Path | None, placeholder: str) -> str:
+    if path is None:
+        raise _deny(f"the gate uses {placeholder}, but no report file was given for it")
+    value = str(path)
+    if not path.is_absolute():
+        raise _deny(f"{placeholder} must be an absolute path that aipm generated")
     return _check_element(value)
 
 
@@ -424,12 +509,18 @@ def compile_gate(
     paths: Sequence[SafeRelPath],
     policy: CommandPolicy,
     report_file: Path | None = None,
+    nextest_config: Path | None = None,
 ) -> Argv:
     """Expand placeholders and check the result, or raise `PolicyViolation` (exit 6).
 
     `{paths}` and `{test_paths}` become one argv element per value, each re-checked here;
-    `{report_file}` is the absolute path aipm generated outside the workspace (§13.1).
+    `{report_file}` is the absolute path aipm generated outside the workspace (§13.1), and
+    `{nextest_config}` the nextest configuration aipm writes beside it, which sends nextest's
+    JUnit report to `{report_file}`: `nextest_config_path(report_file)` unless the caller names
+    another (ADR-0030).
     """
+    if nextest_config is None and report_file is not None:
+        nextest_config = nextest_config_path(report_file)
     if gate.run is None:
         raise _deny("a built-in gate has no argv to compile")
     template = _check_shape(gate.run, max_len=MAX_ARGV)
@@ -445,7 +536,9 @@ def compile_gate(
             positions.update(range(len(expanded), len(expanded) + len(found)))
             expanded.extend(found)
         elif arg == "{report_file}":
-            expanded.append(_report_value(report_file))
+            expanded.append(_report_value(report_file, arg))
+        elif arg == "{nextest_config}":
+            expanded.append(_report_value(nextest_config, arg))
         elif "{" in arg or "}" in arg:
             raise _deny(f"{arg!r}: a placeholder must be a whole argv element")
         else:
@@ -464,6 +557,24 @@ def compile_prepare(prepare: PrepareDef, *, policy: CommandPolicy) -> Argv:
     return check_argv(prepare.run, policy, stage="prepare")
 
 
+def _check_codex(argv: Argv) -> None:
+    """No full access, and no approval policy but `never`: an approval would let a command run
+    outside the sandbox, and nobody is there to answer one."""
+    if any("danger-full-access" in arg for arg in argv):
+        raise PolicyViolation("codex: danger-full-access is forbidden")
+    for index, arg in enumerate(argv):
+        value = None
+        if arg in ("--ask-for-approval", "-a") and index + 1 < len(argv):
+            value = argv[index + 1]
+        elif arg.startswith("--ask-for-approval="):
+            value = arg.split("=", 1)[1]
+        else:
+            match = _CODEX_APPROVAL.fullmatch(arg)
+            value = match.group(1) if match else None
+        if value is not None and value.strip(" '\"").casefold() != "never":
+            raise PolicyViolation(f"codex: approval policy {value[:40]!r} is forbidden")
+
+
 def check_forbidden_flags(tool: ToolName, argv: Argv, *, allow_auto_mode: bool = False) -> None:
     """Raise `PolicyViolation` if `argv` holds a forbidden flag (ARCHITECTURE §11).
 
@@ -473,8 +584,8 @@ def check_forbidden_flags(tool: ToolName, argv: Argv, *, allow_auto_mode: bool =
         for flag in _FORBIDDEN_FLAGS[tool]:
             if arg == flag or arg.startswith(f"{flag}="):
                 raise PolicyViolation(f"{tool.value}: flag {flag} is forbidden")
-    if tool is ToolName.CODEX and any("danger-full-access" in arg for arg in argv):
-        raise PolicyViolation("codex: danger-full-access is forbidden")
+    if tool is ToolName.CODEX:
+        _check_codex(argv)
     for option, values in _FORBIDDEN_VALUES.get(tool, ()):
         for index, arg in enumerate(argv):
             if arg == option and index + 1 < len(argv):

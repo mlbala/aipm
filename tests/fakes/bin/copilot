@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""Stub GitHub Copilot CLI for aipm's tests (ARCHITECTURE §20, SECURITY.md §14.3, prompt 08).
+
+`--version` and `--help` answer like Copilot CLI 1.0.x. Copilot is render-only in aipm
+(ADR-0025); the contract and scenario tests turn its dispatch on to check the invocation. Any
+other call is a dispatch, and the stub first ASSERTS what aipm must guarantee (see
+`_agent_stub.py`):
+
+- argv: a `-p` naming a readable prompt file inside the `--add-dir` directory, `--allow-tool
+  write` and only `shell(...)` rules, `--no-ask-user`, `--secret-env-vars`, `--output-format
+  json`, `--disable-builtin-mcps`, and no forbidden flag;
+- environment: no fake secret but `COPILOT_GITHUB_TOKEN`, and `COPILOT_HOME` an existing
+  directory that is not the user's `~/.copilot`;
+- working directory: a linked worktree under aipm's `aipm/worktrees/`.
+
+Python 3.8 syntax on purpose.
+"""
+
+import os
+import re
+import sys
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from _agent_stub import Stub, check_cwd, check_forbidden, emit, fail, value_of, values_of  # noqa: E402
+
+VERSION = "1.0.109"
+HELP_FLAGS = [
+    ("-p, --prompt <text>", "Execute a prompt in non-interactive mode"),
+    ("--allow-tool <tools...>", "Tools the CLI may use without asking"),
+    ("--deny-tool <tools...>", "Tools the CLI may not use"),
+    ("--allow-all-tools", "Allow all tools without asking"),
+    ("--no-ask-user", "Do not pause to ask the user"),
+    ("--secret-env-vars <vars>", "Environment variables to redact"),
+    ("--output-format <format>", "text or json"),
+    ("--add-dir <directory>", "Add a directory to the allowed paths"),
+    ("--no-auto-update", "Do not update automatically"),
+    ("--disable-builtin-mcps", "Disable the built-in MCP servers"),
+]
+FORBIDDEN = ("--allow-all", "--yolo", "--allow-all-tools", "--allow-all-paths",
+             "--allow-all-urls", "--trust-folder", "--assisted-approval")
+STUB = Stub("copilot", "COPILOT_HOME", "COPILOT_GITHUB_TOKEN")
+
+
+def check_argv(args):
+    for flag in ("--no-ask-user", "--no-auto-update", "--disable-builtin-mcps"):
+        if flag not in args:
+            fail("argv lacks " + flag)
+    if value_of(args, "--output-format") != "json":
+        fail("--output-format is not json")
+    if not value_of(args, "--secret-env-vars"):
+        fail("no --secret-env-vars")
+    tools = values_of(args, "--allow-tool")
+    if tools[:1] != ["write"] or any(not re.match(r"^shell\(.+\)$", t) for t in tools[1:]):
+        fail("unexpected --allow-tool rules %r" % tools)
+    check_forbidden(args, FORBIDDEN)
+
+
+def prompt_from(args):
+    text = value_of(args, "-p") or ""
+    found = re.search(r"Read (\S+\.md) ", text)
+    added = value_of(args, "--add-dir") or ""
+    if not found or not added:
+        fail("-p does not name a prompt file in an --add-dir directory")
+    path = Path(found.group(1))
+    if path.parent != Path(added) or not path.is_file():
+        fail("the prompt file is not a readable file in --add-dir")
+    return path.read_text(encoding="utf-8")
+
+
+def dispatch(args):
+    check_argv(args)
+    STUB.check_env(".copilot")
+    check_cwd()
+    if sys.stdin.read():
+        fail("Copilot ignores stdin with -p; nothing may be sent there")
+    prompt = prompt_from(args)
+    STUB.check_prompt(prompt)
+    task, index, attempt = STUB.attempt_for(prompt)
+    STUB.log_call(task, index, args, prompt)
+    STUB.play(attempt)
+    emit({"type": "assistant.message", "data": {"content": attempt.get("text", "Done.")}})
+    return int(attempt.get("exit", 0))
+
+
+def main():
+    args = sys.argv[1:]
+    if args == ["--version"]:
+        print(VERSION)
+        return 0
+    if args == ["--help"]:
+        STUB.help("Usage: copilot [options] [command]", HELP_FLAGS)
+        return 0
+    return dispatch(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

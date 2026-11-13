@@ -259,12 +259,15 @@ def test_user_relaxations_are_reported(env: dict[str, str]) -> None:
 # ---------------------------------------------------------------- stack templates
 
 
-def test_the_v02_stacks_and_no_others() -> None:
-    """v0.1 shipped python-uv only; build prompt 06 adds python-pip, node-npm and node-pnpm
-    (review 01, D-1). go and rust-cargo arrive in v0.4."""
-    assert available_stacks() == ["node-npm", "node-pnpm", "python-pip", "python-uv"]
+def test_the_v04_stacks_and_no_others() -> None:
+    """v0.1 shipped python-uv only; build prompt 06 added python-pip, node-npm and node-pnpm
+    (review 01, D-1); build prompt 08 adds go and rust-cargo (this test listed the v0.2 set and
+    refused `go` until then)."""
+    assert available_stacks() == [
+        "go", "node-npm", "node-pnpm", "python-pip", "python-uv", "rust-cargo",
+    ]  # fmt: skip
     with pytest.raises(UsageError, match="unknown stack"):
-        load_stack("go")
+        load_stack("cobol")
     with pytest.raises(UsageError, match="unknown stack"):
         load_stack("../defaults")
 
@@ -354,3 +357,55 @@ def test_command_policy_includes_user_extras() -> None:
     policy = cfg.command_policy()
     assert ("make", "test") in policy.allowed_prefixes
     assert policy.test_roots == ("tests",)
+
+
+V04_STACKS = {
+    "go": (("go", "mod", "download"), {"lint": "go", "format": "gofmt", "unit": "gotestsum"}),
+    "rust-cargo": (("cargo", "fetch", "--locked"),
+                   {"lint": "cargo", "format": "cargo", "unit": "cargo"}),
+}  # fmt: skip
+
+
+@pytest.mark.parametrize("name", sorted(V04_STACKS))
+def test_v04_templates_pass_the_policy(name: str) -> None:
+    prepare, programs = V04_STACKS[name]
+    stack = load_stack(name)
+    assert set(stack.gates) == {
+        "lint", "format", "unit", "secrets", "sast", "deps", "ac_trace", "ac_review",
+    }  # fmt: skip
+    assert stack.prepare is not None and stack.prepare.network.value == "registries"
+    cfg = Config.model_validate(stack.model_dump(mode="json"))
+    policy = cfg.command_policy()
+    assert compile_prepare(stack.prepare, policy=policy) == prepare
+    paths = [SafeRelPath("internal/app.go"), SafeRelPath("internal/app_test.go")]
+    for gate_name, program in programs.items():
+        gate = stack.gates[gate_name]
+        argv = compile_gate(gate, paths=paths, policy=policy, report_file=Path("/r/report"))
+        assert argv[0] == program, gate_name
+    assert stack.gates["unit"].required and stack.gates["lint"].required
+
+
+def test_go_traces_criteria_and_cargo_says_it_cannot() -> None:
+    """ADR-0029: gotestsum writes JUnit to {report_file}; cargo test writes no report, so
+    ac_trace is advisory in rust-cargo."""
+    go = load_stack("go")
+    assert "{report_file}" in (go.gates["unit"].run or [])
+    assert go.gates["ac_trace"].required
+    cargo = load_stack("rust-cargo")
+    assert "{report_file}" not in (cargo.gates["unit"].run or [])
+    assert not cargo.gates["ac_trace"].required
+
+
+@pytest.mark.parametrize(
+    ("manifests", "stack"),
+    [
+        (("go.mod", "go.sum"), "go"),
+        (("Cargo.toml", "Cargo.lock"), "rust-cargo"),
+        (("pyproject.toml", "uv.lock", "go.mod"), "python-uv"),
+        (("README.md",), None),
+    ],
+)
+def test_init_detects_the_v04_stacks(manifests: tuple[str, ...], stack: str | None) -> None:
+    from aipm.app.init import detect_stack  # noqa: PLC0415
+
+    assert detect_stack(manifests) == stack

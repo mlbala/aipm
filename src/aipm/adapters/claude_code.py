@@ -34,16 +34,22 @@ from typing import Annotated, cast
 
 from pydantic import Field, StrictBool, StrictStr, ValidationError
 
-from aipm import adapters as _package
+from aipm.adapters._common import (
+    BLOCKED_MARK,
+    MAX_QUESTION,
+    blocked_question,
+    check_rule_words,
+    render_task_prompt,
+)
 from aipm.adapters.base import (
     AgentResult,
     Capabilities,
+    ConfigHomeSpec,
     DispatchLimits,
     Invocation,
     RenderedTaskPrompt,
 )
 from aipm.context import generator
-from aipm.context.markdown import agent_text_problems, code_span, fence
 from aipm.domain.errors import AipmError, MissingCapability, PolicyViolation, UsageError
 from aipm.domain.models import GeneratedFile, ProjectContext, TaskSpec, ToolName, Workspace
 from aipm.domain.models.base import StrictModel
@@ -55,16 +61,11 @@ from aipm.execution.process import (
     is_inside,
     run_safe,
 )
-from aipm.execution.sandbox import launcher_for, which_outside
+from aipm.execution.sandbox import CONFIG_HOME_PROTECTED, launcher_for, which_outside
 from aipm.execution.worktree import WORKTREES_DIR, cache_root
 from aipm.security.command_policy import check_forbidden_flags
-from aipm.security.sanitize import sanitize_text
 from aipm.security.untrusted import (
     NonceFactory,
-    PackageTemplateLoader,
-    Untrusted,
-    check_blocks,
-    make_env,
 )
 
 DETECT_TIMEOUT_S = 10.0
@@ -93,16 +94,21 @@ AGENT_ENV: dict[str, str] = {
 """No update checks, telemetry or error reports: the network profile allows the API only."""
 MAX_PROMPT_STDIN = 10 * 1_048_576
 """Claude Code reads at most 10 MB from stdin."""
-BLOCKED_MARK = "AIPM-BLOCKED:"
-MAX_QUESTION = 300
 MAX_RESULT_LINE = 4 * 1_048_576
 MAX_RESULT_TEXT = 65_536
 _VERSION = re.compile(r"\b(\d+\.\d+\.\d+)\b")
-_BLANK_RUNS = re.compile(r"\n{3,}")
 _HELP_FLAG = re.compile(r"--[A-Za-z][A-Za-z-]*(?:\[-file\])?")
-_RULE_WORD = re.compile(r"[A-Za-z0-9._/@:+=-]+")
 SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _detected: dict[str, Capabilities] = {}
+__all__ = [
+    "BLOCKED_MARK", "MAX_QUESTION", "ClaudeCodeAdapter", "allowed_tools", "blocked_question",
+    "create", "help_flags", "missing_flags",
+]  # fmt: skip
+CONFIG_HOME = ConfigHomeSpec(
+    env_var="CLAUDE_CONFIG_DIR", protected=CONFIG_HOME_PROTECTED, keep=frozenset({"projects"})
+)
+"""`CLAUDE_CONFIG_DIR` (ADR-0023): the session transcripts under `projects/` stay for
+`--resume`; the settings, hooks, agents, skills, commands and plugins are protected."""
 
 
 def help_flags(text: str) -> frozenset[str]:
@@ -207,14 +213,7 @@ def allowed_tools(commands: Sequence[Sequence[str]]) -> str:
     for argv in commands:
         if not argv:
             continue
-        for word in argv:
-            if not _RULE_WORD.fullmatch(word):
-                raise PolicyViolation(
-                    f"the gate command word {word[:80]!r} cannot be allowed for a dispatched "
-                    "agent as written",
-                    hint="Use plain words (letters, digits, . _ / @ : + = -) in gate commands.",
-                )
-        line = " ".join(argv)
+        line = check_rule_words(argv)
         for rule in (f"Bash({line})", f"Bash({line} *)"):
             if rule not in rules:
                 rules.append(rule)
@@ -282,93 +281,13 @@ def _last_result(stdout: bytes) -> _ResultEvent | None:
         return None
 
 
-def blocked_question(text: str) -> str | None:
-    """The question of the last `AIPM-BLOCKED: <q>` line: sanitized, on one line, capped at
-    300 characters (SECURITY.md §7.8). `None` when there is none, or it is empty."""
-    for line in reversed(text.splitlines()):
-        stripped = line.strip()
-        if stripped.startswith(BLOCKED_MARK):
-            raw = stripped.removeprefix(BLOCKED_MARK)
-            question = " ".join(sanitize_text(raw, source="agent output").text.split())
-            return question[:MAX_QUESTION] or None
-    return None
-
-
-def _dependency_rule(spec: TaskSpec) -> str:
-    if spec.new_dependencies == "deny" or not spec.deps_add:
-        return "MUST NOT add any dependency."
-    declared = ", ".join(f"{eco} {code_span(name)}" for eco, name in spec.deps_add)
-    return f"MUST NOT add a dependency other than the ones this task declares: {declared}."
-
-
-def _view(spec: TaskSpec, ctx: ProjectContext) -> dict[str, object]:
-    allowed = ctx.allowed_url_domains
-
-    def spans(values: tuple[str, ...], what: str) -> list[str]:
-        return [code_span(generator.path_literal(v, what=what)) for v in values]
-
-    titles = [u for u in spec.upstream if u.title is not None]
-    upstream_text = (
-        Untrusted(
-            generator.clean(
-                "\n".join(f"- {u.id}: {u.title.text}" for u in titles if u.title is not None),
-                allowed,
-            ),
-            source=f"{spec.approval}:tasks.yaml#upstream",
-        )
-        if titles
-        else None
-    )
-    return {
-        "id": spec.id,
-        "project": code_span(generator.literal(spec.project, allowed, what="the project name")),
-        "type": spec.type,
-        "size": spec.size,
-        "text": spec.text,
-        "approved": spec.approval == "approved",
-        "approval": spec.approval,
-        "acceptance_ids": list(spec.acceptance_ids),
-        "upstream": [
-            {
-                "id": u.id,
-                "status": u.status,
-                "commit": None if u.commit is None else code_span(u.commit[:12]),
-            }
-            for u in spec.upstream
-        ],
-        "upstream_text": upstream_text,
-        "owns": spans(spec.owns_files, f"a path {spec.id} owns"),
-        "reads": spans(spec.reads_files, f"a path {spec.id} reads"),
-        "verify": [
-            {"name": g.name, "required": g.required, "command": generator.command_line(g, allowed)}
-            for g in spec.verify
-        ],
-        "builtins": [
-            {
-                "name": g.name,
-                "what": generator.BUILTIN_CHECKS.get(g.builtin or "", "a built-in check"),
-            }
-            for g in spec.builtin_gates
-        ],
-        "protected": spans(spec.protected_paths, "a protected path"),
-        "dependency_rule": _dependency_rule(spec),
-        "network_rule": generator.NETWORK_RULES.get(
-            spec.agent_network, generator.NETWORK_RULES["none"]
-        ),
-        "fix": spec.fix,
-        "previous": [
-            {"gate": f.gate, "status": f.status, "output": f.output} for f in spec.previous_attempt
-        ],
-        "omitted": list(spec.omitted),
-    }
-
-
 class ClaudeCodeAdapter:
     """The Claude Code adapter. `nonce` and `which` are seams for tests."""
 
     name: ToolName = ToolName.CLAUDE
     required_env: tuple[str, ...] = REQUIRED_ENV
     api_domains: tuple[str, ...] = API_DOMAINS
+    config_home: ConfigHomeSpec = CONFIG_HOME
 
     def __init__(
         self,
@@ -412,20 +331,7 @@ class ClaudeCodeAdapter:
 
     def render_prompt(self, task: TaskSpec, ctx: ProjectContext) -> RenderedTaskPrompt:
         """Render the task prompt and check it before anyone sees it."""
-        loader = PackageTemplateLoader(_package, "templates/claude_code")
-        env = make_env(loader) if self._nonce is None else make_env(loader, nonce=self._nonce)
-        filters = cast("dict[str, Callable[..., object]]", env.filters)  # pyright: ignore[reportUnknownMemberType]
-        filters["fence"] = fence
-        text = env.get_template("task.md.j2").render(**_view(task, ctx))
-        text = _BLANK_RUNS.sub("\n\n", text).strip("\n") + "\n"
-        check_blocks(text)
-        problems = agent_text_problems(text, allowed_url_domains=ctx.allowed_url_domains)
-        if problems:
-            raise PolicyViolation(
-                f"the prompt for {task.id} fails invariant I-3: {'; '.join(problems)}",
-                hint="This is a bug in aipm; nothing was written. Please report it.",
-            )
-        return RenderedTaskPrompt(ToolName.CLAUDE, task.id, text, task.omitted)
+        return render_task_prompt(ToolName.CLAUDE, task, ctx, nonce=self._nonce)
 
     def _argv(self, limits: DispatchLimits, ws: Workspace, context_file: Path) -> tuple[str, ...]:
         caps = self._ready

@@ -369,3 +369,149 @@ def test_claude_auto_mode_needs_the_user_opt_in() -> None:
             ("claude", "--permission-mode", "bypassPermissions"),
             allow_auto_mode=True,
         )
+
+
+# ---------------------------------------------------------------- go and cargo (v0.4 stacks)
+
+TOOLCHAIN_PREFIXES = (
+    ("go", "vet"),
+    ("go", "test"),
+    ("go", "mod", "download"),
+    ("gofmt", "-l"),
+    ("gotestsum", "--junitfile"),
+    ("cargo", "test"),
+    ("cargo", "clippy"),
+    ("cargo", "fmt"),
+    ("cargo", "fetch"),
+)
+
+
+@pytest.fixture
+def toolchains() -> CommandPolicy:
+    return CommandPolicy(allowed_prefixes=TOOLCHAIN_PREFIXES, test_roots=("tests",))
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("go", "vet", "./..."),
+        ("go", "test", "-mod=readonly", "./..."),
+        ("gofmt", "-l", "main.go"),
+        ("gotestsum", "--junitfile", "/aipm-attempt/r.xml", "--", "-mod=readonly", "./..."),
+        ("cargo", "test", "--locked", "--offline"),
+        ("cargo", "clippy", "--locked", "--offline", "--", "-D", "warnings"),
+        ("cargo", "fmt", "--check"),
+    ],
+)
+def test_go_and_cargo_gates_pass(toolchains: CommandPolicy, argv: tuple[str, ...]) -> None:
+    assert check_argv(argv, toolchains, stage="gate") == argv
+
+
+@pytest.mark.parametrize(
+    ("argv", "reason"),
+    [
+        (("go", "test", "-exec", "./wrap", "./..."), "-exec"),
+        (("go", "test", "-exec=./wrap", "./..."), "-exec"),
+        (("go", "test", "--exec", "./wrap"), "-exec"),
+        (("go", "test", "-toolexec", "./wrap", "./..."), "-toolexec"),
+        (("go", "vet", "-vettool=./x", "./..."), "-vettool"),
+        (("go", "test", "run"), "run"),
+        (("go", "vet", "generate"), "generate"),
+        (("go", "test", "tool"), "tool"),
+        (("go", "test", "env"), "env"),
+        (("go", "test", "install"), "install"),
+        (("gotestsum", "--junitfile", "r.xml", "--raw-command", "--", "./x"), "--raw-command"),
+        (("gotestsum", "--junitfile", "r.xml", "--post-run-command=./x"), "--post-run-command"),
+        (("gotestsum", "--junitfile", "r.xml", "--watch"), "--watch"),
+        (("gotestsum", "--junitfile", "r.xml", "--", "-exec", "./x"), "-exec"),
+        (("cargo", "test", "run"), "run"),
+        (("cargo", "test", "install"), "install"),
+        (("cargo", "test", "--config", "target.x.runner='y'"), "--config"),
+        (("cargo", "test", "--config=build.rustc-wrapper='y'"), "--config"),
+        (("cargo", "test", "-Zunstable-options"), "-Z"),
+        (("cargo", "test", "-Z", "x"), "-Z"),
+        (("cargo", "test", "+nightly"), "toolchain"),
+    ],
+)
+def test_go_and_cargo_code_routes_are_refused(
+    toolchains: CommandPolicy, argv: tuple[str, ...], reason: str
+) -> None:
+    for stage in ("gate", "prepare"):
+        with pytest.raises(PolicyViolation, match=reason):
+            check_argv(argv, toolchains, stage=stage)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("go", "mod", "download"),
+        ("go", "test", "get"),
+        ("cargo", "fetch", "--locked"),
+        ("cargo", "test", "update"),
+        ("cargo", "test", "add"),
+        ("cargo", "test", "generate-lockfile"),
+    ],
+)
+def test_go_and_cargo_installs_only_in_prepare(
+    toolchains: CommandPolicy, argv: tuple[str, ...]
+) -> None:
+    with pytest.raises(PolicyViolation, match="prepare step"):
+        check_argv(argv, toolchains, stage="gate")
+
+
+def test_go_and_cargo_prepare_may_fetch(toolchains: CommandPolicy) -> None:
+    assert check_argv(("go", "mod", "download"), toolchains, stage="prepare")
+    assert check_argv(("cargo", "fetch", "--locked"), toolchains, stage="prepare")
+
+
+@pytest.mark.parametrize("prefix", [("go",), ("cargo",), ("go", "-C"), ("cargo", "--locked")])
+def test_go_and_cargo_prefixes_must_name_a_subcommand(prefix: tuple[str, ...]) -> None:
+    with pytest.raises(PolicyViolation, match="must also name"):
+        CommandPolicy(allowed_prefixes=(prefix,))
+
+
+@pytest.mark.parametrize(
+    ("tool", "argv"),
+    [
+        (ToolName.CODEX, ("codex", "exec", "--full-auto")),
+        (ToolName.CODEX, ("codex", "exec", "--approve-for-me")),
+        (ToolName.CODEX, ("codex", "exec", "--not-so-yolo")),
+        (ToolName.CODEX, ("codex", "exec", "-s", "danger-full-access")),
+        (ToolName.CODEX, ("codex", "exec", "--ask-for-approval", "untrusted")),
+        (ToolName.CODEX, ("codex", "exec", "-c", "approval_policy=on-request")),
+        (ToolName.COPILOT, ("copilot", "--assisted-approval")),
+        (ToolName.GEMINI, ("gemini", "--skip-trust")),
+        (ToolName.GEMINI, ("gemini", "--approval-mode", "plan", "--yolo")),
+    ],
+)
+def test_v04_forbidden_flags_are_rejected(tool: ToolName, argv: tuple[str, ...]) -> None:
+    with pytest.raises(PolicyViolation, match="forbidden"):
+        check_forbidden_flags(tool, argv)
+
+
+def test_codex_approval_policy_never_passes() -> None:
+    check_forbidden_flags(ToolName.CODEX, ("codex", "exec", "-c", "approval_policy=never"))
+    check_forbidden_flags(ToolName.CODEX, ("codex", "exec", "--config", "analytics.enabled=false"))
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("codex", "exec", "--ask-for-approval=on-request"),
+        ("codex", "exec", "-a", "on-request"),
+        ("codex", "exec", "-c", "approval_policy = 'on-request'"),
+    ],
+)
+def test_codex_approval_policies_other_than_never_are_rejected(argv: tuple[str, ...]) -> None:
+    with pytest.raises(PolicyViolation, match="approval policy"):
+        check_forbidden_flags(ToolName.CODEX, argv)
+
+
+def test_codex_approval_never_in_every_spelling_passes() -> None:
+    for argv in (
+        ("codex", "exec", "--ask-for-approval=never"),
+        ("codex", "exec", "-a", "never"),
+        ("codex", "exec", "-c", 'approval_policy="never"'),
+        ("codex", "exec", "-a"),
+    ):
+        check_forbidden_flags(ToolName.CODEX, argv)

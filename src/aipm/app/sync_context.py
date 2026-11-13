@@ -31,7 +31,7 @@ from aipm.app.snapshot import read_snapshot
 from aipm.app.trust import require_trusted
 from aipm.app.workspace import find_repo_root, require_initialized
 from aipm.config.loader import LoadedConfig, load_config
-from aipm.context.generator import CLAUDE_EXTRAS
+from aipm.context.generator import CLAUDE_EXTRAS, CODEX_SKILLS, COPILOT_FILE
 from aipm.context.managed_block import extract_block, replace_block
 from aipm.domain.errors import (
     HumanInputRequired,
@@ -44,8 +44,10 @@ from aipm.domain.phase import InputState, plan_inputs
 from aipm.state.repo_files import make_repo_dirs, read_repo_bytes, write_repo_bytes
 from aipm.state.store import FileStateStore, normalized_sha256
 
-OWNED_FILES = frozenset(CLAUDE_EXTRAS)
-"""The files aipm owns whole, and whose directories it may create."""
+OWNED_FILES = frozenset({*CLAUDE_EXTRAS, *CODEX_SKILLS})
+"""The files aipm owns whole."""
+CREATES_DIRS = OWNED_FILES | {COPILOT_FILE}
+"""The files whose directories aipm may create (`.github/` for the Copilot instructions)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,7 +293,7 @@ def write(
         written: list[str] = []
         recorded: list[str] = []
         for f in current.changed:
-            if f.path in OWNED_FILES:
+            if f.path in CREATES_DIRS:
                 make_repo_dirs(s.root, f.path)
             write_repo_bytes(s.root, f.path, f.document.encode("utf-8"), expected=f.current)
             written.append(f.path)

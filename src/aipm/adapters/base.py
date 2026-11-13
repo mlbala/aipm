@@ -62,6 +62,28 @@ class DispatchLimits:
     pass_env: tuple[str, ...] = ()
     allow_auto_mode: bool = False
     bare: bool = True
+    native_sandbox: bool = False
+    """No `srt` runs this attempt and `dispatch.sandbox` allows the tool's own sandbox: an
+    adapter whose tool has one turns it on (SECURITY.md §9.1, ADR-0026)."""
+
+
+@dataclass(frozen=True, slots=True)
+class ConfigHomeSpec:
+    """The agent's isolated configuration home (SECURITY.md §9.1).
+
+    - `env_var`: the variable that relocates the tool's home (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`).
+    - `protected`: paths in it the tool would read as settings, hooks or skills. The agent may
+      not write them (`denyWrite`), and they are hashed before and after each attempt.
+    - `keep`: top-level directories that survive from one attempt to the next (the session
+      transcripts `--resume` reads); everything else is removed before each attempt.
+    - `seed`: files aipm writes into it before each attempt (relative path, text), from fixed
+      text in code only.
+    """
+
+    env_var: str
+    protected: tuple[str, ...]
+    keep: frozenset[str] = frozenset()
+    seed: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +122,7 @@ class ToolAdapter(Protocol):
     name: ToolName
     required_env: tuple[str, ...]
     api_domains: tuple[str, ...]
+    config_home: ConfigHomeSpec
 
     def detect(self, *, flags: bool = False, repo: Path | None = None) -> Capabilities:
         """Return the version and, with `flags`, the safety flags present (cached per version).

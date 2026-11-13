@@ -1,0 +1,27 @@
+# Stack template: rust-cargo (ARCHITECTURE §13.1, build prompt 08, ADR-0029).
+# Copied into .pm/config.yaml by G2 and covered by the trust hash. `cargo run`, `cargo
+# install`, `--config`, `-Z` and `+toolchain` are refused by the command policy. Crates are
+# fetched in the prepare step only; the gates run --locked --offline with no network.
+# The unit gate runs cargo-nextest (install it with `cargo install cargo-nextest --locked`):
+# each test runs in its own process, and nextest writes a JUnit report to the path aipm's own
+# configuration ({nextest_config}) names, so the gate passes only when that report shows tests
+# ran and none failed, not on exit 0 alone (ADR-0030). ac_trace stays advisory here (ADR-0029):
+# the report names test binaries, not files. The reviewer veto (ac_review) still applies.
+allowed_executables:                  # argv prefixes (SECURITY.md §10 rule 2)
+  - [cargo, fetch, --locked]
+  - [cargo, clippy, --locked, --offline]
+  - [cargo, fmt, --check]
+  - [cargo, nextest, run, --locked, --offline, --config-file]
+test_roots: [tests]                   # integration tests; unit tests live in src/
+prepare: {run: [cargo, fetch, --locked], network: registries}
+gates:
+  lint: {run: [cargo, clippy, --locked, --offline, --all-targets, --, -D, warnings],
+         required: true}
+  format: {run: [cargo, fmt, --check], required: false}
+  unit: {run: [cargo, nextest, run, --locked, --offline, --config-file, "{nextest_config}"],
+         required: true}
+  secrets: {builtin: gitleaks, required: true}
+  sast: {builtin: semgrep, fail_on: high, required: false}
+  deps: {builtin: osv, fail_on: high, required: true}
+  ac_trace: {builtin: ac_trace, required: false}
+  ac_review: {builtin: ac_review, mode: veto, required: false}

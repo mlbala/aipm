@@ -109,23 +109,34 @@ def handled(ctx: typer.Context, command: str) -> Generator[None]:
     """Configure logging, then map errors to exit codes.
 
     An `AipmError` exits with its own code. Anything else is a bug: it is logged (redacted)
-    and the command exits 1, pointing at the log file.
+    and the command exits 1, pointing at the log file. With `--trace`, the command is one span
+    whose status and exit code are recorded (ADR-0027).
     """
     from aipm.app.runtime import configure
+    from aipm.app.session import command_span
 
     opts = global_options(ctx)
     log_file = configure(opts.verbose, opts.project)
-    try:
-        yield
-    except AipmError as error:
-        fail(ctx, command, error)
-    except (typer.Exit, typer.Abort, KeyboardInterrupt):
-        raise
-    except Exception:
-        logging.getLogger("aipm").exception("internal error in aipm %s", command)
-        where = f"; details are in {log_file}" if log_file else ""
-        internal = AipmError(f"internal error (a bug in aipm){where}")
-        fail(ctx, command, internal)
+    with command_span(command) as span:
+        try:
+            yield
+        except AipmError as error:
+            span.set(status="error", exit_code=int(error.exit_code))
+            fail(ctx, command, error)
+        except typer.Exit as stopped:
+            span.set(exit_code=int(stopped.exit_code or 0))
+            raise
+        except (typer.Abort, KeyboardInterrupt):
+            span.set(status="interrupted")
+            raise
+        except Exception:
+            span.set(status="error", exit_code=int(ExitCode.INTERNAL))
+            logging.getLogger("aipm").exception("internal error in aipm %s", command)
+            where = f"; details are in {log_file}" if log_file else ""
+            internal = AipmError(f"internal error (a bug in aipm){where}")
+            fail(ctx, command, internal)
+        else:
+            span.set(status="ok", exit_code=0)
 
 
 def not_available(ctx: typer.Context, command: str, milestone: str) -> NoReturn:

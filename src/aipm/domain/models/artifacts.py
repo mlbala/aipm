@@ -412,6 +412,8 @@ class Ecosystem(StrEnum):
 
     PYPI = "pypi"
     NPM = "npm"
+    GO = "go"
+    CRATES = "crates"
 
 
 class BlockedReason(StrEnum):
@@ -431,6 +433,12 @@ _PACKAGE_NAMES = {
     Ecosystem.PYPI: r"^[A-Za-z0-9](?:[A-Za-z0-9._\-]{0,98}[A-Za-z0-9])?$",
     # Scope and name start with a letter or digit, so no name can read as an option (`-g`).
     Ecosystem.NPM: r"^(?:@[a-z0-9][a-z0-9\-._~]{0,99}/)?[a-z0-9][a-z0-9\-._~]{0,113}$",
+    # A Go module path: a host with a dot, then path elements (golang.org/ref/mod#module-path);
+    # no element is `.` or `..`, and none starts with a dot or a dash.
+    Ecosystem.GO: r"^[a-z0-9][a-z0-9\-]*(?:\.[a-z0-9][a-z0-9\-]*)+"
+    r"(?:/[A-Za-z0-9_~][A-Za-z0-9._~\-]{0,99}){1,8}$",
+    # A crates.io name: ASCII letters, digits, `-` and `_`, starting with a letter.
+    Ecosystem.CRATES: r"^[A-Za-z][A-Za-z0-9_\-]{0,63}$",
 }
 
 

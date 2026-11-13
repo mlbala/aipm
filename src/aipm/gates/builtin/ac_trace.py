@@ -38,8 +38,35 @@ def _read(ctx: GateContext, rel: str) -> str:
         return handle.read(MAX_TEST_FILE).decode("utf-8", errors="replace")
 
 
-def ran(path: str, report: TestReport) -> bool:
-    """Whether the report has a case from this test file that ran."""
+_GO_MODULE = re.compile(r"^module\s+\"?([A-Za-z0-9._~/\-]{1,300})\"?\s*(?://.*)?$", re.MULTILINE)
+
+
+def go_module(text: str) -> str | None:
+    """The `module` path of a `go.mod`, or `None`."""
+    found = _GO_MODULE.search(text)
+    return found.group(1) if found else None
+
+
+_GO_TEST_FUNC = re.compile(r"^func\s+(Test[A-Za-z0-9_]*)\s*\(", re.MULTILINE)
+
+
+def ran(path: str, report: TestReport, *, go_module: str | None = None, text: str = "") -> bool:
+    """Whether the report has a case from this test file that ran.
+
+    A Go test file ran when a test function it defines (`func TestX(`) ran in its package:
+    gotestsum writes JUnit with the package's import path (`<module>/<dir>`, or `<module>` at
+    the root) as the classname and the test as the name (`TestX`, or `TestX/sub`). Another test
+    of the same package does not count (security review of step 08). With no `go.mod` module,
+    no Go file counts as run (ADR-0029)."""
+    if path.endswith("_test.go"):
+        if go_module is None:
+            return False
+        directory = path.rpartition("/")[0]
+        package = f"{go_module}/{directory}" if directory else go_module
+        tests = set(_GO_TEST_FUNC.findall(text))
+        return any(
+            case.location == package and case.name.split("/", 1)[0] in tests for case in report.ran
+        )
     module = path.removesuffix(".py").replace("/", ".")
     for case in report.ran:
         loc = case.location
@@ -56,13 +83,14 @@ def run(ctx: GateContext, report: TestReport | None, *, required: bool) -> Built
         return outcome(NAME, GateStatus.FAIL, summary, required=required, started=started)
     files = test_files(ctx)
     texts = {rel: _read(ctx, rel) for rel in files}
+    module = go_module(_read(ctx, "go.mod")) if any(f.endswith("_test.go") for f in files) else None
     missing: list[GateFinding] = []
     for criterion in ctx.task.acceptance:
         pattern = id_pattern(criterion.id)
         holders = [rel for rel, text in texts.items() if pattern.search(text)]
         if not holders:
             detail = "appears in no owned or changed test file"
-        elif not any(ran(rel, report) for rel in holders):
+        elif not any(ran(rel, report, go_module=module, text=texts[rel]) for rel in holders):
             detail = f"its test file(s) did not run: {', '.join(holders[:3])}"
         else:
             continue

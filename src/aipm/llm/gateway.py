@@ -51,6 +51,7 @@ from aipm.llm.structured import (
     schema_name,
     wire_schema,
 )
+from aipm.observability import tracing
 from aipm.security.redact import Redactor
 from aipm.security.untrusted import map_between_tags
 
@@ -204,8 +205,29 @@ class Gateway:
         """Route, redact, call, validate (one repair attempt) and account.
 
         With a cache and a `template_version`, a validated cached reply is returned without a
-        call, and a new validated reply is cached (ARCHITECTURE §14, `aipm.llm.cache`).
+        call, and a new validated reply is cached (ARCHITECTURE §14, `aipm.llm.cache`). With
+        `--trace`, the call is one `aipm.llm` span: role, model, tokens and cost, never text.
         """
+        with tracing.span("aipm.llm", role=role.value, model=self.model_for(role)) as span:
+            result = self._run(role, prompt, schema, budget=budget,
+                               template_version=template_version)  # fmt: skip
+            span.set(
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                cost_usd=result.cost_usd,
+                cached=result.input_tokens == 0 and result.cost_usd is None,
+            )
+            return result
+
+    def _run[T: BaseModel](
+        self,
+        role: RoleName,
+        prompt: RenderedPrompt,
+        schema: type[T],
+        *,
+        budget: TokenBudget,
+        template_version: str | None,
+    ) -> RoleResult[T]:
         model = self.model_for(role)
         wire = wire_schema(schema)
         system = self._redact(prompt.system, "system")

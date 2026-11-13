@@ -1,0 +1,24 @@
+# Stack template: go with gotestsum (ARCHITECTURE §13.1, build prompt 08, ADR-0029).
+# Copied into .pm/config.yaml by G2 and covered by the trust hash. `go run`, `go generate`,
+# `go tool`, `-exec`, `-toolexec` and `-vettool` are refused by the command policy, so a gate
+# builds and tests the module's own code only. Modules are downloaded in the prepare step only;
+# the gates run with -mod=readonly and no network.
+allowed_executables:                  # argv prefixes (SECURITY.md §10 rule 2)
+  - [go, mod, download]
+  - [go, vet]
+  - [gofmt, -l]
+  - [gotestsum, --junitfile]
+test_roots: []                        # Go tests live next to the code (*_test.go)
+prepare: {run: [go, mod, download], network: registries}
+gates:
+  lint: {run: [go, vet, -mod=readonly, ./...], required: true}
+  format: {run: [gofmt, -l, "{paths}"], required: false}
+  unit:
+    run: [gotestsum, --junitfile, "{report_file}", --format, standard-quiet, --,
+          -mod=readonly, ./...]
+    required: true
+  secrets: {builtin: gitleaks, required: true}
+  sast: {builtin: semgrep, fail_on: high, required: false}
+  deps: {builtin: osv, fail_on: high, required: true}
+  ac_trace: {builtin: ac_trace, required: true}
+  ac_review: {builtin: ac_review, mode: veto, required: false}

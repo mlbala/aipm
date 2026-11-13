@@ -1,0 +1,4 @@
+# The release build backend (pyproject.toml [build-system].requires), pinned with hashes by
+# requirements-build.txt so `uv build` in release.yml cannot pick up a new release unreviewed.
+hatchling>=1.33
+hatch-vcs>=0.5

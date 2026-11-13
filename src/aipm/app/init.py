@@ -62,6 +62,10 @@ def detect_stack(manifests: tuple[str, ...]) -> str | None:
         return "python-pip"
     if "package.json" in names:
         return "node-pnpm" if "pnpm-lock.yaml" in names else "node-npm"
+    if "go.mod" in names:
+        return "go"
+    if "Cargo.toml" in names:
+        return "rust-cargo"
     return None
 
 

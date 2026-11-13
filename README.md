@@ -3,11 +3,12 @@
 <!-- Status badges arrive with the first green CI run on main:
 [![CI](https://github.com/mlbala/aipm/actions/workflows/ci.yml/badge.svg)](https://github.com/mlbala/aipm/actions/workflows/ci.yml)
 [![Security](https://github.com/mlbala/aipm/actions/workflows/security.yml/badge.svg)](https://github.com/mlbala/aipm/actions/workflows/security.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/mlbala/aipm/badge)](https://scorecard.dev/viewer/?uri=github.com/mlbala/aipm)
 -->
 
 **An AI product manager for your terminal.** aipm interviews you for requirements, designs the architecture, splits the work into tasks, and writes prompts and `AGENTS.md` for Claude Code, Codex, Copilot and Gemini CLI. It then verifies every task with tests and security gates.
 
-> **Status: pre-alpha, v0.3 in progress.** The commands are built step by step from the prompts in [`docs/prompts/`](docs/prompts/README.md). These work: `aipm`, `init`, `doctor`, `trust`, `discover`, `design`, `plan`, `approve`, `status`, `prompt`, `sync-context`, from v0.2 `verify`, `scan` and `task`, and from v0.3 `run`, `build` and `merge` (Claude Code only). `auto` is registered and exits with code 2, naming the milestone that brings it.
+> **Status: pre-alpha, v0.4 in progress.** The commands are built step by step from the prompts in [`docs/prompts/`](docs/prompts/README.md). Every command works: `aipm`, `init`, `doctor`, `trust`, `discover`, `design`, `plan`, `approve`, `status`, `prompt`, `sync-context`, from v0.2 `verify`, `scan` and `task`, from v0.3 `run`, `build` and `merge`, and from v0.4 `auto`. `build` and `run` dispatch Claude Code, Codex CLI and Gemini CLI; Copilot CLI gets prompts and context files only ([Coding agents](#coding-agents)).
 
 ## Install
 
@@ -38,6 +39,27 @@ aipm status                     # where you are, and what to run next
 
 `aipm` on its own always prints the phase and the next command. In a terminal each step asks before it records an approval; in a script, use `--yes` for G1–G3, `aipm trust --confirm <hash>` for trust, and `aipm approve context --yes` for the context files.
 
+### The whole flow at once: `aipm auto`
+
+`aipm auto` runs the next step until the plan is built: `discover`, `design`, `plan`, and `build` for the ready tasks, each exactly as if you had typed it. It pauses at each review gate (G1 PRD, G2 design, G3 plan) and asks; with `--yes` it approves them, as `aipm approve <artifact> --yes` would. It never records trust:
+
+```bash
+aipm init
+aipm trust                      # review and trust the commands (auto checks this first, exit 6)
+aipm auto                       # pauses at G1, G2 and G3 and asks
+aipm auto --yes --tool codex --parallel 2 --budget 5   # approves G1-G3; still never trusts
+```
+
+What to expect:
+
+1. `auto` checks that the repository is initialized and its commands trusted, before anything else. If not, it exits 6 and prints `aipm trust` ([ADR-0028](docs/architecture/adr/0028-auto-checks-trust-first.md)).
+2. Each step prints `==> aipm <step>`, then that command's own output. `discover` interviews you in a terminal; without one it exits 4 with the questions (answer them with `aipm discover --answers FILE`).
+3. At G1–G3 it shows the same review as `aipm approve`. Without a terminal and without `--yes` it exits 4 and names `aipm approve <artifact> --yes`.
+4. After G2 the stack template's gates arrive, so the commands change: `auto` stops with exit 6 at `aipm trust` again. Review them with `aipm trust --show`, trust them, and run `aipm auto` again.
+5. It builds with the flags you gave (`--tool`, `--parallel`, `--max-retries`, `--budget`, `--timeout`, `--only`, `--dry-run`), and stops when the plan is built (exit 0), when a task is blocked (exit 4, run `aipm status`), or when any step fails, with that step's exit code (4, 5, 6, 8 and the others) and the command to run next. A step that changes nothing also stops it.
+
+With `--json`, the steps' own output goes to stderr and stdout carries one envelope: `{"ran": [...], "phase": "built"}`.
+
 ## Commands
 
 | Command | What it does | Milestone |
@@ -52,7 +74,7 @@ aipm status                     # where you are, and what to run next
 | `aipm plan` | Task graph with acceptance criteria and gates | v0.1 |
 | `aipm status` | Task status and security events, without an LLM | v0.1 |
 | `aipm prompt <T-ID>` | The prompt for one task, for your own coding agent | v0.1 |
-| `aipm sync-context` | Managed blocks in `AGENTS.md` and `CLAUDE.md` | v0.1 |
+| `aipm sync-context` | Managed blocks in `AGENTS.md`, `CLAUDE.md`, `GEMINI.md` and the Copilot instructions | v0.1 (v0.4: other tools) |
 | `aipm verify <T-ID>` | Post-change checks and gates for one task | v0.2 |
 | `aipm scan` | Every scanner over the repository | v0.2 |
 | `aipm task …` | Show, reset, block, unblock or skip a task | v0.2 |
@@ -65,7 +87,7 @@ Every command accepts `--json`, which prints exactly one result object to stdout
 
 ### Getting started: `init`, `trust` and `doctor`
 
-`aipm init` must run inside a git repository. It detects the stack from the manifests at the repository root (`python-uv`, `python-pip`, `node-npm` and `node-pnpm`), copies that stack's gate menu into `.pm/config.yaml`, writes `.pm/.gitignore` and `.pm/repo-map.md`, and shows the execution surface: every command aipm may run, in full, with the executable it resolves to on your `PATH`. `--force` re-initializes and keeps your other `.pm/` files. `--provider` is a user-level setting, so aipm tells you where to put it instead of writing it into the repository.
+`aipm init` must run inside a git repository. It detects the stack from the manifests at the repository root (`python-uv`, `python-pip`, `node-npm`, `node-pnpm`, and from v0.4 `go` and `rust-cargo`), copies that stack's gate menu into `.pm/config.yaml`, writes `.pm/.gitignore` and `.pm/repo-map.md`, and shows the execution surface: every command aipm may run, in full, with the executable it resolves to on your `PATH`. `--force` re-initializes and keeps your other `.pm/` files. `--provider` is a user-level setting, so aipm tells you where to put it instead of writing it into the repository. The `go` stack runs its tests with gotestsum, and `rust-cargo` with cargo-nextest (`cargo install cargo-nextest --locked`), because each writes a test report aipm checks; install them alongside Go and cargo.
 
 `aipm trust` records your approval of that exact surface, for you and this machine only, in your user state directory. It asks interactively, or takes `--confirm` with the first 12 characters of the surface hash, so a script has to name the surface it trusts. `--yes` never grants trust. Any change to a gate, the prepare step, a dispatch flag, a security setting or the resolved path of an executable changes the hash and needs trust again. `aipm trust --show` prints the surface without recording anything, and `--revoke` removes your trust.
 
@@ -111,7 +133,7 @@ Both commands hand your gate commands to a coding agent that runs outside aipm's
 
 `aipm prompt T-001` prints the prompt for one task, saves it to `.pm/prompts/T-001.claude.md`, marks the task `in_progress` and records `HEAD` as its base commit. The prompt holds the rules (each protected path as a "MUST NOT modify" rule, the dependency and network limits), the task's text and acceptance criteria, the files it may change and read, and the exact check commands to run, which come from your trusted config through the command policy. Text a model wrote is shown inside `untrusted` blocks that the agent is told to treat as data. The prompt goes to stdout alone, so `aipm prompt T-001 > prompt.md` works; `--out FILE` writes it to a file inside the repository and `--copy` also copies it with `pbcopy`, `wl-copy` or `xclip`. A task whose dependencies are not done is refused unless you pass `--force`, and a stale plan unless `--accept-stale`. `--fix` adds the failing output of the last `aipm verify` (or of the gate report named with `--report FILE`), cut to its first and last 4 KiB. Prompts stay under 24 KiB: aipm drops the read-only file list, then upstream titles, then older check output, and refuses a prompt that still does not fit.
 
-`aipm sync-context` writes a managed block, between `<!-- aipm:begin … -->` and `<!-- aipm:end -->`, into `AGENTS.md` (overview, stack, how to run checks, architecture map, conventions, boundaries and the task protocol) and `CLAUDE.md` (an `@AGENTS.md` import and notes for Claude Code). From v0.2 it also writes aipm's Claude Code subagents (`.claude/agents/aipm-test-writer.md`, and `aipm-reviewer.md`, which may only read) and skills (`.claude/skills/aipm-task-protocol/SKILL.md`, `aipm-run-checks/SKILL.md`); aipm owns those four files whole. Everything outside the markers stays exactly as you wrote it, and a file whose markers are broken or repeated is left alone (exit 2). It shows a diff of each block that changes and writes after you confirm; without a terminal it writes only blocks you approved with `aipm approve context --yes`, and otherwise exits 4. `--check` exits 3 when a block is out of date, for CI, and needs no trust because it writes nothing and prints only file names. Fields from the PRD and design are cleaned (no URLs outside `context.allowed_url_domains`, no HTML comments, no invisible characters, no `@path` imports) and shown only inside fenced `untrusted` blocks. Paths shown to an agent (owned and read files, component paths, protected paths, test roots) may use only letters, digits and `. _ / * ? + -`; a plan or config with any other character in a path stops `prompt` and `sync-context` with exit 6. A block that would contain a secret is never shown or written.
+`aipm sync-context --tool <tool>` (repeatable; your `dispatch.default_tool` otherwise) writes a managed block, between `<!-- aipm:begin … -->` and `<!-- aipm:end -->`, into `AGENTS.md` (overview, stack, how to run checks, architecture map, conventions, boundaries and the task protocol) and `CLAUDE.md` (an `@AGENTS.md` import and notes for Claude Code). For Gemini CLI it writes `GEMINI.md` (an `@./AGENTS.md` import and notes for Gemini); for Copilot CLI a thin `.github/copilot-instructions.md` that points to `AGENTS.md`, which Copilot reads natively; for Codex aipm's skills under `.agents/skills/` (`aipm-task-protocol`, `aipm-run-checks`), the same instructions as the Claude Code ones. From v0.2 it also writes aipm's Claude Code subagents (`.claude/agents/aipm-test-writer.md`, and `aipm-reviewer.md`, which may only read) and skills (`.claude/skills/aipm-task-protocol/SKILL.md`, `aipm-run-checks/SKILL.md`); aipm owns those four files whole. Everything outside the markers stays exactly as you wrote it, and a file whose markers are broken or repeated is left alone (exit 2). It shows a diff of each block that changes and writes after you confirm; without a terminal it writes only blocks you approved with `aipm approve context --yes`, and otherwise exits 4. `--check` exits 3 when a block is out of date, for CI, and needs no trust because it writes nothing and prints only file names. Fields from the PRD and design are cleaned (no URLs outside `context.allowed_url_domains`, no HTML comments, no invisible characters, no `@path` imports) and shown only inside fenced `untrusted` blocks. Paths shown to an agent (owned and read files, component paths, protected paths, test roots) may use only letters, digits and `. _ / * ? + -`; a plan or config with any other character in a path stops `prompt` and `sync-context` with exit 6. A block that would contain a secret is never shown or written.
 
 ### Verifying a task: `verify`, `scan` and `task`
 
@@ -132,7 +154,7 @@ For full coverage install [`srt`](https://github.com/anthropic-experimental/sand
 
 ### Building with an agent: `run`, `build` and `merge`
 
-`aipm build` hands every ready task to Claude Code and verifies it, unattended; `aipm run T-002` does the same for one task. A task is ready when it is `todo` and its dependencies are done or skipped. Each attempt runs in its own worktree outside your repository (`<cache dir>/aipm/worktrees/`), on a branch `aipm/task/<T-ID>` made from the integration branch (`aipm/integration`, created from your HEAD on the first build). Your own branches never get a commit from aipm.
+`aipm build` hands every ready task to a coding agent (Claude Code by default; Codex or Gemini with `--tool`, see [Coding agents](#coding-agents)) and verifies it, unattended; `aipm run T-002` does the same for one task. A task is ready when it is `todo` and its dependencies are done or skipped. Each attempt runs in its own worktree outside your repository (`<cache dir>/aipm/worktrees/`), on a branch `aipm/task/<T-ID>` made from the integration branch (`aipm/integration`, created from your HEAD on the first build). Your own branches never get a commit from aipm.
 
 For each task: Claude Code runs in the `srt` sandbox (it may write only its worktree and reach only `api.anthropic.com`; it may not read your checkout outside `.git`, your agent logins, the other tasks or the usual credential files), with `--bare`, `--permission-mode dontAsk`, no permission prompts, no repository or local settings and no MCP servers (`--setting-sources user --strict-mcp-config`, with a configuration home of its own), the file tools plus exactly the task's gate commands, and `--max-budget-usd` set to `budget.task_usd`. Then the same post-change checks and gates as `verify` run. A severe violation blocks the task at once (exit 6 at the end, a security event, never retried); a minor one is reverted and the attempt fails. A failed attempt gets a fix prompt with the failures, in the same agent session (`--resume`), up to `--max-retries` (default 3). A passing task is committed with `Aipm-Task`, `Aipm-Run` and `Aipm-Attempt` trailers and fast-forwarded onto the integration branch (rebased first if another task landed meanwhile; a conflict blocks the task). `AIPM-BLOCKED: <question>` in the agent's last message blocks the task with the question; nothing else the agent says counts.
 
@@ -145,6 +167,29 @@ For each task: Claude Code runs in the `srt` sandbox (it may write only its work
 `aipm build` needs trust (exit 6), `dispatch.enabled`, an approved plan that is not stale, a clean working tree (`.pm/` aside), a Claude Code that has every flag above (exit 8 otherwise; check with `claude --help`) and `ANTHROPIC_API_KEY`: bare mode never reads a subscription login, so **give agents a dedicated API key with a spend limit**. `dispatch.tools.claude.bare: false` drops `--bare` only; the repository's hooks and MCP servers are then listed in `aipm trust` but still never loaded. Agent output, prompts, gate reports and `cost.json` are saved in `.pm/runs/<run-id>/`, and `aipm status` shows the spend against the budget.
 
 `aipm merge` shows `git log --oneline <your branch>..aipm/integration`, asks you, then fast-forwards your branch (`--into BRANCH` for another one). It never pushes, never makes a merge commit, and refuses a branch with commits of its own (merge those by hand); without a terminal it exits 4.
+
+### Coding agents
+
+`aipm prompt` and `aipm sync-context` work for all four tools. `aipm run` and `aipm build` dispatch three of them (`--tool`, or `dispatch.default_tool`); each runs in its own worktree, in the `srt` sandbox when it is installed, with a configuration home of its own that starts empty, and only the environment variables aipm names. Before every dispatch aipm checks that the installed version still has every flag it relies on, and refuses (exit 8) otherwise. The full verification table, with sources, is in [docs/adapters.md](docs/adapters.md).
+
+| Tool | Dispatch | Key (`export` it; never in config) | Network under `srt` |
+|---|---|---|---|
+| Claude Code | yes | `ANTHROPIC_API_KEY` | `api.anthropic.com` |
+| Codex CLI | yes | `CODEX_API_KEY` | `api.openai.com` |
+| Gemini CLI | yes | `GEMINI_API_KEY` | `generativelanguage.googleapis.com` |
+| GitHub Copilot CLI | no: prompts and context files only | `COPILOT_GITHUB_TOKEN` | — |
+
+**Codex CLI.** Install it (`npm install -g @openai/codex`, or your package manager) and export `CODEX_API_KEY`. aipm runs `codex exec --sandbox workspace-write --json --ephemeral --ignore-rules -c approval_policy=never -` with the prompt on stdin and `CODEX_HOME` pointing at the task's own empty directory, so your `~/.codex` settings, rules, skills and logins are not used and the repository's `.codex/` is not read ([ADR-0026](docs/architecture/adr/0026-codex-and-gemini-dispatch-flags.md)). Known limits: Codex has no per-command allowlist; its own sandbox (no network, writes only in the worktree) bounds what the agent's commands can do, and aipm runs the gates itself. Codex reports no cost, so each attempt is charged its whole task budget. Whether Codex's sandbox works inside `srt` on macOS is not documented: if it cannot nest, the agent's commands fail and the task fails closed.
+
+**Gemini CLI.** Install it (`npm install -g @google/gemini-cli`) and export `GEMINI_API_KEY`. aipm runs `gemini --approval-mode auto_edit --output-format json --extensions none`, one `--allowed-tools run_shell_command(<gate>)` per gate command (any other shell command is denied in a headless run), and `--sandbox` only when `srt` is not used, with `GEMINI_CLI_HOME` pointing at the task's own directory, where aipm writes the only `settings.json` (usage statistics and auto-update off). Known limits: a repository that commits `.gemini/` or a `.env` file at its root cannot be built with Gemini (exit 6), because Gemini would load them as settings or environment; build it with another tool, or use `aipm prompt --tool gemini`. `--allowed-tools` is deprecated by Gemini in favour of its policy engine; when a version drops it, dispatch stops with exit 8. Gemini reports tokens, not cost, so each attempt is charged its whole task budget.
+
+**GitHub Copilot CLI.** `aipm prompt T-001 --tool copilot` and `aipm sync-context --tool copilot` work; `aipm build --tool copilot` exits 8. Copilot's documentation does not say whether a rule such as `--allow-tool 'shell(uv run pytest)'` also allows `uv run pytest && <anything>`, nor how a markdown prompt file is delivered, so aipm does not dispatch it ([ADR-0025](docs/architecture/adr/0025-copilot-ships-render-only.md)). Paste the prompt into Copilot yourself and check the task with `aipm verify`.
+
+### Plugins and tracing
+
+aipm loads entry-point plugins (`aipm.adapters`, `aipm.gates`, `aipm.scanners`, `aipm.llm_providers`, `aipm.stacks`) only from its own installation, never from the repository's virtualenv, the current directory or `PYTHONPATH`. Plugins are code you trust like aipm itself; install them into aipm's environment (`uv tool install aipm --with <plugin>`). `aipm doctor` lists what loaded, and `--no-plugins` turns them off. In v0.4 a plugin can add a stack template (a string of YAML, checked like the shipped ones); plugins in the other groups are loaded and listed, but cannot yet be selected.
+
+With the `otel` extra (`uv tool install 'aipm[otel] @ git+https://github.com/mlbala/aipm'`), `aipm --trace <command>` sends OpenTelemetry spans to `OTEL_EXPORTER_OTLP_ENDPOINT`: one per command, LLM call, agent dispatch and gate, with IDs, durations, token counts, costs and statuses. Prompts, replies, paths and agent output are never attached. Without `--trace`, or without the endpoint, nothing is sent ([ADR-0027](docs/architecture/adr/0027-opentelemetry-is-an-opt-in-network-path.md)).
 
 ### Models and providers
 
@@ -259,7 +304,7 @@ Tasks: 7 (todo 6, in progress 1, blocked 0, done 0, skipped 0)
 
 ## Tested tool versions
 
-From v0.3 aipm dispatches Claude Code (`run`, `build`). These are the versions this release was tested with, on macOS 27 (arm64); the Claude Code flags were checked on 2026-11-12 ([ADR-0023](docs/architecture/adr/0023-claude-code-dispatch-flags.md)).
+aipm dispatches Claude Code (from v0.3), Codex CLI and Gemini CLI (from v0.4). These are the versions this release was tested with, on macOS 27 (arm64). The Claude Code flags were checked against an installed 2.1.314 ([ADR-0023](docs/architecture/adr/0023-claude-code-dispatch-flags.md)). Codex, Gemini and Copilot were checked against their documentation on 2026-11-12, and against stub binaries that assert every flag; they were not installed on the test machine ([docs/adapters.md](docs/adapters.md)).
 
 | Tool | Version | What was checked |
 |---|---|---|
@@ -267,6 +312,25 @@ From v0.3 aipm dispatches Claude Code (`run`, `build`). These are the versions t
 | uv | 0.13.6 | install, `uv run`, the python-uv gate commands |
 | git | 2.55.0 | worktrees, rebase, fast-forward, compare-and-swap ref updates, trailers (hooks and fsmonitor off) |
 | Claude Code | 2.1.314, flags checked against the Claude Code docs of 2026-11-12 | `--version` and `--help` (`detect`): `--bare`, `-p`, `--output-format stream-json`, `--permission-mode dontAsk`, `--permission-prompts none`, `--setting-sources`, `--strict-mcp-config`, `--allowedTools`, `--max-budget-usd`, `--append-system-prompt[-file]`, `--resume`; `CLAUDE_CONFIG_DIR`; exit 143 on SIGTERM; `CLAUDE.md` with an `@AGENTS.md` import |
+| Codex CLI | 0.167.2 (documentation) | `codex exec --help`: `--sandbox workspace-write`, `--json`, `--ephemeral`, `--ignore-rules`, `--config`; `CODEX_HOME`; `CODEX_API_KEY`; `.agents/skills` |
+| Gemini CLI | 0.68.0 (documentation) | `gemini --help`: `--prompt`, `--approval-mode auto_edit`, `--allowed-tools`, `--output-format json`, `--extensions`, `--sandbox`; `GEMINI_CLI_HOME`; `GEMINI_API_KEY`; `GEMINI.md` with an `@./AGENTS.md` import |
+| GitHub Copilot CLI | 1.0.109 (documentation; render-only) | `AGENTS.md` and `.github/copilot-instructions.md`; dispatch off ([ADR-0025](docs/architecture/adr/0025-copilot-ships-render-only.md)) |
+| Go, gotestsum | not run by the tests | the `go` stack's commands pass the command policy (`tests/unit/test_config.py`) |
+| Rust (cargo, cargo-nextest) | not run by the tests | the `rust-cargo` stack's commands pass the command policy; the unit gate is judged on nextest's JUnit report, checked with a stub `cargo` ([ADR-0030](docs/architecture/adr/0030-rust-unit-gate-runs-nextest.md)) |
+
+## Verifying a release
+
+Every release from v0.4 on is built by the [release workflow](.github/workflows/release.yml) from its tag, with no write permissions during the build. Each release carries the wheel, the sdist, a CycloneDX SBOM of the locked dependencies (`aipm.cdx.json`), `SHA256SUMS`, and a signed build-provenance attestation (SLSA, through GitHub and Sigstore) for each of them. To check one before you install it:
+
+```bash
+gh release download v0.4.0 --repo mlbala/aipm --dir aipm-v0.4.0
+cd aipm-v0.4.0
+sha256sum --check SHA256SUMS                    # macOS: shasum -a 256 -c SHA256SUMS
+gh attestation verify aipm-0.4.0-py3-none-any.whl --repo mlbala/aipm
+uv tool install ./aipm-0.4.0-py3-none-any.whl
+```
+
+`gh attestation verify` checks that the file was built by this repository's release workflow, from the tagged commit, and has not changed since. Installing from the tag (`uv tool install git+https://github.com/mlbala/aipm@v0.4.0`) builds from source instead, and is covered by the tag, not by the attestation. Supply-chain checks run weekly with OpenSSF Scorecard ([scorecard.yml](.github/workflows/scorecard.yml)).
 
 ## Security model
 
@@ -285,6 +349,7 @@ Give coding agents a dedicated API key with a spend limit. Keep tokens out of gi
 - Design: [docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md)
 - Security model: [docs/architecture/SECURITY.md](docs/architecture/SECURITY.md)
 - Decisions: [docs/architecture/adr/](docs/architecture/adr/)
+- Coding-agent verification table: [docs/adapters.md](docs/adapters.md)
 - Build plan: [docs/prompts/](docs/prompts/README.md)
 - Contributing: [CONTRIBUTING.md](CONTRIBUTING.md)
 

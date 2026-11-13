@@ -78,7 +78,6 @@ def test_prompt_needs_an_initialized_repository(tmp_repo: Path) -> None:
     [
         (["T-1"], "not a task ID"),
         (["T-099"], "no task T-099"),
-        (["T-001", "--tool", "codex"], "v0.4"),
         (["T-001", "--tool", "cursor"], "unknown tool"),
         (["T-001", "--fix"], "--report FILE"),
         (["T-001", "--report", "r.json"], "--report goes with --fix"),
@@ -88,6 +87,14 @@ def test_usage_errors_exit_2(repo: Path, args: list[str], message: str) -> None:
     result = aipm(repo, "prompt", *args)
     assert result.exit_code == 2, result.output
     assert message in result.stderr
+
+
+@pytest.mark.parametrize("tool", ["codex", "copilot", "gemini"])
+def test_every_tool_gets_the_task_prompt(repo: Path, tool: str) -> None:
+    """v0.4: `--tool codex` used to exit 2; every tool now renders the same checked prompt."""
+    result = ok(aipm(repo, "prompt", "T-001", "--tool", tool))
+    assert "# Task T-001" in result.stdout
+    assert "AIPM-BLOCKED" in result.stdout
 
 
 def test_unfinished_dependencies_need_force(repo: Path) -> None:

@@ -10,7 +10,7 @@ import pytest
 
 from aipm.adapters import claude_code, registry
 from aipm.adapters.base import DispatchLimits, RenderedTaskPrompt
-from aipm.domain.errors import ExitCode, MissingCapability, NotAvailable, UsageError
+from aipm.domain.errors import ExitCode, MissingCapability, UsageError
 from aipm.domain.models import ToolName, Workspace
 from aipm.execution import clipboard
 from aipm.execution.process import ProcessResult
@@ -117,13 +117,15 @@ def test_parse_tool() -> None:
         registry.parse_tool("cursor", ToolName.CLAUDE)
 
 
-def test_only_claude_has_an_adapter_in_v01() -> None:
+def test_every_tool_has_an_adapter_in_v04() -> None:
+    """v0.4 adds Codex, Copilot and Gemini (this replaces the v0.1 test that only Claude Code
+    had one); an unknown tool name still exits 2."""
     assert isinstance(registry.get_adapter(ToolName.CLAUDE), claude_code.ClaudeCodeAdapter)
     for tool in (ToolName.CODEX, ToolName.COPILOT, ToolName.GEMINI):
-        with pytest.raises(NotAvailable) as info:
-            registry.get_adapter(tool)
-        assert info.value.exit_code is ExitCode.USAGE
-        assert "v0.4" in info.value.message
+        assert registry.get_adapter(tool).name is tool
+    with pytest.raises(UsageError) as info:
+        registry.parse_tool("cursor", ToolName.CLAUDE)
+    assert info.value.exit_code is ExitCode.USAGE
 
 
 # ---------------------------------------------------------------- clipboard

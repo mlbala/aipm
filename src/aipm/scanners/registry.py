@@ -9,9 +9,19 @@ reports as an error: a lookup that fails never passes a package.
 - PyPI: the JSON simple API (PEP 691) for the normalized name; the first release is the oldest
   file's `upload-time` (PEP 700).
 - npm: the package document; the first release is `time.created`.
+- Go: the module proxy's version list (`@v/list`, plain text), then the `.info` of the oldest
+  tagged version for its time; a module with no tagged version is an error (v0.4). Every request
+  carries `Disable-Module-Fetch: true`, so the proxy answers from its cache only and never
+  fetches an agent-chosen module path from its origin (which would carry data out through the
+  path); a module the proxy has not cached reads as missing (security review of step 08). The
+  `.info` time is the tag's commit time, which the module author sets: the Go age check is
+  weaker than the others (docs/adapters.md).
+- crates.io: the crate document; the first release is `crate.created_at`. crates.io refuses
+  requests without a User-Agent, so a fixed one naming aipm (never the user) is sent (v0.4).
 """
 
 import json
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -27,10 +37,20 @@ TIMEOUT_S = 15.0
 MAX_RESPONSE_BYTES = 32 * 1_048_576
 PYPI_SIMPLE = "https://pypi.org/simple/{name}/"
 NPM_DOC = "https://registry.npmjs.org/{name}"
+GO_PROXY = "https://proxy.golang.org/{module}/@v/{what}"
+CRATES_DOC = "https://crates.io/api/v1/crates/{name}"
+USER_AGENT = "aipm-deps-gate (+https://github.com/mlbala/aipm)"
+MAX_GO_VERSIONS = 10_000
+GO_NO_FETCH = {"Disable-Module-Fetch": "true"}
 _ACCEPT = {
     Ecosystem.PYPI: "application/vnd.pypi.simple.v1+json",
     Ecosystem.NPM: "application/json",
+    Ecosystem.GO: "application/json",
+    Ecosystem.CRATES: "application/json",
 }
+_GO_VERSION = re.compile(
+    r"v(\d{1,9})\.(\d{1,9})\.(\d{1,9})(?:-([0-9A-Za-z.\-]{1,100}))?(?:\+[0-9A-Za-z.\-]{1,100})?"
+)
 
 
 class RegistryError(Exception):
@@ -83,7 +103,32 @@ def _fetch(url: str, headers: Mapping[str, str]) -> Response:
 def _url(ecosystem: Ecosystem, name: str) -> str:
     if ecosystem is Ecosystem.PYPI:
         return PYPI_SIMPLE.format(name=urllib.parse.quote(normalize_name(ecosystem, name), safe=""))
+    if ecosystem is Ecosystem.CRATES:
+        return CRATES_DOC.format(name=urllib.parse.quote(name, safe=""))
     return NPM_DOC.format(name=urllib.parse.quote(name, safe="@"))
+
+
+def go_escape(module: str) -> str:
+    """A module path as the proxy protocol spells it: each capital letter becomes `!` and its
+    lower-case form (go.dev/ref/mod#goproxy-protocol), then percent-encoded but for `/`."""
+    escaped = "".join(f"!{c.lower()}" if c.isupper() else c for c in module)
+    return urllib.parse.quote(escaped, safe="/!")
+
+
+def oldest_tag(listing: str) -> str | None:
+    """The oldest tagged version in a proxy `@v/list` reply (a release sorts after its
+    pre-releases); `None` when it lists none."""
+    best: tuple[int, int, int, int, str] | None = None
+    found: str | None = None
+    for line in listing.splitlines()[:MAX_GO_VERSIONS]:
+        match = _GO_VERSION.fullmatch(line.strip())
+        if match is None:
+            continue
+        major, minor, patch, pre = match.groups()
+        key = (int(major), int(minor), int(patch), 0 if pre else 1, pre or "")
+        if best is None or key < best:
+            best, found = key, line.strip()
+    return found
 
 
 def _parse_time(value: object) -> datetime | None:
@@ -116,23 +161,68 @@ def _npm_first(doc: dict[str, Any]) -> datetime | None:
     return _parse_time(cast("dict[str, Any]", times).get("created"))
 
 
-def first_release(ecosystem: Ecosystem, name: str, *, fetch: Fetch | None = None) -> PackageInfo:
-    """Look a package up in its registry. Raises `RegistryError` on any doubt."""
-    check_package_name(ecosystem.value, name)
-    ask = fetch if fetch is not None else _fetch
-    response = ask(_url(ecosystem, name), {"Accept": _ACCEPT[ecosystem]})
-    if response.status == 404:
-        return PackageInfo(exists=False)
-    if response.status != 200:
-        raise RegistryError(f"the registry answered HTTP {response.status}")
+def _crates_first(doc: dict[str, Any]) -> datetime | None:
+    crate = doc.get("crate")
+    if not isinstance(crate, dict):
+        return None
+    return _parse_time(cast("dict[str, Any]", crate).get("created_at"))
+
+
+def _json_object(response: Response) -> dict[str, Any]:
     try:
         doc = json.loads(response.body)
     except (ValueError, RecursionError):
         raise RegistryError("the registry's answer is not JSON") from None
     if not isinstance(doc, dict):
         raise RegistryError("the registry's answer is not a JSON object")
-    data = cast("dict[str, Any]", doc)
-    first = _pypi_first(data) if ecosystem is Ecosystem.PYPI else _npm_first(data)
+    return cast("dict[str, Any]", doc)
+
+
+def _status(response: Response, *, gone: tuple[int, ...] = (404,)) -> bool:
+    """True for 200, False for "no such package"; an error otherwise."""
+    if response.status in gone:
+        return False
+    if response.status != 200:
+        raise RegistryError(f"the registry answered HTTP {response.status}")
+    return True
+
+
+def _go_first(name: str, ask: Fetch) -> PackageInfo:
+    module = go_escape(name)
+    listing = ask(
+        GO_PROXY.format(module=module, what="list"), {"Accept": "text/plain", **GO_NO_FETCH}
+    )
+    if not _status(listing, gone=(404, 410)):
+        return PackageInfo(exists=False)
+    tag = oldest_tag(listing.body.decode("utf-8", errors="replace"))
+    if tag is None:
+        raise RegistryError("the module has no tagged version, so its age is unknown")
+    info = ask(GO_PROXY.format(module=module, what=f"{urllib.parse.quote(tag)}.info"),
+               {"Accept": _ACCEPT[Ecosystem.GO], **GO_NO_FETCH})  # fmt: skip
+    if not _status(info, gone=(404, 410)):
+        raise RegistryError(f"the proxy lists {tag} but has no information on it")
+    first = _parse_time(_json_object(info).get("Time"))
+    if first is None:
+        raise RegistryError("the registry gave no first-release time")
+    return PackageInfo(exists=True, first_release=first)
+
+
+def first_release(ecosystem: Ecosystem, name: str, *, fetch: Fetch | None = None) -> PackageInfo:
+    """Look a package up in its registry. Raises `RegistryError` on any doubt."""
+    check_package_name(ecosystem.value, name)
+    ask = fetch if fetch is not None else _fetch
+    if ecosystem is Ecosystem.GO:
+        return _go_first(name, ask)
+    headers = {"Accept": _ACCEPT[ecosystem]}
+    if ecosystem is Ecosystem.CRATES:
+        headers["User-Agent"] = USER_AGENT
+    response = ask(_url(ecosystem, name), headers)
+    if not _status(response):
+        return PackageInfo(exists=False)
+    data = _json_object(response)
+    readers = {Ecosystem.PYPI: _pypi_first, Ecosystem.NPM: _npm_first,
+               Ecosystem.CRATES: _crates_first}  # fmt: skip
+    first = readers[ecosystem](data)
     if first is None:
         raise RegistryError("the registry gave no first-release time")
     return PackageInfo(exists=True, first_release=first)

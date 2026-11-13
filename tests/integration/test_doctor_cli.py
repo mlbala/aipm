@@ -66,7 +66,21 @@ def test_doctor_json_shape(
     assert data["trust"]["trusted"] is False
     assert len(data["trust"]["surface_hash"]) == 64
     assert data["sandbox"] == {"srt": False, "require_sandbox": False}
-    assert data["plugins"]["enabled"] is False
+    # v0.4: plugins load from aipm's own environment unless --no-plugins (this asserted
+    # `enabled is False` while entry-point loading was off, before build prompt 08).
+    assert data["plugins"]["enabled"] is True
+    assert data["plugins"]["loaded"] == []
+
+
+def test_no_plugins_turns_plugin_loading_off(
+    stub_path: Path, tmp_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert runner.invoke(app, ["-C", str(tmp_repo), "init"]).exit_code == 0
+    result = doctor(monkeypatch, stub_path, "--json", "--no-plugins", "-C", str(tmp_repo))
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["data"]["plugins"]["enabled"] is False
+    human = doctor(monkeypatch, stub_path, "--no-plugins", "-C", str(tmp_repo))
+    assert "Plugins: off (--no-plugins)" in human.stdout
 
 
 def test_doctor_human_output_outside_a_repo(

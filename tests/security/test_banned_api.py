@@ -27,6 +27,8 @@ PROCESS_MODULE = SRC / "execution" / "process.py"
 # Where the snippets pretend to live: inside the package, but not the exempt module.
 CHECKED_PATH = "src/aipm/execution/_banned_api_probe.py"
 EXEMPT_PATH = "src/aipm/execution/process.py"
+PLUGIN_LOADER = SRC / "plugins" / "loader.py"
+PLUGIN_PATH = "src/aipm/plugins/loader.py"
 
 # One snippet per banned entry; each must trigger TID251 for that entry.
 CASES: dict[str, str] = {
@@ -169,19 +171,38 @@ def test_process_module_has_no_file_wide_exemption() -> None:
 
 
 def test_lint_suppressions_appear_only_where_allowed() -> None:
-    """No blanket `# noqa`, no file-level `ruff: noqa`, and TID251 noqa only in process.py."""
+    """No blanket `# noqa`, no file-level `ruff: noqa`, and TID251 noqa only in process.py and,
+    on exactly one `importlib.import_module` line, in plugins/loader.py (ARCHITECTURE §5.1,
+    build prompt 08)."""
     blanket = re.compile(r"#\s*noqa(?!:)", re.IGNORECASE)
     file_level = re.compile(r"#\s*(ruff|flake8)\s*:\s*noqa", re.IGNORECASE)
     tid251 = re.compile(r"#\s*noqa:[^\n]*TID251", re.IGNORECASE)
     offenders: list[str] = []
+    plugin_lines: list[str] = []
     for path in package_modules():
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             where = f"{path.relative_to(REPO_ROOT)}:{number}"
             if blanket.search(line) or file_level.search(line):
                 offenders.append(where)
-            if tid251.search(line) and path != PROCESS_MODULE:
+            if not tid251.search(line) or path == PROCESS_MODULE:
+                continue
+            if path == PLUGIN_LOADER:
+                plugin_lines.append(line)
+            else:
                 offenders.append(where)
     assert offenders == []
+    assert len(plugin_lines) == 1, plugin_lines
+    code = plugin_lines[0].split("#", 1)[0]
+    assert "importlib.import_module(" in code
+    assert "subprocess" not in code and "os." not in code
+
+
+def test_the_plugin_loader_has_no_file_wide_exemption() -> None:
+    """plugins/loader.py may call importlib.import_module only on a line marked for it."""
+    assert ruff_tid251("import importlib\nimportlib.import_module('x')\n", PLUGIN_PATH)
+    assert ruff_tid251("import subprocess\n", PLUGIN_PATH)
+    marked = "import importlib\nimportlib.import_module('x')  # noqa: TID251\n"
+    assert ruff_tid251(marked, PLUGIN_PATH) == []
 
 
 def test_no_unscannable_process_routes_in_the_package() -> None:

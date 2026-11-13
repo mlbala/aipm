@@ -13,6 +13,7 @@ import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from aipm import __version__
 from aipm.app.workspace import find_repo_root
@@ -22,6 +23,7 @@ from aipm.domain.errors import AipmError, LockHeld
 from aipm.domain.models import ArtifactKind
 from aipm.execution.git import version_problem
 from aipm.execution.process import build_env, run_safe
+from aipm.plugins import loader
 from aipm.security.sanitize import sanitize_text
 from aipm.state.layout import ARTIFACT_FILES, pm_root, repo_id
 from aipm.state.store import open_store
@@ -31,7 +33,11 @@ TOOLS = (
     "git", "uv", "claude", "codex", "copilot", "gemini", "srt", "semgrep", "gitleaks",
     "osv-scanner", "trivy",
 )  # fmt: skip
-KEY_VARIABLES = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GITHUB_TOKEN")
+KEY_VARIABLES = (
+    "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GITHUB_TOKEN", "CODEX_API_KEY",
+    "COPILOT_GITHUB_TOKEN",
+)  # fmt: skip
+"""The LLM and coding-agent keys `doctor` reports as set or not (never their values)."""
 VERSION_TIMEOUT_S = 10.0
 _LOADABLE = (
     ArtifactKind.REQUIREMENTS,
@@ -120,6 +126,31 @@ def _trust(root: Path, config: Config) -> dict[str, object]:
     return {"trusted": trusted, "surface_hash": digest, "error": None}
 
 
+def _plugins() -> dict[str, object]:
+    """The entry-point plugins of this run (ARCHITECTURE §18): loading them is what `doctor`
+    reports, so it imports them, unless `--no-plugins`."""
+    found = loader.loaded()
+    return {
+        "enabled": found.enabled,
+        "loaded": [p.to_data() for p in found.plugins],
+        "warnings": [_clean(w, 500) for w in found.warnings],
+        "paths": list(found.paths),
+    }
+
+
+def _plugin_lines(plugins: dict[str, object]) -> list[str]:
+    if not plugins["enabled"]:
+        return ["Plugins: off (--no-plugins)"]
+    loaded = cast("list[dict[str, str]]", plugins["loaded"])
+    lines = [f"Plugins: {len(loaded)} loaded from aipm's own environment"]
+    lines += [
+        f"  {p['group']}: {p['name']} ({p['distribution']} {p['version']}, {p['target']})"
+        for p in loaded
+    ]
+    lines += [f"  warning: {w}" for w in cast("list[str]", plugins["warnings"])]
+    return lines
+
+
 def run(project: Path | None, *, env: Mapping[str, str] | None = None) -> DoctorReport:
     """Run the use case."""
     environ = os.environ if env is None else env
@@ -155,6 +186,7 @@ def run(project: Path | None, *, env: Mapping[str, str] | None = None) -> Doctor
         trust=_trust(root, config) if root is not None and initialized and config else None,
         srt=any(t["name"] == "srt" and t["found"] for t in tools),
         require_sandbox=bool(config and config.security.require_sandbox),
+        plugins=_plugins(),
     )
     return DoctorReport(data=sections.data(), lines=tuple(sections.lines()))
 
@@ -172,6 +204,7 @@ class _Sections:
     trust: dict[str, object] | None
     srt: bool
     require_sandbox: bool
+    plugins: dict[str, object]
 
     def data(self) -> dict[str, object]:
         return {
@@ -186,11 +219,7 @@ class _Sections:
             "lock": self.lock,
             "trust": self.trust,
             "sandbox": {"srt": self.srt, "require_sandbox": self.require_sandbox},
-            "plugins": {
-                "enabled": False,
-                "loaded": [],
-                "note": "entry-point plugins arrive in v0.4",
-            },
+            "plugins": self.plugins,
         }
 
     def lines(self) -> list[str]:
@@ -237,5 +266,5 @@ class _Sections:
             f"Sandbox: srt {'found' if self.srt else 'not found'}; "
             f"require_sandbox={self.require_sandbox}"
         )
-        lines.append("Plugins: off (entry-point plugins arrive in v0.4)")
+        lines.extend(_plugin_lines(self.plugins))
         return lines

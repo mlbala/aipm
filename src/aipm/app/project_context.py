@@ -6,7 +6,9 @@ compiled here, through `compile_gate`, with the placeholders as an agent sees th
 - `{paths}` expands to nothing, so the tool checks the whole project, as `aipm trust` shows it;
 - `{test_paths}` expands to the first test root;
 - `{report_file}` is `/dev/null`: only aipm's own gate run reads a report, from a path it
-  generates for that run (§13.1), so an agent's copy has nowhere useful to go.
+  generates for that run (§13.1), so an agent's copy has nowhere useful to go;
+- `{nextest_config}` is `/dev/null` too: an empty nextest configuration, so an agent's
+  `cargo nextest run` uses nextest's defaults and writes no report (ADR-0030).
 
 Callers check trust before they show or write anything built from this (SECURITY.md §6 rule 3).
 """
@@ -45,7 +47,13 @@ def agent_gates(cfg: Config, *, detail: bool = True) -> tuple[GateCommand, ...]:
         try:
             if policy is None:
                 policy = cfg.command_policy()
-            argv = compile_gate(gate, paths=[], policy=policy, report_file=AGENT_REPORT_FILE)
+            argv = compile_gate(
+                gate,
+                paths=[],
+                policy=policy,
+                report_file=AGENT_REPORT_FILE,
+                nextest_config=AGENT_REPORT_FILE,
+            )
         except PolicyViolation as exc:
             if detail:
                 raise PolicyViolation(f"gate {name!r}: {exc.message}", hint=exc.hint) from None

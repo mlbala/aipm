@@ -23,3 +23,15 @@ updates:
     groups:
       python:
         patterns: ["*"]
+
+  - package-ecosystem: pip # the release build backend, pinned with hashes
+    directory: /.github/release
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: chore
+    groups:
+      build-backend:
+        patterns: ["*"]

@@ -1,11 +1,18 @@
-"""Adapter registry; entry-point adapters arrive in v0.4 (ARCHITECTURE §18)."""
+"""The adapter registry: the four built-in coding tools (ARCHITECTURE §11, §18)."""
 
-from aipm.adapters import claude_code
+from collections.abc import Callable
+
+from aipm.adapters import claude_code, codex, copilot, gemini
 from aipm.adapters.base import ToolAdapter
-from aipm.domain.errors import NotAvailable, UsageError
+from aipm.domain.errors import UsageError
 from aipm.domain.models import ToolName
 
-V01_TOOLS = (ToolName.CLAUDE,)
+_FACTORIES: dict[ToolName, Callable[[], ToolAdapter]] = {
+    ToolName.CLAUDE: claude_code.create,
+    ToolName.CODEX: codex.create,
+    ToolName.COPILOT: copilot.create,
+    ToolName.GEMINI: gemini.create,
+}
 
 
 def parse_tool(value: str | None, default: ToolName) -> ToolName:
@@ -20,10 +27,6 @@ def parse_tool(value: str | None, default: ToolName) -> ToolName:
 
 
 def get_adapter(name: ToolName) -> ToolAdapter:
-    """Return the adapter for a tool; only Claude Code exists in v0.1 (exit 2 otherwise)."""
-    if name is ToolName.CLAUDE:
-        return claude_code.create()
-    raise NotAvailable(
-        f"the {name.value} adapter is available in v0.4",
-        hint="Use --tool claude, or run `aipm prompt` and paste the prompt into your agent.",
-    )
+    """Return the adapter for a tool. Copilot's renders prompts and context files only
+    (ADR-0025): its `detect` never reports it dispatchable."""
+    return _FACTORIES[name]()

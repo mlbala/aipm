@@ -17,13 +17,14 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from aipm.adapters.base import DispatchLimits, ToolAdapter
+from aipm.adapters.base import ToolAdapter
 from aipm.adapters.compiler import compile_task_spec, render_within_budget
 from aipm.adapters.registry import get_adapter, parse_tool
 from aipm.app import runtime
 from aipm.app.approve import require_inputs
 from aipm.app.attempt import attempt_dir
 from aipm.app.build_loop import BuildLoop, BuildSettings, BuildSummary, ProgressSink
+from aipm.app.dispatcher import native_allowed, tool_limits
 from aipm.app.project_context import build_context
 from aipm.app.snapshot import read_snapshot
 from aipm.app.trust import require_trusted
@@ -199,13 +200,15 @@ def _detect(adapter: ToolAdapter, root: Path, cfg: Config, *, dry_run: bool) -> 
     worktrees = WorktreeManager(root).root
     if any(is_inside(part, worktrees) for part in (*caps.launcher, caps.path or "")):
         raise PolicyViolation(f"the {adapter.name.value} found on PATH is inside a task worktree")
-    claude = cfg.dispatch.tools.get(ToolName.CLAUDE)
-    bare = claude.bare if claude is not None else True
-    if bare and not dry_run:
+    tool = cfg.dispatch.tools.get(adapter.name)
+    # Only Claude Code can drop its API key (`bare: false`); every other agent runs with an
+    # empty config home of its own, so it has no saved login to fall back on (ADR-0026).
+    needs_key = adapter.name is not ToolName.CLAUDE or tool is None or tool.bare
+    if needs_key and not dry_run:
         for name in adapter.required_env:
             if not os.environ.get(name):
                 raise MissingCapability(
-                    f"{name} is not set; {adapter.name.value} in bare mode needs an API key",
+                    f"{name} is not set; a dispatched {adapter.name.value} needs an API key",
                     hint="Give coding agents a dedicated API key with a spend limit.",
                 )
 
@@ -226,7 +229,10 @@ def _dry_run(
     )
     by_id = {t.id: t for t in tasks.tasks}
     worktrees = WorktreeManager(settings.root)
-    claude = settings.cfg.dispatch.tools.get(ToolName.CLAUDE)
+    tool = settings.cfg.dispatch.tools.get(adapter.name)
+    # The sandbox is resolved only for a real run: the preview assumes `srt` is used when it
+    # is on PATH.
+    native = native_allowed(settings.cfg) and shutil.which("srt") is None
     planned: list[DryRunTask] = []
     attempt = Path("<attempt>")
     for number, batch in enumerate(batches, start=1):
@@ -234,16 +240,15 @@ def _dry_run(
             task: Task = by_id[task_id]
             spec = compile_task_spec(task, ctx, approval=settings.approval)
             prompt = render_within_budget(adapter, spec, ctx)
-            limits = DispatchLimits(
-                timeout_s=settings.timeout_s, task_usd=settings.budget.task_usd,
+            limits = tool_limits(
+                tool, timeout_s=settings.timeout_s, task_usd=settings.budget.task_usd,
                 allowed_commands=tuple(g.allow_prefix for g in spec.verify if g.allow_prefix),
-                pass_env=tuple(claude.pass_env) if claude else (),
-                allow_auto_mode=claude.allow_auto_mode if claude else False,
-                bare=claude.bare if claude else True,
+                native_sandbox=native,
             )  # fmt: skip
             ws = Workspace(
                 root=worktrees.path(task_id), temp_dir=attempt / "agent",
-                context_dir=attempt / "context", config_home=Path("<run>/claude"),
+                context_dir=attempt / "context",
+                config_home=Path(f"<run>/{adapter.name.value}"),
             )  # fmt: skip
             argv = adapter.preview_argv(limits, ws)
             planned.append(DryRunTask(task_id, number, prompt.size, argv))

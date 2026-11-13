@@ -103,7 +103,8 @@ class CheckPolicy:
 
 # ---------------------------------------------------------------- path classes
 
-MANIFESTS = frozenset({"pyproject.toml", "package.json"})
+MANIFESTS = frozenset({"pyproject.toml", "package.json", "go.mod", "cargo.toml"})
+"""Casefolded file names: on macOS `Cargo.toml` and `CARGO.TOML` are the same file."""
 REQUIREMENTS = re.compile(r"requirements[\w.\-]*\.(?:txt|in)")
 LOCKFILES: dict[str, Ecosystem] = {
     "uv.lock": Ecosystem.PYPI,
@@ -113,14 +114,21 @@ LOCKFILES: dict[str, Ecosystem] = {
     "npm-shrinkwrap.json": Ecosystem.NPM,
     "pnpm-lock.yaml": Ecosystem.NPM,
     "yarn.lock": Ecosystem.NPM,
+    "go.sum": Ecosystem.GO,
+    "cargo.lock": Ecosystem.CRATES,
 }
 MAX_LOCKFILE_BYTES = 16 * 1_048_576
 """How much of a lockfile the checks read; a larger one cannot be checked (a violation)."""
 PACKAGE_CONFIG = frozenset(
     {".npmrc", ".pnpmfile.cjs", ".pnpmfile.mjs", ".yarnrc", ".yarnrc.yml", "bunfig.toml",
-     "uv.toml", "pip.conf", "pip.ini", "pnpm-workspace.yaml"}
+     "uv.toml", "pip.conf", "pip.ini", "pnpm-workspace.yaml",
+     "go.work", "go.work.sum", "rust-toolchain", "rust-toolchain.toml"}
 )  # fmt: skip
 PACKAGE_CODE_DIRS = ("/.yarn/releases/", "/.yarn/plugins/")
+CARGO_CONFIG = ("/.cargo/config", "/.cargo/config.toml")
+"""Cargo configuration: it can name another registry, a source replacement, or a program that
+wraps the compiler or runs the tests (`build.rustc-wrapper`, `target.<triple>.runner`).
+`go.work` can replace any module, and a toolchain file picks the compiler to download (v0.4)."""
 """Package-manager settings the prepare step reads: they can name another registry, or a
 program to run during install (`.pnpmfile.cjs`, `git=` in `.npmrc`, `yarnPath`). RT02-4."""
 _WHOLE_FILE_TEST_CONFIG = frozenset(
@@ -203,7 +211,11 @@ def is_package_config(path: str) -> bool:
     """Package-manager settings that the prepare step reads (`PACKAGE_CONFIG`), and the yarn
     release and plugin files `yarnPath` and `plugins` run."""
     folded = f"/{path.casefold()}"
-    return _fname(path) in PACKAGE_CONFIG or any(d in folded for d in PACKAGE_CODE_DIRS)
+    return (
+        _fname(path) in PACKAGE_CONFIG
+        or any(d in folded for d in PACKAGE_CODE_DIRS)
+        or folded.endswith(CARGO_CONFIG)
+    )
 
 
 def is_dependency_path(path: str) -> bool:
@@ -370,8 +382,20 @@ _PACKAGE_MANAGER = re.compile(r"[a-z][a-z0-9\-]*@\d[0-9A-Za-z.+\-]*")
 DEFAULT_REGISTRIES: dict[Ecosystem, tuple[str, ...]] = {
     Ecosystem.PYPI: ("https://pypi.org/simple", "https://files.pythonhosted.org/"),
     Ecosystem.NPM: ("https://registry.npmjs.org/", "https://registry.yarnpkg.com/"),
+    Ecosystem.GO: ("https://proxy.golang.org/",),
+    Ecosystem.CRATES: ("https://index.crates.io/", "https://github.com/rust-lang/crates.io-index"),
 }
 """Registries a lockfile may name without that being a new source."""
+
+
+def normalize_dependency(ecosystem: Ecosystem, name: str) -> str:
+    """A name as its registry compares it: PEP 503 for PyPI, `_` read as `-` for crates.io,
+    lowercase otherwise."""
+    if ecosystem is Ecosystem.PYPI:
+        return normalize_pypi(name)
+    if ecosystem is Ecosystem.CRATES:
+        return name.replace("_", "-").lower()
+    return name.lower()
 
 
 def normalize_pypi(name: str) -> str:
@@ -592,14 +616,140 @@ def _package_json_deps(doc: dict[str, Any]) -> Deps:
     return Deps(frozenset((Ecosystem.NPM, n) for n in names), frozenset(off))
 
 
+# ---------------------------------------------------------------- go.mod and Cargo.toml (v0.4)
+
+
+def _go_entry(kind: str, text: str, names: set[str], off: set[str]) -> bool:
+    """One `require` or `replace` entry; False when it is not well formed."""
+    if kind == "require":
+        parts = text.split()
+        if len(parts) != 2:
+            return False
+        names.add(parts[0].strip('"').lower())
+        return True
+    left, sep, right = text.partition("=>")
+    target = right.split()
+    if not sep or not left.split() or not target:
+        return False
+    local = target[0].startswith(("./", "../", "/"))
+    if not (local and len(target) == 1 and _inside(target[0].removeprefix("./"))):
+        off.add(f"{' '.join(left.split())} => {' '.join(target)}")
+    return True
+
+
+_GO_VERBS = frozenset(
+    {"module", "go", "toolchain", "godebug", "require", "exclude", "replace", "retract", "tool",
+     "ignore"}
+)  # fmt: skip
+"""Every directive `go.mod` allows (go.dev/ref/mod#go-mod-file-grammar); anything else makes the
+file unreadable, never ignored (security review of step 08)."""
+_GO_VERB = re.compile(r"([A-Za-z]+)(?=[\s(]|$)")
+
+
+def _go_directive(line: str, names: set[str], off: set[str]) -> tuple[bool, str | None]:
+    """One top-level line: (well formed, the block it opens)."""
+    verb = _GO_VERB.match(line)
+    if verb is None or verb.group(1) not in _GO_VERBS:
+        return False, None
+    word = verb.group(1)
+    rest = line[verb.end() :].strip()
+    if rest == "(":
+        return True, word
+    if not rest or rest.startswith("("):
+        return False, None
+    if word in ("require", "replace"):
+        return _go_entry(word, rest, names, off), None
+    if word == "toolchain":
+        off.add(f"toolchain {' '.join(rest.split())}")
+    return True, None
+
+
+def _go_mod_deps(text: str) -> Deps | None:
+    """`require` lines and blocks; a `replace` to another module or outside the repository, and a
+    `toolchain` line, are sources outside the proxy. The verb ends at any whitespace or `(`, as
+    in Go's own lexer; an unknown verb or a line not well formed makes the file `None`."""
+    names: set[str] = set()
+    off: set[str] = set()
+    block: str | None = None
+    for raw in text.split("\n"):
+        line = raw.split("//", 1)[0].strip()
+        if len(raw) > MAX_LINE:
+            return None
+        if not line:
+            continue
+        if block is None:
+            ok, block = _go_directive(line, names, off)
+        elif line == ")":
+            ok, block = True, None
+        else:
+            ok = block not in ("require", "replace") or _go_entry(block, line, names, off)
+        if not ok:
+            return None
+    if block is not None:
+        return None
+    return Deps(frozenset((Ecosystem.GO, n) for n in names), frozenset(off))
+
+
+_CARGO_TABLES = (
+    "dependencies", "dev-dependencies", "build-dependencies", "dev_dependencies",
+    "build_dependencies",
+)  # fmt: skip
+"""Cargo still reads the underscore spellings (editions up to 2021)."""
+_CARGO_SOURCES = ("git", "registry", "registry-index")
+
+
+def _cargo_entry(key: str, spec: object, names: set[str], off: set[str]) -> None:
+    if not isinstance(spec, dict):
+        names.add(normalize_dependency(Ecosystem.CRATES, key))
+        return
+    table = cast("dict[str, Any]", spec)
+    package = table.get("package")
+    real = package if isinstance(package, str) else key
+    if "path" in table:  # a crate of this repository, not a registry package
+        if not _inside(table["path"]):
+            off.add(f"{real}: path {_shown(table['path'])}")
+    else:
+        names.add(normalize_dependency(Ecosystem.CRATES, real))
+    for source in _CARGO_SOURCES:
+        if source in table:
+            off.add(f"{real}: {source} {_shown(table[source])}")
+
+
+def _cargo_deps(doc: dict[str, Any]) -> Deps:
+    """The dependency tables (also per target and the workspace's); `git`, `path` outside the
+    repository, another `registry`, `[patch]` and `[replace]` are sources outside crates.io."""
+    names: set[str] = set()
+    off: set[str] = set()
+    tables = [_table(doc, t) for t in _CARGO_TABLES]
+    for target in _table(doc, "target").values():
+        if isinstance(target, dict):
+            tables += [_table(cast("dict[str, Any]", target), t) for t in _CARGO_TABLES]
+    tables.append(_table(_table(doc, "workspace"), "dependencies"))
+    for table in tables:
+        for key, spec in table.items():
+            _cargo_entry(str(key), spec, names, off)
+    for registry in _table(doc, "patch"):
+        off |= {f"patch {name}: {registry}" for name in _table(_table(doc, "patch"), registry)}
+    off |= {f"replace {name}" for name in _table(doc, "replace")}
+    return Deps(frozenset((Ecosystem.CRATES, n) for n in names), frozenset(off))
+
+
+_TOML_MANIFESTS: dict[str, Callable[[dict[str, Any]], Deps]] = {
+    "pyproject.toml": _pyproject_deps,
+    "cargo.toml": _cargo_deps,
+}
+
+
 def manifest_deps(path: str, text: str | None) -> Deps | None:
     """The direct dependencies a manifest declares; `None` if it cannot be parsed."""
     name = _fname(path)
     if text is None:
         return Deps(frozenset())
-    if name == "pyproject.toml":
+    if name == "go.mod":
+        return _go_mod_deps(text)
+    if name in _TOML_MANIFESTS:
         doc = _toml(text)
-        return None if doc is None else _pyproject_deps(doc)
+        return None if doc is None else _TOML_MANIFESTS[name](doc)
     if name == "package.json":
         doc = _json(text)
         return None if doc is None else _package_json_deps(doc)
@@ -611,8 +761,7 @@ def manifest_deps(path: str, text: str | None) -> Deps | None:
 def declared(task: Task) -> frozenset[tuple[Ecosystem, str]]:
     """The task's `deps_add`, normalized."""
     return frozenset(
-        (d.ecosystem, normalize_pypi(d.name) if d.ecosystem is Ecosystem.PYPI else d.name.lower())
-        for d in task.deps_add
+        (d.ecosystem, normalize_dependency(d.ecosystem, d.name)) for d in task.deps_add
     )
 
 
@@ -1023,14 +1172,53 @@ def _berry_resolution(current: str, value: str, names: set[tuple[Ecosystem, str]
     return {f"{current}: {value[:160]}"}
 
 
+_CRATES_IO = (
+    "registry+https://github.com/rust-lang/crates.io-index",
+    "sparse+https://index.crates.io/",
+)
+
+
+def _cargo_lock(doc: dict[str, Any]) -> LockDeps:
+    """`[[package]]` entries; one without a source is a workspace member, and a source other
+    than crates.io (git, another registry) is recorded."""
+    names: set[tuple[Ecosystem, str]] = set()
+    sources: set[str] = set()
+    for item in _items(doc, "package"):
+        package = cast("dict[str, Any]", item) if isinstance(item, dict) else {}
+        name = package.get("name")
+        source = package.get("source")
+        if not isinstance(name, str) or source is None:
+            continue
+        names.add((Ecosystem.CRATES, normalize_dependency(Ecosystem.CRATES, name)))
+        if source not in _CRATES_IO:
+            sources.add(f"{name}: {str(source)[:160]}")
+    return LockDeps(frozenset(names), frozenset(sources))
+
+
+def _go_sum(text: str) -> LockDeps | None:
+    """`<module> <version>[/go.mod] <hash>` lines; anything else makes the file unreadable."""
+    names: set[tuple[Ecosystem, str]] = set()
+    for raw in text.split("\n"):
+        line = raw.strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(line) > MAX_LINE or len(parts) != 3:
+            return None
+        names.add((Ecosystem.GO, parts[0].lower()))
+    return LockDeps(frozenset(names))
+
+
 _TOML_LOCKS: dict[str, Callable[[dict[str, Any]], LockDeps]] = {
     "uv.lock": _uv_lock,
     "poetry.lock": _poetry_lock,
     "pylock.toml": _pylock,
+    "cargo.lock": _cargo_lock,
 }
 _TEXT_LOCKS: dict[str, Callable[[str], LockDeps | None]] = {
     "pnpm-lock.yaml": _pnpm_lock,
     "yarn.lock": _yarn_lock,
+    "go.sum": _go_sum,
 }
 
 

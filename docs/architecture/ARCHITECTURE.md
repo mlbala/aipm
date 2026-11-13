@@ -160,7 +160,7 @@ flowchart TB
 - `cli` may import only `aipm.app`, `aipm.domain.errors` (the exit codes and error types) and `aipm.security.sanitize` (to clean text before printing), plus `cli`'s own output helpers.
 - L0 is pure: no subprocess, no network, no file writes, no LLM SDKs. It imports only the standard library and `pydantic`, and MUST NOT import `subprocess`, `socket`, `httpx`, `anthropic`, `openai`, the `os.system` family, or file I/O helpers. The one exception is `security/paths.py`, which may make read-only `lstat`/`realpath` calls to detect symlink escapes.
 - A process can be started from exactly one module, `aipm.execution.process`. A ruff `banned-api` list (TID251) applies to `src/aipm/**` and bans `subprocess`, `os.system`, `os.popen`, `os.spawn*`, `os.exec*`, `os.posix_spawn*`, `os.fork`, `os.forkpty`, `pty`, `multiprocessing`, `asyncio.create_subprocess_exec`, `asyncio.create_subprocess_shell`, `importlib.import_module` and the `builtins` module. ruff cannot see the bare `__import__` builtin or the `__builtins__` name, so a test in `tests/security` scans every module for them. `execution/process.py` is the only exemption, except that `plugins/loader.py` may call `importlib.import_module` once entry-point loading arrives (v0.4). import-linter forbids the `subprocess` import as a second layer; it sees module imports only, not attribute calls such as `os.system`.
-- Network access exists in exactly two places: the LLM gateway (`aipm.llm`) and the registry lookups in `aipm.scanners.registry`.
+- Network access exists in exactly two places: the LLM gateway (`aipm.llm`) and the registry lookups in `aipm.scanners.registry`. The one opt-in exception is OTLP span export from `aipm.observability.tracing`, only with `--trace` and `OTEL_EXPORTER_OTLP_ENDPOINT` ([ADR-0027](adr/0027-opentelemetry-is-an-opt-in-network-path.md)).
 - LLM SDKs are imported only inside `aipm.llm.providers.*`, and lazily (at call time, not at module import), to keep CLI startup fast.
 
 ### 5.2 Components
@@ -642,18 +642,18 @@ Flags were checked against vendor documentation in October 2026. Because CLIs ch
 |---|---|---|---|---|
 | Context | `CLAUDE.md` → `@AGENTS.md`, `.claude/agents`, `.claude/skills` | `AGENTS.md` (native), `.agents/skills` | `AGENTS.md` (native), `.github/copilot-instructions.md` | `GEMINI.md` or `context.fileName` |
 | Headless | `claude --bare -p` | `codex exec` | `copilot -p` | `gemini -p` |
-| Prompt delivery | stdin (capped at 10 MB by Claude Code) | stdin, or argument (verify `-` support) | Short `-p` plus `--attachment <run>/prompt.md` | stdin |
+| Prompt delivery | stdin (capped at 10 MB by Claude Code) | stdin (`-` argument) | Undocumented for markdown: `--attachment` takes images and PDFs; render-only ([ADR-0025](adr/0025-copilot-ships-render-only.md)) | stdin, with a fixed `-p` appended |
 | Context in headless mode | `--append-system-prompt-file <run>/agents.md`, because bare mode skips `CLAUDE.md` | `AGENTS.md` read from the worktree | `AGENTS.md` read from the worktree | `GEMINI.md` / settings in the worktree |
-| Least privilege | `--permission-mode dontAsk`, `--permission-prompts none`, `--setting-sources user`, `--strict-mcp-config`, `--allowedTools "Read,Edit,Write,Glob,Grep,Bash(<gate argv>),Bash(<gate argv> *)…"`, an isolated `CLAUDE_CONFIG_DIR` ([ADR-0023](adr/0023-claude-code-dispatch-flags.md)) | `--sandbox workspace-write` (network off by default) | `--allow-tool 'write'`, `--allow-tool 'shell(<gate cmd>)'`, `--no-ask-user`, `--secret-env-vars` | `--approval-mode auto_edit`, `--allowed-tools "ShellTool(<gate cmd>)"`, `--sandbox` |
+| Least privilege | `--permission-mode dontAsk`, `--permission-prompts none`, `--setting-sources user`, `--strict-mcp-config`, `--allowedTools "Read,Edit,Write,Glob,Grep,Bash(<gate argv>),Bash(<gate argv> *)…"`, an isolated `CLAUDE_CONFIG_DIR` ([ADR-0023](adr/0023-claude-code-dispatch-flags.md)) | `--sandbox workspace-write` (network off by default), `-c approval_policy=never`, `--ignore-rules`, an isolated `CODEX_HOME` ([ADR-0026](adr/0026-codex-and-gemini-dispatch-flags.md)) | `--allow-tool 'write'`, `--allow-tool 'shell(<gate cmd>)'`, `--no-ask-user`, `--secret-env-vars`, an isolated `COPILOT_HOME`; how `shell(…)` matches is undocumented | `--approval-mode auto_edit`, `--allowed-tools "run_shell_command(<gate cmd>)"`, `--extensions none`, `--sandbox` without `srt`, an isolated `GEMINI_CLI_HOME`; a worktree with `.gemini/` or `.env*` is refused ([ADR-0026](adr/0026-codex-and-gemini-dispatch-flags.md)) |
 | Budget | `--max-budget-usd <task_usd>` | timeout only | timeout only | timeout only |
-| Output | `--output-format stream-json --verbose`; final `result` event has `total_cost_usd` and `session_id` | JSON events (verify `--json`) and last message file (verify `-o`) | `--output-format json` (JSONL), `-s` | `--output-format json` |
+| Output | `--output-format stream-json --verbose`; final `result` event has `total_cost_usd` and `session_id` | `--json` (JSONL; the last `agent_message`; no cost) | `--output-format json` (JSONL; schema undocumented) | `--output-format json` (`response`, `stats`, `error`; no cost) |
 | Fix attempt | `--resume <session_id>`; `total_cost_usd` then covers the whole session, so aipm subtracts the previous total | new exec with the fix prompt | new run with the fix prompt | new run with the fix prompt |
-| Forbidden (policy rejects) | `--dangerously-skip-permissions`, `--permission-mode bypassPermissions`, `--permission-mode auto` (unless config opts in) | `--yolo`, `--dangerously-bypass-approvals-and-sandbox`, `danger-full-access` | `--allow-all`, `--yolo`, `--allow-all-tools`, `--allow-all-paths`, `--allow-all-urls`, `--trust-folder` | `--yolo`, `--approval-mode yolo` |
-| Milestone | v0.1 render, v0.3 dispatch | v0.4 | v0.4 | v0.4 |
+| Forbidden (policy rejects) | `--dangerously-skip-permissions`, `--permission-mode bypassPermissions`, `--permission-mode auto` (unless config opts in) | `--yolo`, `--dangerously-bypass-approvals-and-sandbox`, `danger-full-access`, `--full-auto`, `--approve-for-me`, `--not-so-yolo`, any approval policy but `never` | `--allow-all`, `--yolo`, `--allow-all-tools`, `--allow-all-paths`, `--allow-all-urls`, `--trust-folder`, `--assisted-approval` | `--yolo`, `-y`, `--approval-mode yolo`, `--skip-trust` |
+| Milestone | v0.1 render, v0.3 dispatch | v0.4 | v0.4, render-only ([ADR-0025](adr/0025-copilot-ships-render-only.md)) | v0.4 |
 
 **Why `--bare` for Claude Code.** Without `--bare`, `claude -p` runs a repository's `.claude/settings.json` hooks and connects its `.mcp.json` servers without a trust prompt. Bare mode needs `ANTHROPIC_API_KEY`, or an `apiKeyHelper` passed in `--settings`. Bare mode still applies a repository's settings `env` block and helper commands, so every dispatch also passes `--setting-sources user --strict-mcp-config`, with `CLAUDE_CONFIG_DIR` set to a configuration home aipm creates for the run ([ADR-0023](adr/0023-claude-code-dispatch-flags.md)). `dispatch.tools.claude.bare: false` drops `--bare` only: the repo's hooks and MCP servers are listed in the execution surface and need trust (SECURITY.md §6 rule 7), and are still never loaded. Bare mode reads no subscription login, so give agents an API key.
 
-**Verified versions.** Claude Code 2.1.314, checked against code.claude.com/docs on 2026-11-12 (ADR-0023). `--append-system-prompt-file` appears in `claude --help` only as `--append-system-prompt[-file]`; detection accepts that form.
+**Verified versions.** Claude Code 2.1.314, checked against code.claude.com/docs on 2026-11-12 (ADR-0023). `--append-system-prompt-file` appears in `claude --help` only as `--append-system-prompt[-file]`; detection accepts that form. Codex CLI 0.167.2, Gemini CLI 0.68.0 and Copilot CLI 1.0.109 were checked against their documentation on 2026-11-12; the table, with sources and the cells still unknown, is in [docs/adapters.md](../adapters.md).
 
 **Adding a tool:** implement `ToolAdapter`, add templates, and register it through the `aipm.adapters` entry point (§18). Contract tests (§20) run against stub binaries that imitate the tool's flags and output.
 
@@ -807,11 +807,12 @@ gates:
   ac_review:{builtin: ac_review, mode: veto, required: false}
 ```
 
-**Placeholders.** Exactly three exist:
+**Placeholders.** Exactly four exist:
 
 - `{paths}` expands to the task's owned paths that exist.
 - `{test_paths}` expands to owned paths under the stack's `test_roots`, or to the first test root when the task owns none.
 - `{report_file}` expands to an absolute path that aipm generates in the per-attempt temp dir, outside the worktree. Its value is never derived from task, LLM or config data. aipm deletes the file immediately before the gate runs and reads `ac_trace`'s report only from it (§13.3).
+- `{nextest_config}` expands to `<report_file>.nextest.toml`, a nextest configuration aipm writes fresh for each run, which sends cargo-nextest's JUnit report to `{report_file}`. A gate that uses it is judged on that report ([ADR-0030](adr/0030-rust-unit-gate-runs-nextest.md)).
 
 Each placeholder must be a whole argv element, and each expanded value is its own argv element. `{paths}` and `{test_paths}` values pass `safe_relpath`.
 
@@ -1020,7 +1021,7 @@ Every command with `--json` prints exactly one object to stdout. Logs go to stde
 
 - **Logs:** stdlib `logging`. The human format goes to stderr. JSON lines go to `.pm/runs/<id>/aipm.log` for `build`/`run`, and to `<user_state_dir>/aipm/logs/` for other commands. Every log record passes through the redactor.
 - **Run artifacts:** `journal.jsonl`, `prompts/`, `agent/<task>/<attempt>/{stdout.jsonl,stderr.txt,result.json}`, `gates/<task>/<attempt>/<gate>.{txt,json}`, and `cost.json`.
-- **Tracing (v0.4):** the optional extra `aipm[otel]` adds spans for command → role call / dispatch / gate. Attributes include IDs, durations, token counts and statuses, never prompt or output content. Disabled unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set and `--trace` is passed.
+- **Tracing (v0.4):** the optional extra `aipm[otel]` adds spans for command → role call / dispatch / gate. Attributes include IDs, durations, token counts and statuses, never prompt or output content. Disabled unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set and `--trace` is passed. Attributes pass an allowlist of keys and values ([ADR-0027](adr/0027-opentelemetry-is-an-opt-in-network-path.md)).
 - **Status:** `aipm status` shows counts by status, the blocked tasks with their reasons and questions, security events, spend versus budget, and the features and threats without done tasks.
 
 ## 18. Extensibility

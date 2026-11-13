@@ -124,6 +124,11 @@ ignore = [
 "tests/unit/test_fixtures.py" = ["TID251", "S603", "S607"]
 "tests/unit/test_package_imports.py" = ["TID251"]
 "tests/unit/test_startup.py" = ["TID251", "S603"]
+# The stub agents' shared core: Python 3.8 code that, like the stubs themselves, forks daemons
+# and runs git to play the malicious scenarios of SECURITY.md §14.3.
+"tests/fakes/bin/_agent_stub.py" = [
+    "TID251", "S603", "S607", "S105", "T201", "PTH", "PLR0912", "PLR0915", "RUF005", "UP031",
+]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "subprocess".msg = "Only aipm.execution.process may start a process; use run_safe()."
@@ -275,6 +280,16 @@ allow_indirect_imports = true
 # The two exceptions: the LLM gateway, and aipm.scanners.registry, the deps gate's HTTPS lookups
 # of package existence and first-release age (SECURITY.md §12.2; urllib only, no redirects).
 unmatched_ignore_imports_alerting = "none"
+
+# OpenTelemetry export is the opt-in third network path (ADR-0027): only the tracing module
+# imports it, lazily, once --trace and OTEL_EXPORTER_OTLP_ENDPOINT are both set.
+[[tool.importlinter.contracts]]
+name = "Only aipm.observability.tracing imports OpenTelemetry"
+type = "forbidden"
+source_modules = ["aipm"]
+forbidden_modules = ["opentelemetry"]
+ignore_imports = ["aipm.observability.tracing -> opentelemetry"]
+allow_indirect_imports = true
 
 [[tool.importlinter.contracts]]
 name = "cli imports only app, domain.errors and security.sanitize"

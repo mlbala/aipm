@@ -95,10 +95,17 @@ def test_the_design_must_be_approved(tmp_repo: Path, fake_llm: Callable[[str], F
     assert "approved, current PRD and design" in result.stderr
 
 
-def test_other_tools_arrive_later(repo: Path) -> None:
-    result = aipm(repo, "sync-context", "--tool", "gemini")
-    assert result.exit_code == 2
-    assert "v0.4" in result.stderr
+def test_other_tools_get_their_context_files(repo: Path) -> None:
+    """v0.4 adds the Gemini, Copilot and Codex files (this replaces the v0.1 test that other
+    tools arrived later); they need approval like `AGENTS.md`."""
+    result = aipm(repo, "sync-context", "--tool", "gemini", "--tool", "copilot", "--tool", "codex")
+    assert result.exit_code == 4, result.output
+    for name in (
+        "AGENTS.md", "GEMINI.md", ".github/copilot-instructions.md",
+        ".agents/skills/aipm-task-protocol/SKILL.md", ".agents/skills/aipm-run-checks/SKILL.md",
+    ):  # fmt: skip
+        assert f"{name}: new file (not approved yet)" in result.stdout
+    assert "CLAUDE.md: new file" not in result.stdout
 
 
 # ---------------------------------------------------------------- approval and writing

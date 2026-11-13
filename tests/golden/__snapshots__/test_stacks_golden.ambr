@@ -1,0 +1,142 @@
+# serializer version: 1
+# name: test_stack_template[go]
+  dict({
+    'allowed_executables': list([
+      list([
+        'go',
+        'mod',
+        'download',
+      ]),
+      list([
+        'go',
+        'vet',
+      ]),
+      list([
+        'gofmt',
+        '-l',
+      ]),
+      list([
+        'gotestsum',
+        '--junitfile',
+      ]),
+    ]),
+    'gates': dict({
+      'ac_review': 'builtin ac_review',
+      'ac_trace': 'builtin ac_trace',
+      'deps': 'builtin osv',
+      'format': list([
+        'gofmt',
+        '-l',
+        'internal/booking/slots.go',
+        'internal/booking/slots_test.go',
+      ]),
+      'lint': list([
+        'go',
+        'vet',
+        '-mod=readonly',
+        './...',
+      ]),
+      'sast': 'builtin semgrep',
+      'secrets': 'builtin gitleaks',
+      'unit': list([
+        'gotestsum',
+        '--junitfile',
+        '/attempt/report.xml',
+        '--format',
+        'standard-quiet',
+        '--',
+        '-mod=readonly',
+        './...',
+      ]),
+    }),
+    'prepare': list([
+      'go',
+      'mod',
+      'download',
+    ]),
+    'required': list([
+      'ac_trace',
+      'deps',
+      'lint',
+      'secrets',
+      'unit',
+    ]),
+    'test_roots': list([
+    ]),
+  })
+# ---
+# name: test_stack_template[rust-cargo]
+  dict({
+    'allowed_executables': list([
+      list([
+        'cargo',
+        'fetch',
+        '--locked',
+      ]),
+      list([
+        'cargo',
+        'clippy',
+        '--locked',
+        '--offline',
+      ]),
+      list([
+        'cargo',
+        'fmt',
+        '--check',
+      ]),
+      list([
+        'cargo',
+        'nextest',
+        'run',
+        '--locked',
+        '--offline',
+        '--config-file',
+      ]),
+    ]),
+    'gates': dict({
+      'ac_review': 'builtin ac_review',
+      'ac_trace': 'builtin ac_trace',
+      'deps': 'builtin osv',
+      'format': list([
+        'cargo',
+        'fmt',
+        '--check',
+      ]),
+      'lint': list([
+        'cargo',
+        'clippy',
+        '--locked',
+        '--offline',
+        '--all-targets',
+        '--',
+        '-D',
+        'warnings',
+      ]),
+      'sast': 'builtin semgrep',
+      'secrets': 'builtin gitleaks',
+      'unit': list([
+        'cargo',
+        'nextest',
+        'run',
+        '--locked',
+        '--offline',
+        '--config-file',
+        '/attempt/report.xml.nextest.toml',
+      ]),
+    }),
+    'prepare': list([
+      'cargo',
+      'fetch',
+      '--locked',
+    ]),
+    'required': list([
+      'deps',
+      'lint',
+      'secrets',
+      'unit',
+    ]),
+    'test_roots': list([
+      'tests',
+    ]),
+  })
+# ---
