@@ -233,10 +233,20 @@ def test_the_global_config_lists_cover_every_adapter() -> None:
     """`AGENT_GLOBAL_CONFIG` (srt `denyWrite`) and the watch lists named only v0.3's set, so
     without srt an agent or a gate could plant `~/.codex/AGENTS.override.md`, Codex rules or
     hooks, Gemini extensions or commands, or a Copilot MCP config, unseen."""
-    watched = set(git.AGENT_CONFIG_WATCH) | set(getattr(git, "AGENT_DISPATCH_WATCH", ()))
+    watched = set(git.AGENT_CONFIG_WATCH) | set(git.AGENT_DISPATCH_WATCH)
     for rel in sorted(global_entries()):
         assert rel in sandbox.AGENT_GLOBAL_CONFIG, rel
-        assert rel in watched, rel
+        assert rel in watched or rel in git.AGENT_SELF_WRITTEN, rel
+
+
+def test_files_the_users_own_agent_writes_never_block_a_build() -> None:
+    """Security review of part 1: the user may run Codex, Gemini or Copilot in another
+    terminal while a build runs; what those tools write by themselves ("always allow" rules,
+    trusted folders, extension updates, saved permissions) must not read as a violation. The
+    sandbox still denies writing them."""
+    for rel in git.AGENT_SELF_WRITTEN:
+        assert rel not in git.AGENT_DISPATCH_WATCH, rel
+        assert rel in sandbox.AGENT_GLOBAL_CONFIG, rel
 
 
 def test_codex_protects_its_dotenv() -> None:
@@ -249,13 +259,13 @@ def test_manual_mode_watches_only_the_v03_set(tmp_repo: Path, tmp_path: Path) ->
     labels = set(git.integrity_snapshot(tmp_repo, tmp_path))
     assert "~/.codex/rules" not in labels
     wider = set(git.integrity_snapshot(tmp_repo, tmp_path, extra=git.AGENT_DISPATCH_WATCH))
-    assert {"~/.codex/rules", "~/.gemini/extensions", "~/.copilot/mcp-config.json"} <= wider
+    assert {"~/.codex/hooks.json", "~/.gemini/commands", "~/.copilot/mcp-config.json"} <= wider
 
 
 GLOBAL_PLANTS = [
     ("codex", ".codex/AGENTS.override.md"),
-    ("codex", ".gemini/extensions/x/gemini-extension.json"),
-    ("gemini", ".codex/rules/default.rules"),
+    ("codex", ".gemini/commands/deploy.toml"),
+    ("gemini", ".codex/hooks.json"),
     ("gemini", ".copilot/mcp-config.json"),
 ]
 
@@ -273,7 +283,7 @@ def test_planting_a_v04_agents_global_config_is_severe(
 
 
 def test_c058_every_planted_global_file_is_watched() -> None:
-    entries = set(git.AGENT_CONFIG_WATCH) | set(getattr(git, "AGENT_DISPATCH_WATCH", ()))
+    entries = set(git.AGENT_CONFIG_WATCH) | set(git.AGENT_DISPATCH_WATCH)
     for line in case_text("C-058").splitlines():
         rel = line.split(":", 1)[0].removeprefix("~/")
         assert any(rel == e or rel.startswith(f"{e}/") for e in entries), rel
@@ -327,7 +337,21 @@ CODEX_FORMS = [
     ("-s", "read-only"),
     ("-sdanger-full-access",),
     ("--sandbox=read-only",),
+    ("--enable", "x"),
+    ("-C", "/"),
+    ("--cd=/",),
+    ("-o", "out.txt"),
+    ("-i", "/etc/passwd"),
+    ("--oss",),
+    ("a prompt",),
 ]
+
+
+def test_a_codex_option_before_exec_is_caught() -> None:
+    with pytest.raises(PolicyViolation, match="forbidden"):
+        check_forbidden_flags(ToolName.CODEX, ("/opt/codex", "--enable", "x", "exec", "-"))
+    with pytest.raises(PolicyViolation, match="forbidden"):
+        check_forbidden_flags(ToolName.CODEX, ("/opt/codex", "-"))
 
 
 @pytest.mark.parametrize("extra", CODEX_FORMS, ids=" ".join)
@@ -340,6 +364,13 @@ def test_every_form_of_a_forbidden_codex_option_is_caught(extra: tuple[str, ...]
 
 
 GEMINI_FORMS = [
+    ("--y",),
+    ("--y=true",),
+    ("-dy=true",),
+    ("-sy=true",),
+    ("--debug",),
+    ("--include-directories", "/"),
+    ("positional prompt",),
     ("--approvalMode", "yolo"),
     ("--approvalMode=YOLO",),
     ("--skipTrust",),
@@ -352,7 +383,8 @@ GEMINI_FORMS = [
 
 @pytest.mark.parametrize("extra", GEMINI_FORMS, ids=" ".join)
 def test_every_form_of_a_forbidden_gemini_option_is_caught(extra: tuple[str, ...]) -> None:
-    """yargs reads `--approvalMode` as `--approval-mode` and `-sy` as `-s -y`."""
+    """yargs reads `--approvalMode` as `--approval-mode`, `-sy` as `-s -y` and `--y` as `-y`;
+    Gemini's argv may hold only the options aipm passes (security review of part 1)."""
     with pytest.raises(PolicyViolation, match="forbidden"):
         check_forbidden_flags(ToolName.GEMINI, ("gemini", *extra, "--prompt", "x"))
 
@@ -713,3 +745,15 @@ def test_pin_a_daemon_left_by_the_agent_cannot_change_what_is_merged(
     assert (stub / "in-gates").exists(), "the gates ran"
     merged = run_git(project, "log", "-p", "aipm/integration", "--", target)
     assert "daemon" not in merged
+
+
+def test_gemini_options_take_only_their_one_value() -> None:
+    check_forbidden_flags(ToolName.GEMINI, ("/opt/node", "/opt/gemini.js", "--output-format=json"))
+    for extra in (
+        ("--output-format", "text"),
+        ("--extensions=all",),
+        ("--allowed-tools", "run_shell_command"),
+        ("--approval-mode", "default"),
+    ):
+        with pytest.raises(PolicyViolation, match="forbidden"):
+            check_forbidden_flags(ToolName.GEMINI, ("gemini", *extra))

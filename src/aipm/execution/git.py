@@ -141,21 +141,27 @@ AGENT_CONFIG_WATCH: tuple[str, ...] = (
 §9.1), and the workers Claude Code's background service starts (`daemon.json`, red-team v0.3).
 Plugin caches, which agents update on their own, are left out."""
 AGENT_DISPATCH_WATCH: tuple[str, ...] = (
-    ".codex/AGENTS.override.md", ".codex/rules", ".codex/hooks", ".codex/hooks.json",
-    ".codex/prompts", ".codex/.env",
-    ".gemini/AGENTS.md", ".gemini/.env", ".gemini/commands", ".gemini/extensions",
-    ".gemini/policies", ".gemini/agents", ".gemini/skills", ".gemini/hooks",
-    ".gemini/trustedFolders.json", ".env",
+    ".codex/AGENTS.override.md", ".codex/hooks", ".codex/hooks.json", ".codex/prompts",
+    ".codex/.env",
+    ".gemini/AGENTS.md", ".gemini/.env", ".gemini/commands", ".gemini/policies",
+    ".gemini/agents", ".gemini/skills", ".gemini/hooks", ".env",
     ".copilot/settings.json", ".copilot/mcp-config.json", ".copilot/lsp-config.json",
-    ".copilot/permissions-config.json", ".copilot/providers.json", ".copilot/hooks",
-    ".copilot/agents", ".copilot/skills", ".copilot/extensions", ".copilot/instructions",
-    ".copilot/copilot-instructions.md",
+    ".copilot/providers.json", ".copilot/hooks", ".copilot/agents", ".copilot/skills",
+    ".copilot/extensions", ".copilot/instructions", ".copilot/copilot-instructions.md",
 )  # fmt: skip
 """More of the agents' global instructions, rules, hooks, extensions and MCP configs, watched
 during a build only (red-team v0.4, RT04-3). A dispatched agent has a config home of its own
 and never needs to touch these. In manual mode they are the user's own agent's, which writes
 some itself (Codex adds `rules/` when the user answers "always allow"), so `verify` leaves them
 out (R-10)."""
+AGENT_SELF_WRITTEN: tuple[str, ...] = (
+    ".codex/rules", ".gemini/trustedFolders.json", ".gemini/extensions",
+    ".copilot/permissions-config.json",
+)  # fmt: skip
+"""What the tools write by themselves in normal use ("always allow" rules, trusted folders,
+extension updates, saved permissions), which the user's own session may change while a build
+runs: never watched, so they cannot block a build; every sandboxed process is still denied
+writing them (security review of red-team v0.4 part 1)."""
 GLOBAL_GIT_FILES: tuple[str, ...] = (".gitconfig",)
 XDG_GIT_FILES: tuple[str, ...] = ("git/config", "git/attributes", "git/ignore")
 MAX_INCLUDE_DEPTH = 10

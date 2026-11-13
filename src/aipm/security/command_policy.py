@@ -208,8 +208,23 @@ pick a profile with its own policy (`profiles.*`), pass the environment through
 (`shell_environment_policy.*`) or start an MCP server outside the sandbox (`mcp_servers.*`)."""
 _CODEX_OPTIONS = ("--add-dir", "--search", "--profile")
 """Codex options that widen what the agent may write or reach, or load a profile."""
+_CODEX_FLAGS = frozenset({"--json", "--ephemeral", "--ignore-rules", "-"})
+_CODEX_VALUED = frozenset({"--sandbox", "-s", "--ask-for-approval", "-a", "--config", "-c"})
+"""The only options a Codex argv may hold after `exec` (their values are checked above): the
+argv aipm builds is fixed, so anything else is refused (security review of part 1)."""
+_GEMINI_FLAGS = frozenset({"--sandbox"})
+_GEMINI_VALUED: dict[str, str | None] = {
+    "--approval-mode": "auto_edit",
+    "--output-format": "json",
+    "--extensions": "none",
+    "--allowed-tools": None,
+    "--prompt": None,
+}
+"""The only options a Gemini argv may hold, with their one allowed value (`None`: any value,
+`--allowed-tools` must be one shell rule)."""
+_GEMINI_RULE = re.compile(r"run_shell_command\([^()]+\)")
 _CAMEL = re.compile(r"[A-Z]")
-_SHORT_GROUP = re.compile(r"-[A-Za-z]{2,}")
+_SHORT_GROUP = re.compile(r"-([A-Za-z]{2,})(=.*)?")
 
 
 def _deny(message: str) -> PolicyViolation:
@@ -614,19 +629,73 @@ def _check_codex_options(argv: Argv) -> None:
 
 
 def _yargs_argv(argv: Argv) -> Argv:
-    """`argv` as yargs reads its option names: `--approvalMode` is `--approval-mode`, and a
-    short group `-sy` is `-s -y` (red-team v0.4, RT04-5)."""
+    """`argv` as yargs reads its option names: `--approvalMode` is `--approval-mode`, `--y` is
+    `-y`, and a short group `-sy` or `-dy=true` is `-s -y` or `-d -y=true` (red-team v0.4,
+    RT04-5, and its security review)."""
     out: list[str] = []
     for arg in argv:
+        group = _SHORT_GROUP.fullmatch(arg)
         if arg.startswith("--"):
             name, sep, value = arg.partition("=")
             kebab = _CAMEL.sub(lambda m: "-" + m.group(0).lower(), name[2:])
-            out.append(f"--{kebab}{sep}{value}")
-        elif _SHORT_GROUP.fullmatch(arg):
-            out.extend(f"-{ch}" for ch in arg[1:])
+            prefix = "-" if len(kebab) == 1 else "--"
+            out.append(f"{prefix}{kebab}{sep}{value}")
+        elif group is not None:
+            letters, tail = group.group(1), group.group(2) or ""
+            out.extend(f"-{ch}" for ch in letters[:-1])
+            out.append(f"-{letters[-1]}{tail}")
         else:
             out.append(arg)
     return tuple(out)
+
+
+def _check_codex_exact(argv: Argv) -> None:
+    """Nothing but `exec` and the options aipm passes: no global option before `exec`, no
+    positional prompt but `-` (security review of part 1)."""
+    if "exec" not in argv:
+        raise PolicyViolation("codex: anything but `codex exec` is forbidden")
+    start = argv.index("exec")
+    for arg in argv[:start]:
+        if arg.startswith("-"):
+            raise PolicyViolation(f"codex: option {arg[:40]!r} before exec is forbidden")
+    index = start + 1
+    while index < len(argv):
+        arg = argv[index]
+        attached = arg[:2] in ("-s", "-a", "-c") and len(arg) > 2 and not arg.startswith("--")
+        if arg in _CODEX_VALUED:
+            index += 2
+            continue
+        if arg in _CODEX_FLAGS or attached or arg.split("=", 1)[0] in _CODEX_VALUED:
+            index += 1
+            continue
+        raise PolicyViolation(f"codex: {arg[:40]!r} is forbidden: aipm passes only its own options")
+
+
+def _check_gemini_exact(argv: Argv) -> None:
+    """Nothing but the options aipm passes, each with its one value (security review of part
+    1). The launcher comes first: the program, then any absolute path (its script)."""
+    index = 1
+    while index < len(argv) and argv[index].startswith("/"):
+        index += 1
+    while index < len(argv):
+        name, sep, value = argv[index].partition("=")
+        index += 1
+        if name in _GEMINI_FLAGS and not sep:
+            continue
+        if name not in _GEMINI_VALUED:
+            raise PolicyViolation(
+                f"gemini: {argv[index - 1][:40]!r} is forbidden: aipm passes only its own options"
+            )
+        if not sep:
+            value = argv[index] if index < len(argv) else ""
+            index += 1
+        wanted = _GEMINI_VALUED[name]
+        if name == "--allowed-tools":
+            allowed = _GEMINI_RULE.fullmatch(value) is not None
+        else:
+            allowed = wanted is None or value == wanted
+        if not allowed:
+            raise PolicyViolation(f"gemini: {name} {value[:40]!r} is forbidden")
 
 
 def _check_codex(argv: Argv) -> None:
@@ -646,6 +715,7 @@ def _check_codex(argv: Argv) -> None:
         if value is not None and value.strip(" '\"").casefold() != "never":
             raise PolicyViolation(f"codex: approval policy {value[:40]!r} is forbidden")
     _check_codex_options(argv)
+    _check_codex_exact(argv)
 
 
 def check_forbidden_flags(tool: ToolName, argv: Argv, *, allow_auto_mode: bool = False) -> None:
@@ -673,3 +743,5 @@ def check_forbidden_flags(tool: ToolName, argv: Argv, *, allow_auto_mode: bool =
             folded = value.casefold()
             if folded in values and not (folded == "auto" and allow_auto_mode):
                 raise PolicyViolation(f"{tool.value}: {option} {value} is forbidden")
+    if tool is ToolName.GEMINI:
+        _check_gemini_exact(argv)

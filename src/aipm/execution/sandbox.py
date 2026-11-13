@@ -66,7 +66,7 @@ CREDENTIAL_PATHS: tuple[str, ...] = (
     # the dotenv Codex loads from its home, Gemini's MCP OAuth tokens, Copilot CLI's
     # plain-text token fallback and the Copilot editor plugins' OAuth tokens.
     ".gemini/.env", ".codex/.env", ".gemini/mcp-oauth-tokens.json", ".copilot/config.json",
-    ".config/github-copilot",
+    ".config/github-copilot", ".gemini/mcp-oauth-tokens-v2.json", ".codex/.credentials.json",
 )  # fmt: skip
 """SECURITY.md §3 developer credentials, relative to the home directory."""
 
