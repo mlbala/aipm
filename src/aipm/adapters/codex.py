@@ -18,6 +18,8 @@ the gates itself. It reports no cost, so the build loop charges each attempt its
 A fix attempt is a new `exec` with the fix prompt.
 """
 
+import os
+
 from aipm.adapters._common import (
     Detector,
     DetectSpec,
@@ -28,6 +30,7 @@ from aipm.adapters._common import (
 )
 from aipm.adapters.base import AgentResult, ConfigHomeSpec, DispatchLimits
 from aipm.context import generator
+from aipm.domain.errors import PolicyViolation
 from aipm.domain.models import GeneratedFile, ProjectContext, ToolName, Workspace
 from aipm.execution.process import ProcessResult
 
@@ -63,6 +66,8 @@ FIXED: tuple[str, ...] = (
     "-c", "check_for_update_on_startup=false",
 )  # fmt: skip
 DETECTOR = Detector(DETECT)
+OVERRIDE_FILE = "agents.override.md"
+"""Casefolded: what Codex reads instead of `AGENTS.md` in a directory (red-team v0.4, RT04-2)."""
 
 
 class CodexAdapter(HeadlessAdapter):
@@ -81,6 +86,22 @@ class CodexAdapter(HeadlessAdapter):
     def _argv(self, limits: DispatchLimits, ws: Workspace, prompt_file: object) -> list[str]:
         del limits, ws, prompt_file  # the sandbox, not an allowlist, bounds the shell
         return [*self._launcher(), *FIXED, "-"]
+
+    def _check_workspace(self, ws: Workspace) -> None:
+        """Refuse a worktree whose root holds `AGENTS.override.md` in any case (exit 6): Codex
+        would read it instead of aipm's `AGENTS.md` (RT04-2). Codex reads instructions from the
+        root down to its working directory, which is the root."""
+        try:
+            names = [entry.name for entry in os.scandir(ws.root)]
+        except FileNotFoundError:
+            return
+        found = sorted(n for n in names if n.casefold() == OVERRIDE_FILE)
+        if found:
+            raise PolicyViolation(
+                f"the worktree holds {', '.join(found)}, which Codex CLI would read instead of "
+                "aipm's AGENTS.md",
+                hint="Remove it from the repository, or dispatch with another tool.",
+            )
 
     def parse_result(self, out: ProcessResult) -> AgentResult:
         """The last `agent_message` and whether the last turn completed. Self-reports carry no

@@ -296,7 +296,10 @@ Agents MUST NOT modify these paths. A change to any of them is a severe violatio
 AGENTS.md             CLAUDE.md           GEMINI.md           .claude/**
 .gemini/**            .codex/**           .agents/**          .mcp.json
 .gitattributes        .gitmodules         .aipmignore         **/.env*
+AGENTS.override.md    CLAUDE.local.md
 ```
+
+Each pattern matches at any depth and in any case. `AGENTS.override.md` is what Codex reads instead of `AGENTS.md` in a directory, and `CLAUDE.local.md` is a memory file Claude Code loads (red-team v0.4, RT04-2). Codex is not dispatched to a worktree whose root holds `AGENTS.override.md` (exit 6), the same way Gemini CLI is refused a root `.gemini/` or `.env*`.
 
 Also protected:
 

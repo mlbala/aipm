@@ -39,8 +39,10 @@ PROTECTED_PATHS: tuple[str, ...] = (
     "AGENTS.md", "CLAUDE.md", "GEMINI.md", ".claude/**",
     ".gemini/**", ".codex/**", ".agents/**", ".mcp.json",
     ".gitattributes", ".gitmodules", ".aipmignore", "**/.env*",
+    "AGENTS.override.md", "CLAUDE.local.md",
 )  # fmt: skip
-"""SECURITY.md §9.2. `security.extra_protected_paths` adds to these, never replaces them."""
+"""SECURITY.md §9.2. `AGENTS.override.md` (read by Codex instead of `AGENTS.md`) and
+`CLAUDE.local.md` (loaded by Claude Code) were added by red-team v0.4 (RT04-2). `security.extra_protected_paths` adds to these, never replaces them."""
 
 # Glob tokens. A literal token is always one character, so these never collide with one.
 _ONE = "<?>"

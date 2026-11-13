@@ -100,6 +100,7 @@ PACKAGE_CACHES: tuple[str, ...] = (
 _PROTECTED_LITERALS: tuple[str, ...] = (
     ".pm", ".git", ".github", ".gitlab-ci.yml", "AGENTS.md", "CLAUDE.md", "GEMINI.md", ".claude",
     ".gemini", ".codex", ".agents", ".mcp.json", ".gitattributes", ".gitmodules", ".aipmignore",
+    "AGENTS.override.md", "CLAUDE.local.md",
 )  # fmt: skip
 """SECURITY.md §9.2 as literal paths. `**/.env*` is added as a pattern, which only macOS applies;
 the protected-path check after the gates catches a change to one anywhere."""

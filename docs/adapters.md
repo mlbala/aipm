@@ -37,6 +37,8 @@ Release: [github.com/openai/codex/releases](https://github.com/openai/codex/rele
 | API domains | ❓ | Not documented; aipm assumes `api.openai.com` (a wrong guess fails closed) | — |
 | Exit codes | ❓ | Not documented; aipm's gates decide | — |
 
+A worktree whose root holds `AGENTS.override.md`, in any case, is refused (exit 6), because Codex would read it instead of aipm's `AGENTS.md`. The file is a protected path, so an agent cannot add one either (red-team v0.4, RT04-2).
+
 **aipm's argv:** `codex exec --sandbox workspace-write --json --ephemeral --ignore-rules -c approval_policy=never -c analytics.enabled=false -c check_for_update_on_startup=false -`
 
 ## Gemini CLI 0.68.0
