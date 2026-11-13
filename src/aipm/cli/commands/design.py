@@ -22,7 +22,7 @@ def command(
         from aipm.app import design as use_case
         from aipm.cli.review import ReviewPrompter
 
-        prompter = ReviewPrompter() if is_interactive(ctx) else None
+        prompter = ReviewPrompter(offer_trust=False) if is_interactive(ctx) else None
         options = use_case.DesignOptions(
             regenerate=regenerate, accept_risk=accept_risk, accept_stale=accept_stale,
             yes=opts.yes,

@@ -26,6 +26,10 @@ from aipm.security.supply_chain import age_ok, edit_distance, normalize_name, ty
 NAME = "deps"
 MAX_LOOKUPS = 500
 """Registry lookups per attempt; more new packages than this is an error, never a pass."""
+DEPS_BUDGET_S = 300.0
+"""The most all of one attempt's registry lookups may take together; each is bounded by
+`registry.DEADLINE_S` (red-team v0.4, RT04-14). The packages not looked up are an error."""
+_clock = time.monotonic
 _REGISTRY = {
     Ecosystem.PYPI: "PyPI",
     Ecosystem.NPM: "npm",
@@ -62,7 +66,12 @@ def check_new(ctx: GateContext, now: datetime) -> tuple[list[GateFinding], list[
     if len(packages) > MAX_LOOKUPS:
         errors.append(f"{len(packages)} new packages, more than the {MAX_LOOKUPS} aipm looks up")
         packages = packages[:MAX_LOOKUPS]
-    for path, eco, name, direct in packages:
+    began = _clock()
+    for index, (path, eco, name, direct) in enumerate(packages):
+        if _clock() - began > DEPS_BUDGET_S:
+            errors.append(f"registry lookups took over {DEPS_BUDGET_S:.0f} s; "
+                          f"{len(packages) - index} package(s) were not checked")  # fmt: skip
+            break
         squat = typosquat_of(eco, name) if direct else None
         if squat is not None:
             near = edit_distance(normalize_name(eco, name), squat, limit=1) <= 1

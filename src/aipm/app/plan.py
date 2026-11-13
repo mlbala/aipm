@@ -86,9 +86,9 @@ class PlanOptions:
     accept_risk: bool = False
     accept_stale: bool = False
     yes: bool = False
-    trust: bool = True
-    """Whether an interactive G3 may also record trust; false inside `aipm auto`, which never
-    records it (ADR-0028; red-team v0.4, RT04-8)."""
+    trust: bool = False
+    """Whether an interactive G3 may also record trust. Off unless the caller asks: `aipm plan`
+    alone does, `aipm auto` never (ADR-0028; red-team v0.4, RT04-8)."""
 
 
 @dataclass(frozen=True, slots=True)

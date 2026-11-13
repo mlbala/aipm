@@ -1021,6 +1021,8 @@ class BuildLoop:
         )
         if self.interrupted:
             return None
+        # A gate's code may have planted one while the gates ran (security review of RT04-11).
+        await asyncio.to_thread(self.worktrees.check_parents)
         for result in gate_run.results:
             self._journal(
                 JournalEventType.GATE_RESULT,

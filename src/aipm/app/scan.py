@@ -22,7 +22,7 @@ from aipm.domain.models import Severity
 from aipm.execution.git import repo_files
 from aipm.execution.process import build_env, run_safe
 from aipm.execution.sandbox import ProcessKind, ProfilePaths, profile_for, resolve_sandbox
-from aipm.gates.command_gate import resolve_program
+from aipm.gates.command_gate import resolve_program, toolchain_env
 from aipm.scanners import gitleaks, osv, semgrep, trivy
 from aipm.scanners.base import SCAN_TIMEOUT_S, Finding, ScanContext, ScanResult, ScanStatus
 from aipm.security.command_policy import check_argv
@@ -95,8 +95,11 @@ def _extra(name: str, run: tuple[str, ...], ctx: ScanContext, loaded: LoadedConf
                              output_dir=ctx.temp_dir)  # fmt: skip
         network = NetworkPolicy(NetworkProfile.NONE)
         profile = profile_for(ProcessKind.SCANNER, network, paths, runtime=ctx.runtime)
-    result = run_safe(argv, cwd=ctx.repo, env=build_env(extra={"TMPDIR": str(ctx.temp_dir)}),
-                      timeout_s=SCAN_TIMEOUT_S, sandbox=profile)  # fmt: skip
+    # A config scanner may run the Go toolchain (`govulncheck`): no toolchain download, no
+    # outside go.work (red-team v0.4, RT04-11).
+    env = build_env(extra={"TMPDIR": str(ctx.temp_dir), **toolchain_env(ctx.repo)})
+    result = run_safe(argv, cwd=ctx.repo, env=env, timeout_s=SCAN_TIMEOUT_S,
+                      sandbox=profile)  # fmt: skip
     output = ctx.redactor.redact((result.stdout + result.stderr).decode("utf-8", "replace"))
     if result.timed_out:
         return ScanResult(name, ScanStatus.ERROR, reason="timed out", output=output[-65_536:])

@@ -22,7 +22,7 @@ reports as an error: a lookup that fails never passes a package.
 
 import json
 import re
-import time
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -36,10 +36,9 @@ from aipm.security.supply_chain import check_package_name, normalize_name
 
 TIMEOUT_S = 15.0
 DEADLINE_S = 60.0
-"""The most one answer may take in total: `TIMEOUT_S` bounds each socket read only, so a body
-that keeps trickling in would otherwise hold the deps gate (red-team v0.4, RT04-14)."""
-_CHUNK = 65_536
-_clock = time.monotonic
+"""The most one lookup may take in total, connecting, headers and body together: `TIMEOUT_S`
+bounds each socket operation only, so an answer that trickles in (through a proxy named in
+`HTTPS_PROXY`, for instance) would otherwise hold the deps gate (red-team v0.4, RT04-14)."""
 MAX_RESPONSE_BYTES = 32 * 1_048_576
 PYPI_SIMPLE = "https://pypi.org/simple/{name}/"
 NPM_DOC = "https://registry.npmjs.org/{name}"
@@ -91,37 +90,46 @@ def _fetch(url: str, headers: Mapping[str, str]) -> Response:
     """GET over HTTPS with no redirects; 404 is an answer, anything else but 200 an error."""
     if not url.startswith("https://"):
         raise RegistryError("registry lookups use HTTPS only")
-    deadline = _clock() + DEADLINE_S
+    return _bounded(_get, url, headers)
+
+
+def _bounded(get: Fetch, url: str, headers: Mapping[str, str]) -> Response:
+    """`get(url, headers)` in a daemon thread, given at most `DEADLINE_S` in total. A lookup
+    still running then is abandoned (its socket operations time out on their own, and a daemon
+    thread never holds the process open) and the lookup fails closed."""
+    box: list[Response | BaseException] = []
+
+    def work() -> None:
+        try:
+            box.append(get(url, headers))
+        except BaseException as exc:  # handed to the caller below
+            box.append(exc)
+
+    worker = threading.Thread(target=work, name="aipm-registry-lookup", daemon=True)
+    worker.start()
+    worker.join(DEADLINE_S)
+    if worker.is_alive() or not box:
+        raise RegistryError(f"the registry took too long to answer (over {DEADLINE_S:.0f} s)")
+    result = box[0]
+    if isinstance(result, BaseException):
+        raise result
+    return result
+
+
+def _get(url: str, headers: Mapping[str, str]) -> Response:
     opener = urllib.request.build_opener(_NoRedirect())
     request = urllib.request.Request(url, headers=dict(headers), method="GET")  # noqa: S310
     try:
         with opener.open(request, timeout=TIMEOUT_S) as reply:
-            body = _read_body(reply, deadline)
+            body = reply.read(MAX_RESPONSE_BYTES + 1)
             status = reply.status
     except urllib.error.HTTPError as exc:
         return Response(exc.code, b"")
-    except RegistryError:
-        raise
     except Exception as exc:  # any failure to ask fails closed
         raise RegistryError(f"cannot reach the registry ({type(exc).__name__})") from None
     if len(body) > MAX_RESPONSE_BYTES:
         raise RegistryError("the registry's answer is larger than aipm reads")
     return Response(status, body)
-
-
-def _read_body(reply: Any, deadline: float) -> bytes:
-    """At most `MAX_RESPONSE_BYTES + 1` bytes, read in chunks until `deadline`."""
-    parts: list[bytes] = []
-    size = 0
-    while size <= MAX_RESPONSE_BYTES:
-        chunk: bytes = reply.read(min(_CHUNK, MAX_RESPONSE_BYTES + 1 - size))
-        if not chunk:
-            break
-        parts.append(chunk)
-        size += len(chunk)
-        if _clock() > deadline:
-            raise RegistryError(f"the registry took too long to answer (over {DEADLINE_S:.0f} s)")
-    return b"".join(parts)
 
 
 def _url(ecosystem: Ecosystem, name: str) -> str:

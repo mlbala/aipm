@@ -6,21 +6,29 @@ crates. One section per finding (RT04-n); every test in a finding section failed
 fix. The "held" sections at the end pin controls the pass attacked without breaking them.
 """
 
+import contextlib
 import hashlib
 import itertools
 import json
+import os
+import socketserver
 import sys
-from collections.abc import Callable
+import threading
+import time
+from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import pytest_socket
 from pydantic import ValidationError
 from ruamel.yaml import YAML
 
-from aipm.app import auto
+from aipm.app import auto, build_loop
 from aipm.app import build as build_use_case
+from aipm.app import scan as scan_use_case
 from aipm.cli import output as cli_output
 from aipm.cli.commands import design as design_command
 from aipm.cli.main import app
@@ -37,12 +45,15 @@ from aipm.domain.models import (
 )
 from aipm.domain.phase import Phase, PhaseReport
 from aipm.execution import git, worktree
+from aipm.execution.process import ProcessResult
 from aipm.execution.sandbox import ProcessKind, ProfilePaths, profile_for
 from aipm.gates import command_gate
+from aipm.gates.builtin import deps as deps_gate
 from aipm.gates.command_gate import toolchain_env
 from aipm.observability import tracing
 from aipm.plugins import loader as plugin_loader
 from aipm.scanners import registry
+from aipm.scanners.base import ScanContext
 from aipm.security.command_policy import CommandPolicy, check_argv, compile_gate
 from aipm.security.network import NetworkPolicy
 from aipm.security.supply_chain import typosquat_of
@@ -370,6 +381,62 @@ def test_a_planted_cargo_config_beside_the_worktrees_stops_the_build(
     assert not calls(dirs.home), "no agent ran"
 
 
+def _beside_worktrees(project: Path, home: Path, name: str) -> str:
+    manager = worktree.WorktreeManager(project)
+    return os.path.relpath(manager.root / name, home)
+
+
+def test_an_agent_planting_toolchain_settings_beside_the_worktrees_stops_before_the_gates(
+    project: Path, dirs: UserDirs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ran: list[object] = []
+    monkeypatch.setattr(build_loop, "run_gates", lambda *a, **k: ran.append(a))
+    write = {"home_write": _beside_worktrees(project, dirs.home, "go.work"), "text": "use ..\n"}
+    scenario(dirs.home, {"T-002": [{"steps": [*copy_t002(), write]}]})
+    result = aipm(project, "build", "--only", "T-002", flags=["--json"])
+    assert result.exit_code == 6, result.output
+    assert not ran, "no gate ran"
+
+
+def test_a_gate_planting_toolchain_settings_beside_the_worktrees_blocks_the_task(
+    project: Path, dirs: UserDirs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = build_loop.run_gates
+
+    def planting(*args: Any, **kwargs: Any) -> Any:
+        target = dirs.home / _beside_worktrees(project, dirs.home, ".cargo")
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "config.toml").write_text('[build]\nrustc-wrapper = "/evil/w"\n')
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(build_loop, "run_gates", planting)
+    scenario(dirs.home, {"T-002": [{"steps": copy_t002()}]})
+    result = aipm(project, "build", "--only", "T-002", flags=["--json"])
+    assert result.exit_code == 6, result.output
+    assert '"done"' not in json.dumps(json.loads(result.stdout)["data"].get("tasks", []))
+
+
+def test_a_config_scanner_gets_the_go_toolchain_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A config-defined scanner may run Go (`govulncheck`): it never downloads a toolchain or
+    takes a go.work from above the repository either (security review of part 2)."""
+    seen: dict[str, str] = {}
+
+    def capture(argv: Any, **kwargs: Any) -> ProcessResult:
+        seen.update(kwargs["env"])
+        return ProcessResult(tuple(argv), 0, b"", b"", timed_out=False, truncated=False,
+                             duration_s=0.1)  # fmt: skip
+
+    monkeypatch.setattr(scan_use_case, "run_safe", capture)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    loaded = config_loader.LoadedConfig(config=clinic_config(), warnings=(), sources=())
+    ctx = ScanContext(repo=repo, temp_dir=tmp_path / "t")
+    scan_use_case._extra("probe", ("uv", "run", "--frozen", "--offline", "ruff", "x"), ctx, loaded)  # pyright: ignore[reportPrivateUsage]
+    assert (seen["GOTOOLCHAIN"], seen["GOWORK"]) == ("local", "off")
+
+
 @pytest.mark.parametrize("has_go_work", [False, True])
 def test_go_never_switches_toolchain_or_takes_an_outside_workspace(
     tmp_path: Path, has_go_work: bool
@@ -510,53 +577,84 @@ def test_c068_owner_lookalike_is_flagged() -> None:
 # ---------------------------------------------------------------- RT04-14: slow registry answers
 
 
-class _SlowReply:
-    """An HTTP 200 whose body arrives at one byte per second of the fake clock: each `read`
-    returns what was asked for, and moves the clock on by that many seconds."""
+@pytest.fixture
+def loopback() -> Iterator[Callable[[bytes, float, int], str]]:
+    """A local HTTP server that sends the first `fast` bytes of a canned answer at once, then
+    one byte every `gap` seconds; loopback only, the network stays off."""
+    pytest_socket.enable_socket()
+    pytest_socket.socket_allow_hosts(["127.0.0.1"], allow_unix_socket=True)
+    servers: list[socketserver.TCPServer] = []
 
-    status = 200
+    def serve(answer: bytes, gap: float, fast: int = 0) -> str:
+        class Trickle(socketserver.BaseRequestHandler):
+            def handle(self) -> None:
+                self.request.recv(65_536)
+                with contextlib.suppress(OSError):
+                    self.request.sendall(answer[:fast])
+                    for byte in answer[fast:]:
+                        self.request.sendall(bytes([byte]))
+                        time.sleep(gap)
 
-    def __init__(self, body: bytes, clock: list[float]) -> None:
-        self.body = body
-        self.clock = clock
+        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Trickle)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        servers.append(server)
+        return f"http://127.0.0.1:{server.server_address[1]}/"
 
-    def read(self, n: int = -1) -> bytes:
-        chunk, self.body = (self.body, b"") if n < 0 else (self.body[:n], self.body[n:])
-        self.clock[0] += len(chunk)
-        return chunk
-
-    def __enter__(self) -> "_SlowReply":
-        return self
-
-    def __exit__(self, *_: object) -> None:
-        return None
-
-
-def _slow_registry(monkeypatch: pytest.MonkeyPatch, body: bytes) -> None:
-    clock = [0.0]
-
-    class Opener:
-        def open(self, request: object, timeout: float) -> _SlowReply:
-            del request, timeout
-            return _SlowReply(body, clock)
-
-    monkeypatch.setattr(registry, "_clock", lambda: clock[0])
-    monkeypatch.setattr(registry.urllib.request, "build_opener", lambda *_: Opener())
+    yield serve
+    for server in servers:
+        server.shutdown()
+        server.server_close()
 
 
-def test_a_registry_answer_has_a_total_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each socket read had a 15 s timeout, but nothing bounded the whole answer: a body that
-    keeps trickling in held the deps gate for as long as the registry liked (up to 32 MB)."""
-    body = json.dumps({"crate": {"created_at": "2020-01-01T00:00:00Z"}, "pad": "x" * 4096})
-    _slow_registry(monkeypatch, body.encode())
+def _answer(body: bytes) -> bytes:
+    head = f"HTTP/1.1 200 OK\r\nContent-Length: {len(body)}\r\n\r\n".encode()
+    return head + body
+
+
+@pytest.mark.parametrize("part", ["headers", "body"])
+def test_a_registry_lookup_has_a_total_deadline(
+    loopback: Callable[[bytes, float, int], str], monkeypatch: pytest.MonkeyPatch, part: str
+) -> None:
+    """Each socket operation had a 15 s timeout, but nothing bounded the whole answer: headers
+    or a body that keep trickling in held the deps gate for as long as the sender liked. The
+    first fix bounded only the reads between chunks, which a real socket never returns from
+    early (security review of part 2)."""
+    monkeypatch.setattr(registry, "DEADLINE_S", 1.0)
+    body = b'{"crate": {"created_at": "2020-01-01T00:00:00Z"}}'
+    answer = _answer(body)
+    url = loopback(answer, 0.2, 0 if part == "headers" else len(answer) - len(body))
+    started = time.monotonic()
     with pytest.raises(registry.RegistryError, match="too long"):
-        registry.first_release(Ecosystem.CRATES, "serde")
+        registry._bounded(registry._get, url, {})  # pyright: ignore[reportPrivateUsage]
+    assert time.monotonic() - started < 3.0
 
 
-def test_a_quick_registry_answer_is_read(monkeypatch: pytest.MonkeyPatch) -> None:
-    body = json.dumps({"crate": {"created_at": "2020-01-01T00:00:00Z"}})
-    _slow_registry(monkeypatch, body.encode())
-    assert registry.first_release(Ecosystem.CRATES, "serde").exists
+def test_a_quick_registry_answer_is_read(loopback: Callable[[bytes, float, int], str]) -> None:
+    body = b'{"crate": {"created_at": "2020-01-01T00:00:00Z"}}'
+    url = loopback(_answer(body), 0.0, 0)
+    response = registry._bounded(registry._get, url, {})  # pyright: ignore[reportPrivateUsage]
+    assert (response.status, response.body) == (200, body)
+
+
+def test_the_deps_gate_stops_looking_up_after_its_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [0.0]
+    monkeypatch.setattr(deps_gate, "_clock", lambda: clock[0])
+    packages = [("Cargo.toml", Ecosystem.CRATES, f"c{i}", False) for i in range(5)]
+    monkeypatch.setattr(deps_gate, "_to_check", lambda _ctx: packages)
+
+    def slow(*_: object, **__: object) -> object:
+        clock[0] += deps_gate.DEPS_BUDGET_S / 2 + 1
+        raise registry.RegistryError("slow")
+
+    monkeypatch.setattr(deps_gate, "first_release", slow)
+    security = SimpleNamespace(min_dependency_age_days=30)
+    ctx = SimpleNamespace(cfg=SimpleNamespace(security=security), fetch=None)
+    _, errors = deps_gate.check_new(ctx, datetime.now(UTC))  # type: ignore[arg-type]
+    assert errors[-1].startswith("registry lookups took over")
+    assert "3 package(s) were not checked" in errors[-1]
 
 
 def test_c069_the_deadline_is_bounded() -> None:
