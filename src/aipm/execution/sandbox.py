@@ -102,6 +102,17 @@ AGENT_GLOBAL_CONFIG: tuple[str, ...] = (
 `tests/security/test_redteam_v04.py` checks that every adapter's `ConfigHomeSpec.protected`
 is here (this layer cannot import the adapters)."""
 
+TOOLCHAIN_CONFIG: tuple[str, ...] = (
+    ".cargo/config.toml", ".cargo/config", ".rustup/settings.toml",
+    "Library/Application Support/go/env", ".config/go/env",
+)  # fmt: skip
+"""The user's Cargo, rustup and Go settings, relative to home (red-team v0.4, RT04-11). Cargo
+reads `$CARGO_HOME/config.toml` (a `rustc-wrapper` or test `runner` is any program), rustup's
+settings can override the toolchain for a directory, and `go env -w` writes Go's env file
+(`os.UserConfigDir()/go/env`), where `GOFLAGS=-toolexec=…` would wrap every later build. Gates get
+no `CARGO_HOME`, `RUSTUP_HOME` or `GOENV`, so these are the files they read. No process aipm
+starts may write them, and a build watches them."""
+
 CONFIG_HOME_PROTECTED: tuple[str, ...] = (
     "settings.json", "settings.local.json", "CLAUDE.md", "hooks", "agents", "skills",
     "commands", "plugins",
@@ -215,6 +226,7 @@ def profile_for(
         allow = [paths.output_dir if paths.output_dir is not None else paths.temp_dir]
     deny_write = [paths.workspace / rel for rel in _PROTECTED_LITERALS]
     deny_write += [home / rel for rel in AGENT_GLOBAL_CONFIG]
+    deny_write += [home / rel for rel in TOOLCHAIN_CONFIG]
     deny_write += agent_config
     workspace = str(paths.workspace)
     patterns = () if _GLOB_CHARS & set(workspace) else (f"{workspace}/{ENV_PATTERN}",)

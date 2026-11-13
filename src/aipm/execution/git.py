@@ -48,6 +48,7 @@ from typing import Protocol
 from aipm.domain.errors import MissingCapability, PolicyViolation, UsageError
 from aipm.domain.models import GITLINK_MODE, SYMLINK_MODE, ChangeSet, ChangeStatus, FileChange
 from aipm.execution.process import ProcessResult, build_env, is_inside, run_safe
+from aipm.execution.sandbox import TOOLCHAIN_CONFIG
 from aipm.security.paths import is_protected, is_within, protected_patterns
 
 GIT_TIMEOUT_S = 30.0
@@ -154,6 +155,12 @@ during a build only (red-team v0.4, RT04-3). A dispatched agent has a config hom
 and never needs to touch these. In manual mode they are the user's own agent's, which writes
 some itself (Codex adds `rules/` when the user answers "always allow"), so `verify` leaves them
 out (R-10)."""
+BUILD_WATCH: tuple[str, ...] = (*AGENT_DISPATCH_WATCH, *TOOLCHAIN_CONFIG)
+"""What a build watches besides `AGENT_CONFIG_WATCH`: the agents' wider set and the user's
+Cargo, rustup and Go settings, which a gate (agent-written code) could rewrite for every later
+build without srt (red-team v0.4, RT04-11). `verify` leaves the toolchain files out: the user may
+run `go env -w` while their own agent works."""
+
 AGENT_SELF_WRITTEN: tuple[str, ...] = (
     ".codex/rules", ".gemini/trustedFolders.json", ".gemini/extensions",
     ".copilot/permissions-config.json",

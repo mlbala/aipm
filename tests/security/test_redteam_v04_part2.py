@@ -20,10 +20,13 @@ from aipm.app import build as build_use_case
 from aipm.cli import output as cli_output
 from aipm.cli.main import app
 from aipm.config import loader as config_loader
-from aipm.domain.errors import HumanInputRequired
-from aipm.domain.models import APPROVED_NAMES, ApprovalGate, ArtifactKind
+from aipm.domain.errors import HumanInputRequired, PolicyViolation
+from aipm.domain.models import APPROVED_NAMES, ApprovalGate, ArtifactKind, NetworkProfile
 from aipm.domain.phase import Phase, PhaseReport
-from aipm.execution import worktree
+from aipm.execution import git, worktree
+from aipm.execution.sandbox import ProcessKind, ProfilePaths, profile_for
+from aipm.gates.command_gate import toolchain_env
+from aipm.security.network import NetworkPolicy
 from aipm.state import done_record
 from aipm.state.private_files import write_private
 from aipm.state.store import open_store
@@ -33,9 +36,9 @@ from aipm.state.trust_store import (
     render_surface,
     repo_agent_config,
 )
-from tests.conftest import FakeSecrets
+from tests.conftest import FakeSecrets, run_git
 from tests.fakes.project import clinic_config
-from tests.integration.build_flow import fake_registry, prepare_project
+from tests.integration.build_flow import calls, copy_t002, fake_registry, prepare_project, scenario
 from tests.integration.conftest import (
     UserDirs,
     user_dirs,  # noqa: F401 - an autouse fixture
@@ -296,3 +299,105 @@ def test_deep_private_records_read_as_none(tmp_path: Path, dirs: UserDirs) -> No
 
 def test_c065_deep_agent_file_is_pinned() -> None:
     assert "mcpServers" in case("C-065")["input"]["text"]
+
+
+# ---------------------------------------------------------------- RT04-11: Go and Cargo settings
+
+
+TOOLCHAIN_PLANTS = ["go.work", "GO.WORK", "go.work.sum", ".cargo", ".Cargo", "rust-toolchain",
+                    "rust-toolchain.toml"]  # fmt: skip
+"""Go looks for `go.work`, Cargo for `.cargo/config(.toml)` and rustup for a toolchain file in
+the working directory and every directory above it: the task worktrees' parents are aipm's."""
+
+
+@pytest.mark.parametrize("name", TOOLCHAIN_PLANTS)
+@pytest.mark.parametrize("level", [0, 1, 2])
+def test_toolchain_settings_beside_the_worktrees_are_refused(
+    tmp_path: Path, tmp_repo: Path, name: str, level: int
+) -> None:
+    manager = worktree.WorktreeManager(tmp_repo, root=tmp_path / "cache" / "worktrees")
+    manager.root.mkdir(parents=True)
+    where = [manager.root, manager.root.parent, manager.root.parent.parent][level]
+    planted = where / name
+    if name.casefold() == ".cargo":
+        planted.mkdir()
+        (planted / "config.toml").write_text('[build]\nrustc-wrapper = "/tmp/w"\n')
+    else:
+        planted.write_text("go 1.24\nuse ../T-002\n")
+    with pytest.raises(PolicyViolation, match="Go, Cargo or rustup"):
+        manager.check_parents()
+    with pytest.raises(PolicyViolation):
+        manager.create("T-002", run_git(tmp_repo, "rev-parse", "HEAD").strip())
+
+
+def test_a_clean_worktree_parent_passes(tmp_path: Path, tmp_repo: Path) -> None:
+    manager = worktree.WorktreeManager(tmp_repo, root=tmp_path / "cache" / "worktrees")
+    manager.root.mkdir(parents=True)
+    manager.check_parents()
+
+
+def test_a_planted_cargo_config_beside_the_worktrees_stops_the_build(
+    project: Path, dirs: UserDirs
+) -> None:
+    manager = worktree.WorktreeManager(project)
+    manager.root.mkdir(parents=True, exist_ok=True)
+    (manager.root.parent / ".cargo").mkdir(exist_ok=True)
+    (manager.root.parent / ".cargo" / "config.toml").write_text('[alias]\nnextest = "run"\n')
+    scenario(dirs.home, {"T-002": [{"steps": copy_t002()}]})
+    result = aipm(project, "build", "--only", "T-002", flags=["--json"])
+    assert result.exit_code == 6, result.output
+    assert not calls(dirs.home), "no agent ran"
+
+
+@pytest.mark.parametrize("has_go_work", [False, True])
+def test_go_never_switches_toolchain_or_takes_an_outside_workspace(
+    tmp_path: Path, has_go_work: bool
+) -> None:
+    root = tmp_path / "wt"
+    root.mkdir()
+    if has_go_work:
+        (root / "go.work").write_text("go 1.24\nuse .\n")
+    env = toolchain_env(root)
+    assert env["GOTOOLCHAIN"] == "local"
+    assert env.get("GOWORK") == (None if has_go_work else "off")
+
+
+TOOLCHAIN_USER_FILES = (".cargo/config.toml", ".cargo/config", ".rustup/settings.toml",
+                        "Library/Application Support/go/env", ".config/go/env")  # fmt: skip
+
+
+@pytest.mark.parametrize("kind", list(ProcessKind))
+def test_the_users_toolchain_settings_are_denied_to_every_process(
+    tmp_path: Path, kind: ProcessKind
+) -> None:
+    paths = ProfilePaths(workspace=tmp_path / "wt", temp_dir=tmp_path / "t", home=tmp_path / "h")
+    profile = profile_for(kind, NetworkPolicy(NetworkProfile.NONE), paths, runtime="/bin/srt")
+    for rel in TOOLCHAIN_USER_FILES:
+        assert paths.home / rel in profile.deny_write, (kind, rel)
+
+
+def test_the_users_toolchain_settings_are_watched_in_a_build_only(
+    tmp_repo: Path, tmp_path: Path
+) -> None:
+    labels = set(git.integrity_snapshot(tmp_repo, tmp_path))
+    assert "~/.cargo/config.toml" not in labels, "the user's own go env -w must not block verify"
+    wider = set(git.integrity_snapshot(tmp_repo, tmp_path, extra=git.BUILD_WATCH))
+    assert {f"~/{rel}" for rel in TOOLCHAIN_USER_FILES} <= wider
+
+
+@pytest.mark.parametrize("rel", [".cargo/config.toml", "Library/Application Support/go/env"])
+def test_a_gate_or_agent_writing_toolchain_settings_is_severe(
+    project: Path, dirs: UserDirs, rel: str
+) -> None:
+    write = {"home_write": rel, "text": "GOFLAGS=-toolexec=/tmp/x\n"}
+    scenario(dirs.home, {"T-002": [{"steps": [*copy_t002(), write]}]})
+    result = aipm(project, "build", "--only", "T-002", flags=["--json"])
+    assert result.exit_code == 6, result.output
+    (outcome,) = json.loads(result.stdout)["data"]["tasks"]
+    assert (outcome["status"], outcome["reason"]) == ("blocked", "policy_violation")
+
+
+def test_c066_every_planted_toolchain_file_is_refused_or_watched() -> None:
+    text = case("C-066")["input"]["text"]
+    for rel in TOOLCHAIN_USER_FILES:
+        assert rel in text

@@ -33,6 +33,10 @@ WORKTREES_DIR = "worktrees"
 AGENT_HOMES_DIR = "agents"
 INTEGRATE_DIR = ".integrate"
 """Under a repository's worktree directory: where task commits are rebased."""
+TOOLCHAIN_NAMES = frozenset({".cargo", "go.work", "go.work.sum", "rust-toolchain",
+                             "rust-toolchain.toml"})  # fmt: skip
+"""Casefolded: what Cargo (`.cargo/config.toml`), Go (`go.work`) and rustup (a toolchain file)
+look for in the working directory and in every directory above it (red-team v0.4, RT04-11)."""
 TASK_BRANCH_PREFIX = "aipm/task/"
 INTEGRATION_PREFIX = "aipm/"
 
@@ -86,6 +90,24 @@ class WorktreeManager:
         task_branch(task_id)
         return self.root / task_id
 
+    def check_parents(self) -> None:
+        """Exit 6 when a directory above the worktrees that aipm owns holds settings Go, Cargo
+        or rustup would read from every worktree below it (`TOOLCHAIN_NAMES`, any case): a
+        process without srt could plant one there for every later task (RT04-11). Above aipm's
+        cache directory they are the user's own."""
+        for directory in (self.root, self.root.parent, self.root.parent.parent):
+            try:
+                names = [e.name for e in os.scandir(directory)]
+            except FileNotFoundError:
+                continue
+            planted = sorted(n for n in names if n.casefold() in TOOLCHAIN_NAMES)
+            if planted:
+                raise PolicyViolation(
+                    f"{directory / planted[0]} would give Go, Cargo or rustup settings to every "
+                    "task worktree below it",
+                    hint="Remove it; aipm writes nothing by that name there.",
+                )
+
     def create(self, task_id: str, start: str) -> Path:
         """A fresh worktree for `task_id` on `aipm/task/<T-ID>` at commit `start`; anything left
         there by an earlier attempt (a crash, a resume) is removed first."""
@@ -93,6 +115,7 @@ class WorktreeManager:
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         if self.root.is_symlink() or not self.root.is_dir():
             raise PolicyViolation(f"{self.root} must be a real directory, not a link")
+        self.check_parents()
         path = self.path(task_id)
         git.worktree_add(self.repo, path, task_branch(task_id), start)
         return path

@@ -663,7 +663,7 @@ class BuildLoop:
             )
         )
         integrity = await asyncio.to_thread(
-            partial(git.integrity_snapshot, extra=git.AGENT_DISPATCH_WATCH), wt, self.home
+            partial(git.integrity_snapshot, extra=git.BUILD_WATCH), wt, self.home
         )
         fresh = await asyncio.to_thread(self._fresh_home, task_id)
         agent_before = await asyncio.to_thread(prepare_config_home, fresh, self.adapter.config_home)
@@ -710,7 +710,7 @@ class BuildLoop:
             files={},
             ledger={},
             extra_protected=policy.extra_protected,
-            watch=git.AGENT_DISPATCH_WATCH,
+            watch=git.BUILD_WATCH,
         )
         return git.change_set(
             wt,
@@ -987,6 +987,7 @@ class BuildLoop:
         """Prepare and gates, then the checks again. `None` when the task was blocked or the
         build interrupted meanwhile."""
         task = self.tasks[task_id]
+        await asyncio.to_thread(self.worktrees.check_parents)  # RT04-11, again before gates
         scanned = changed_hashes(wt, changes)
         ignores = await asyncio.to_thread(base_ignores, wt, base)
         review, unavailable = reviewer(
