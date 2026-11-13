@@ -31,7 +31,7 @@ MAX_ARG_LENGTH = 512
 MAX_EXPANDED_VALUES = 256
 """Placeholder values per argv; the 32-element limit applies to the configured template."""
 
-PLACEHOLDERS = frozenset({"{paths}", "{test_paths}", "{report_file}"})
+PLACEHOLDERS = frozenset({"{paths}", "{test_paths}", "{report_file}", "{nextest_config}"})
 
 HARD_DENIED: frozenset[str] = frozenset(
     {
@@ -160,6 +160,10 @@ _GOTESTSUM_FLAGS = ("--raw-command", "--post-run-command", "--watch")
 _CARGO_DENIED_WORDS = frozenset({"run", "install"})
 _CARGO_FLAGS = ("--config",)
 """`--config` can set `target.<triple>.runner` or `build.rustc-wrapper`: any program."""
+_NEXTEST_FLAGS = ("--archive-file", "--binaries-metadata", "--cargo-metadata", "--tool-config-file")
+"""The first three make `cargo nextest` run test binaries named in a file instead of the ones it
+builds from the repository's source; a tool configuration can add setup and wrapper scripts,
+which start any program (ADR-0030)."""
 _PIP_MODULES = frozenset({"pip", "pip3", "ensurepip"})
 # `python -m` modules that run code given as an argument, or serve the network.
 _CODE_MODULES = frozenset(
@@ -405,7 +409,13 @@ def _check_toolchains(argv: Argv) -> None:
 
 
 def _check_cargo(rest: Argv) -> None:
-    for later in rest:
+    # `cargo nextest run` runs the tests, like `cargo test`; any other `run` is `cargo run`.
+    nextest = len(rest) >= 2 and rest[0] == "nextest" and rest[1] == "run"
+    for index, later in enumerate(rest):
+        if nextest and index == 1:
+            continue
+        if nextest and _flag_named(later, _NEXTEST_FLAGS) is not None:
+            raise _deny(f"cargo nextest {later} runs other programs; it is refused")
         if later.casefold() in _CARGO_DENIED_WORDS:
             raise _deny(f"`cargo {later}` runs or installs a program; it is refused")
         if _flag_named(later, _CARGO_FLAGS) is not None:
@@ -479,12 +489,17 @@ def _test_paths(paths: Sequence[str], test_roots: Sequence[str]) -> list[str]:
     return owned or roots[:1]
 
 
-def _report_value(report_file: Path | None) -> str:
-    if report_file is None:
-        raise _deny("the gate uses {report_file}, but no report file was given")
-    value = str(report_file)
-    if not report_file.is_absolute():
-        raise _deny("{report_file} must be an absolute path that aipm generated")
+def nextest_config_path(report_file: Path) -> Path:
+    """Where aipm writes the nextest configuration for the gate whose report is `report_file`."""
+    return report_file.with_name(f"{report_file.name}.nextest.toml")
+
+
+def _report_value(path: Path | None, placeholder: str) -> str:
+    if path is None:
+        raise _deny(f"the gate uses {placeholder}, but no report file was given for it")
+    value = str(path)
+    if not path.is_absolute():
+        raise _deny(f"{placeholder} must be an absolute path that aipm generated")
     return _check_element(value)
 
 
@@ -494,12 +509,18 @@ def compile_gate(
     paths: Sequence[SafeRelPath],
     policy: CommandPolicy,
     report_file: Path | None = None,
+    nextest_config: Path | None = None,
 ) -> Argv:
     """Expand placeholders and check the result, or raise `PolicyViolation` (exit 6).
 
     `{paths}` and `{test_paths}` become one argv element per value, each re-checked here;
-    `{report_file}` is the absolute path aipm generated outside the workspace (§13.1).
+    `{report_file}` is the absolute path aipm generated outside the workspace (§13.1), and
+    `{nextest_config}` the nextest configuration aipm writes beside it, which sends nextest's
+    JUnit report to `{report_file}`: `nextest_config_path(report_file)` unless the caller names
+    another (ADR-0030).
     """
+    if nextest_config is None and report_file is not None:
+        nextest_config = nextest_config_path(report_file)
     if gate.run is None:
         raise _deny("a built-in gate has no argv to compile")
     template = _check_shape(gate.run, max_len=MAX_ARGV)
@@ -515,7 +536,9 @@ def compile_gate(
             positions.update(range(len(expanded), len(expanded) + len(found)))
             expanded.extend(found)
         elif arg == "{report_file}":
-            expanded.append(_report_value(report_file))
+            expanded.append(_report_value(report_file, arg))
+        elif arg == "{nextest_config}":
+            expanded.append(_report_value(nextest_config, arg))
         elif "{" in arg or "}" in arg:
             raise _deny(f"{arg!r}: a placeholder must be a whole argv element")
         else:

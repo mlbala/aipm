@@ -807,11 +807,12 @@ gates:
   ac_review:{builtin: ac_review, mode: veto, required: false}
 ```
 
-**Placeholders.** Exactly three exist:
+**Placeholders.** Exactly four exist:
 
 - `{paths}` expands to the task's owned paths that exist.
 - `{test_paths}` expands to owned paths under the stack's `test_roots`, or to the first test root when the task owns none.
 - `{report_file}` expands to an absolute path that aipm generates in the per-attempt temp dir, outside the worktree. Its value is never derived from task, LLM or config data. aipm deletes the file immediately before the gate runs and reads `ac_trace`'s report only from it (§13.3).
+- `{nextest_config}` expands to `<report_file>.nextest.toml`, a nextest configuration aipm writes fresh for each run, which sends cargo-nextest's JUnit report to `{report_file}`. A gate that uses it is judged on that report ([ADR-0030](adr/0030-rust-unit-gate-runs-nextest.md)).
 
 Each placeholder must be a whole argv element, and each expanded value is its own argv element. `{paths}` and `{test_paths}` values pass `safe_relpath`.
 

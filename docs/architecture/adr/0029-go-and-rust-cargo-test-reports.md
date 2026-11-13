@@ -1,6 +1,6 @@
 # ADR-0029: Test reports for the go and rust-cargo stacks
 
-- **Status:** Accepted
+- **Status:** Accepted; the rust-cargo unit gate is superseded by [ADR-0030](0030-rust-unit-gate-runs-nextest.md) (`cargo nextest run` with a report)
 - **Date:** 2026-11-12
 - **Source:** build prompt 08, step 7; ARCHITECTURE.md §13.1, §13.3; SECURITY.md §10 rule 5
 

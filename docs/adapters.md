@@ -88,3 +88,4 @@ Release: [github.com/github/copilot-cli/releases](https://github.com/github/copi
 1. The API domains each tool uses, under `srt`'s `api-only` profile.
 2. Codex `workspace-write` and Gemini `--sandbox` inside `srt` on macOS (nested Seatbelt).
 3. For Copilot, before turning dispatch on: whether `shell(uv run pytest)` allows `uv run pytest tests/x` and refuses `uv run pytest && curl …`, and how a markdown prompt file is best delivered.
+4. For the rust-cargo stack: that `cargo nextest run --config-file <aipm's file>` accepts the absolute `store.dir` and JUnit `path` aipm writes, and writes the report there ([ADR-0030](architecture/adr/0030-rust-unit-gate-runs-nextest.md)). If it does not, the unit gate fails closed.

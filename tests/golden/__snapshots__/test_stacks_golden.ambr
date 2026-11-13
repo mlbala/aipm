@@ -86,9 +86,11 @@
       ]),
       list([
         'cargo',
-        'test',
+        'nextest',
+        'run',
         '--locked',
         '--offline',
+        '--config-file',
       ]),
     ]),
     'gates': dict({
@@ -114,9 +116,12 @@
       'secrets': 'builtin gitleaks',
       'unit': list([
         'cargo',
-        'test',
+        'nextest',
+        'run',
         '--locked',
         '--offline',
+        '--config-file',
+        '/attempt/report.xml.nextest.toml',
       ]),
     }),
     'prepare': list([

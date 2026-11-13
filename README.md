@@ -87,7 +87,7 @@ Every command accepts `--json`, which prints exactly one result object to stdout
 
 ### Getting started: `init`, `trust` and `doctor`
 
-`aipm init` must run inside a git repository. It detects the stack from the manifests at the repository root (`python-uv`, `python-pip`, `node-npm`, `node-pnpm`, and from v0.4 `go` and `rust-cargo`), copies that stack's gate menu into `.pm/config.yaml`, writes `.pm/.gitignore` and `.pm/repo-map.md`, and shows the execution surface: every command aipm may run, in full, with the executable it resolves to on your `PATH`. `--force` re-initializes and keeps your other `.pm/` files. `--provider` is a user-level setting, so aipm tells you where to put it instead of writing it into the repository.
+`aipm init` must run inside a git repository. It detects the stack from the manifests at the repository root (`python-uv`, `python-pip`, `node-npm`, `node-pnpm`, and from v0.4 `go` and `rust-cargo`), copies that stack's gate menu into `.pm/config.yaml`, writes `.pm/.gitignore` and `.pm/repo-map.md`, and shows the execution surface: every command aipm may run, in full, with the executable it resolves to on your `PATH`. `--force` re-initializes and keeps your other `.pm/` files. `--provider` is a user-level setting, so aipm tells you where to put it instead of writing it into the repository. The `go` stack runs its tests with gotestsum, and `rust-cargo` with cargo-nextest (`cargo install cargo-nextest --locked`), because each writes a test report aipm checks; install them alongside Go and cargo.
 
 `aipm trust` records your approval of that exact surface, for you and this machine only, in your user state directory. It asks interactively, or takes `--confirm` with the first 12 characters of the surface hash, so a script has to name the surface it trusts. `--yes` never grants trust. Any change to a gate, the prepare step, a dispatch flag, a security setting or the resolved path of an executable changes the hash and needs trust again. `aipm trust --show` prints the surface without recording anything, and `--revoke` removes your trust.
 
@@ -316,7 +316,7 @@ aipm dispatches Claude Code (from v0.3), Codex CLI and Gemini CLI (from v0.4). T
 | Gemini CLI | 0.68.0 (documentation) | `gemini --help`: `--prompt`, `--approval-mode auto_edit`, `--allowed-tools`, `--output-format json`, `--extensions`, `--sandbox`; `GEMINI_CLI_HOME`; `GEMINI_API_KEY`; `GEMINI.md` with an `@./AGENTS.md` import |
 | GitHub Copilot CLI | 1.0.109 (documentation; render-only) | `AGENTS.md` and `.github/copilot-instructions.md`; dispatch off ([ADR-0025](docs/architecture/adr/0025-copilot-ships-render-only.md)) |
 | Go, gotestsum | not run by the tests | the `go` stack's commands pass the command policy (`tests/unit/test_config.py`) |
-| Rust (cargo) | not run by the tests | the `rust-cargo` stack's commands pass the command policy |
+| Rust (cargo, cargo-nextest) | not run by the tests | the `rust-cargo` stack's commands pass the command policy; the unit gate is judged on nextest's JUnit report, checked with a stub `cargo` ([ADR-0030](docs/architecture/adr/0030-rust-unit-gate-runs-nextest.md)) |
 
 ## Verifying a release
 

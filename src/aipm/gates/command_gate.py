@@ -10,8 +10,14 @@ from it: `PYTHONPYCACHEPREFIX` points into the attempt's temp dir.
 gate runs (SECURITY.md §10 rule 5). A gate that has one passes only if it exited 0 *and* its
 report shows tests ran and none failed: `srt` exits 0 when the command dies of SIGTERM, and a
 test that kills its own runner must not pass (ADR-0020).
+
+`{nextest_config}` is a nextest configuration aipm writes next to it, fresh for each run, that
+sends nextest's JUnit report to `{report_file}`: cargo test writes no report, and nextest
+writes one only where its configuration says (ADR-0030).
 """
 
+import json
+import os
 import secrets
 import shutil
 import time
@@ -25,7 +31,12 @@ from aipm.execution.process import BASE_ENV_ALLOWLIST, ProcessResult, build_env,
 from aipm.execution.sandbox import ProcessKind, ProfilePaths, SandboxProfile, profile_for
 from aipm.gates.context import GateContext
 from aipm.gates.reports import ReportError, TestReport, load_report
-from aipm.security.command_policy import compile_gate, compile_prepare, program_name
+from aipm.security.command_policy import (
+    compile_gate,
+    compile_prepare,
+    nextest_config_path,
+    program_name,
+)
 from aipm.security.network import NetworkPolicy, parse_network
 from aipm.security.paths import SafeRelPath
 from aipm.security.sanitize import head_tail, sanitize_text, strip_terminal_escapes
@@ -128,6 +139,33 @@ def _last_line(text: str) -> str:
     return ""
 
 
+def _toml_string(value: str) -> str:
+    """A TOML basic string: JSON's escapes are a subset of TOML's."""
+    return json.dumps(value)
+
+
+def write_nextest_config(report_file: Path) -> Path:
+    """A fresh nextest configuration beside `report_file`, in the attempt's temp dir: the
+    default profile writes its JUnit report to `report_file`, retries nothing and runs every
+    test, and nextest keeps its store there too, outside the work tree. It replaces the
+    repository's own `.config/nextest.toml` for this run (ADR-0030)."""
+    path = nextest_config_path(report_file)
+    store = report_file.with_name(f"{report_file.name}.nextest-store")
+    text = (
+        "# Written by aipm for one gate run (ADR-0030).\n"
+        f"[store]\ndir = {_toml_string(str(store))}\n\n"
+        "[profile.default]\nretries = 0\nfail-fast = false\n\n"
+        "[profile.default.junit]\n"
+        f"path = {_toml_string(str(report_file))}\n"
+        "store-success-output = false\nstore-failure-output = false\n"
+    )
+    path.unlink(missing_ok=True)  # anything already there is replaced, never read
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    return path
+
+
 def _judge(
     result: ProcessResult, report_file: Path | None
 ) -> tuple[GateStatus, str, TestReport | None]:
@@ -153,8 +191,10 @@ def run_command_gate(
     """Compile, wrap and run one command gate, and judge it."""
     assert gate.run is not None  # noqa: S101 - the runner sends only command gates here
     report_file = None
-    if "{report_file}" in gate.run:
+    if "{report_file}" in gate.run or "{nextest_config}" in gate.run:
         report_file = ctx.ws.temp_dir / f"report-{name}-{secrets.token_hex(8)}"
+    if "{nextest_config}" in gate.run and report_file is not None:
+        write_nextest_config(report_file)
     argv = list(
         compile_gate(gate, paths=paths, policy=ctx.cfg.command_policy(), report_file=report_file)
     )
