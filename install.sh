@@ -19,18 +19,17 @@ YES=0
 
 fail() { echo "install.sh: $1" >&2; exit "${2:-1}"; }
 
-# The first uv on PATH, but never from a relative entry or the active virtualenv (RT04-18).
+# The first uv on PATH. An active virtualenv, or a relative or empty PATH entry, can hold a
+# cloned repository's own commands, so both are refused before anything runs (RT04-18).
 find_uv() {
+  [ -z "${VIRTUAL_ENV:-}" ] || fail "a virtualenv is active ($VIRTUAL_ENV); deactivate it first" 2
+  case "$PATH" in :* | *: | *::*) fail "refusing the relative (empty) entry in PATH" 2 ;; esac
   UV=""; IFS=:; set -f
   for d in $PATH; do
-    [ -f "${d:-.}/uv" ] && [ -x "${d:-.}/uv" ] || continue
-    case "$d" in /*) UV="$d/uv"; break ;; esac
-    fail "refusing the uv in the relative PATH entry '${d:-.}'; remove it from PATH" 2
+    case "$d" in /*) ;; *) fail "refusing the relative PATH entry '$d'; remove it from PATH" 2 ;; esac
+    if [ -z "$UV" ] && [ -f "$d/uv" ] && [ -x "$d/uv" ]; then UV="$d/uv"; fi
   done
   unset IFS; set +f
-  case "$UV" in "${VIRTUAL_ENV:-/nonexistent}"/*)
-    fail "refusing $UV inside the active virtualenv; deactivate it and run this again" 2 ;;
-  esac
 }
 
 while getopts "yt:h" opt; do
@@ -41,11 +40,10 @@ while getopts "yt:h" opt; do
   esac
 done
 
+find_uv
 if ! printf '%s\n' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
   fail "the tag must look like v1.2.3, not '$TAG'" 2
 fi
-
-find_uv
 echo "This will:"
 if [ -n "$UV" ]; then
   echo "  1. use uv at $UV"

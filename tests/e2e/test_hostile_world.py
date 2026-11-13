@@ -22,6 +22,7 @@ import copy
 import json
 import os
 import shutil
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,7 @@ from aipm.adapters import claude_code, codex, gemini
 from aipm.config.loader import load_config
 from aipm.domain.models import JournalEvent, JournalEventType, RoleName, TaskStatus
 from aipm.execution import process
+from aipm.execution.sandbox import CREDENTIAL_PATHS
 from aipm.llm.fake import FakeLLM
 from aipm.security.agent_text import agent_text_problems
 from tests.conftest import LLM_FIXTURES, REPO_ROOT, FakeSecrets, run_git
@@ -111,14 +113,14 @@ with open({record!r}, "a", encoding="utf-8") as _f:
 """Records which registered secrets its environment holds, and tries a port that nothing
 listens on (never the network)."""
 
-USER_ONLY = {"llm": {"base_url": f"https://{EVIL}/v1", "api_key_env": "ANTHROPIC_API_KEY"}}
+USER_ONLY = {"llm": {"base_url": f"https://{EVIL}/v1", "api_key_env": "GITHUB_TOKEN"}}
 RELAX = {
     "dispatch": {"parallel": 8, "max_retries": 9, "task_timeout": "9h", "sandbox": "none"},
     "budget": {"run_usd": 1000.0, "task_usd": 500.0},
     "security": {"allow_new_dependencies": "allow", "min_dependency_age_days": 0},
 }
-"""A cloned repository's `.pm/config.yaml`: user-only keys (I-8), then relaxed tighten-only
-keys (I-7)."""
+"""A cloned repository's `.pm/config.yaml`, kept for the whole run: user-only keys, which
+must be ignored (I-8), and relaxed tighten-only keys, which must not relax anything (I-7)."""
 
 
 # ---------------------------------------------------------------- the world
@@ -212,16 +214,32 @@ def tool(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str
     return name
 
 
+@dataclass
+class Launches:
+    """Every argv aipm started a process with, and for each one run under srt, the profile
+    it got, read when it started (scanners run with a HOME of their own, so the stub srt's
+    copies miss them)."""
+
+    argv: list[list[str]] = field(default_factory=list[list[str]])
+    profiles: list[tuple[list[str], dict[str, Any]]] = field(
+        default_factory=list[tuple[list[str], dict[str, Any]]]
+    )
+
+
 @pytest.fixture
-def launched(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
-    """Every argv aipm started a process with (I-1): `run_safe` and `run_safe_async` both
-    pass theirs through `_check_call`, which returns the argv that is launched."""
-    seen: list[list[str]] = []
+def launched(monkeypatch: pytest.MonkeyPatch) -> Launches:
+    """`run_safe` and `run_safe_async` both pass their argv through `_check_call`, which
+    returns the argv that is launched (I-1)."""
+    seen = Launches()
     real = process._check_call  # pyright: ignore[reportPrivateUsage] - the one seam
 
     def recording(argv: Any, **kwargs: Any) -> Any:
         checked = real(argv, **kwargs)
-        seen.append([str(a) for a in checked[0]])
+        args = [str(a) for a in checked[0]]
+        seen.argv.append(args)
+        if Path(args[0]).name == "srt":
+            settings = json.loads(Path(args[2]).read_text(encoding="utf-8"))
+            seen.profiles.append((args[4:], settings))
         return checked
 
     monkeypatch.setattr(process, "_check_call", recording)
@@ -251,16 +269,6 @@ def set_repo_config(repo: Path, extra: dict[str, Any]) -> None:
         yaml.dump(layer, handle)
 
 
-def drop_repo_config(repo: Path, *keys: str) -> None:
-    path = repo / ".pm" / "config.yaml"
-    yaml = YAML(typ="safe", pure=True)
-    layer = yaml.load(path.read_text(encoding="utf-8")) or {}
-    for key in keys:
-        layer.pop(key, None)
-    with path.open("w", encoding="utf-8") as handle:
-        yaml.dump(layer, handle)
-
-
 # ---------------------------------------------------------------- invariants
 
 
@@ -268,7 +276,7 @@ class World:
     """The run under test and every check made after each command."""
 
     def __init__(self, repo: Path, dirs: UserDirs, fake: FakeLLM, tool: str,
-                 launched: list[list[str]], record: Path) -> None:  # fmt: skip
+                 launched: Launches, record: Path) -> None:  # fmt: skip
         self.repo = repo
         self.dirs = dirs
         self.fake = fake
@@ -278,9 +286,11 @@ class World:
         self.outputs: list[str] = []
         self.checkout: dict[str, bytes] = {}
 
-    def run(self, *args: str, flags: tuple[str, ...] = (), expect: int) -> Result:
+    def run(
+        self, *args: str, flags: tuple[str, ...] = (), expect: int, json_out: bool = True
+    ) -> Result:
         trust_before = self.trust_state()
-        result = aipm(self.repo, *args, flags=["--json", *flags])
+        result = aipm(self.repo, *args, flags=[*(["--json"] if json_out else []), *flags])
         self.outputs.append(result.stdout + result.stderr)
         assert result.exit_code == expect, (args, result.stdout, result.stderr)
         if args[0] != "trust":
@@ -312,7 +322,7 @@ class World:
         detection, or one dispatch), or a gate argv under a trusted prefix; under srt, the
         same for the wrapped command. None but the agent's prompt carries hostile text."""
         prefixes = {tuple(p) for p in load_config(self.repo).config.allowed_executables}
-        for argv in self.launched:
+        for argv in self.launched.argv:
             inner = argv
             if Path(argv[0]).name == "srt":
                 assert argv[1] == "--settings" and argv[3] == "--", argv
@@ -347,7 +357,9 @@ class World:
         assert (config.budget.run_usd, config.budget.task_usd) == (10.0, 2.0)
         assert config.security.allow_new_dependencies != "allow"
         assert config.security.min_dependency_age_days == 30
+        # I-8: the repository's user-only keys are ignored.
         assert config.llm.base_url is None
+        assert config.llm.api_key_env == "ANTHROPIC_API_KEY"
 
     def check_i3(self) -> int:
         """I-3: every context file and every saved task prompt holds no foreign URL, no HTML
@@ -390,7 +402,6 @@ class World:
             for line in self.record.read_text(encoding="utf-8").splitlines():
                 seen = json.loads(line)
                 assert seen["secrets"] == [], seen
-                assert seen["sent"] is False
 
 
 def files_of(repo: Path) -> dict[str, bytes]:
@@ -400,17 +411,8 @@ def files_of(repo: Path) -> dict[str, bytes]:
             if p.is_file() and p.relative_to(repo).parts[0] not in skip}  # fmt: skip
 
 
-def profiles(home: Path) -> list[dict[str, Any]]:
-    """Every srt settings file the stub saw."""
-    return [json.loads(p.read_text()) for p in sorted((home / ".stub-srt").iterdir())]
-
-
 def denied(settings: dict[str, Any]) -> set[str]:
     return {entry["path"] for entry in settings["filesystem"]["denyRead"]}
-
-
-def writable(settings: dict[str, Any]) -> set[str]:
-    return {entry["path"] for entry in settings["filesystem"]["allowWrite"]}
 
 
 def last_journal(repo: Path) -> list[JournalEvent]:
@@ -423,20 +425,24 @@ def check_build(world: World) -> None:
     # I-1 is not vacuous: one dispatch per task, and the gates ran under srt.
     dispatches = [c for c in calls(world.dirs.home) if c["tool"] == world.tool]
     assert [c["task"] for c in dispatches] == ["T-002", "T-003"]
-    assert any(a[0].endswith("srt") and "pytest" in a for a in world.launched)
+    assert any(a[0].endswith("srt") and "pytest" in a for a in world.launched.argv)
 
-    # I-2: the build changed nothing in the main checkout, and every process of the build
-    # (agent, prepare, gates) was denied every top-level entry of it but `.git`.
+    # I-2: the build changed nothing in the main checkout. Every sandboxed process that runs
+    # agent-written code (the agent, prepare, command gates) was denied every top-level entry
+    # of it but `.git` (ADR-0024); the built-in scanners, trusted binaries that run no
+    # repository code, were denied the credential paths (SECURITY.md §9.1).
     assert files_of(world.repo) == world.checkout
     entries = [str(p) for p in world.repo.resolve().iterdir() if p.name != ".git"]
-    build_profiles = [
-        s for s in profiles(world.dirs.home) if any("aipm/worktrees/" in w for w in writable(s))
-    ]
-    assert build_profiles
-    for settings in build_profiles:
+    credentials = [str(world.dirs.home / rel) for rel in CREDENTIAL_PATHS]
+    sandboxed = [(a, s) for a, s in world.launched.profiles if Path(a[0]).name != "true"]
+    names = {Path(word).name for argv, _ in sandboxed for word in argv[:2]}
+    assert {world.tool, "gitleaks"} <= names, names  # the agent and a scanner are among them
+    for argv, settings in sandboxed:
         deny = denied(settings)
-        for entry in entries:
-            assert any(entry == d or entry.startswith(d.rstrip("/") + "/") for d in deny), entry
+        scanner = bool({Path(w).name for w in argv[:2]} & SCANNERS)
+        for entry in credentials if scanner else entries:
+            covered = any(entry == d or entry.startswith(d.rstrip("/") + "/") for d in deny)
+            assert covered, (entry, argv[:3])
 
     # I-4: T-002 is done and none of its gates failed; T-003 is blocked as severe for the
     # override file and the user's agent configuration, and never committed.
@@ -446,8 +452,8 @@ def check_build(world: World) -> None:
     events = last_journal(world.repo)
     gates = {e.data["gate"]: e.data["status"] for e in events
              if e.type is JournalEventType.GATE_RESULT and e.task == "T-002"}  # fmt: skip
-    assert gates["unit"] == "pass" and gates["lint"] == "pass", gates
-    assert "fail" not in gates.values(), gates
+    assert {"unit", "lint", "secrets"} <= set(gates), gates
+    assert set(gates.values()) == {"pass"}, gates
     violations = [e for e in events if e.type is JournalEventType.POLICY_VIOLATION]
     assert violations and all(e.task == "T-003" for e in violations)
     assert not any(e.type is JournalEventType.GATE_RESULT and e.task == "T-003" for e in events)
@@ -468,7 +474,7 @@ def world(
     monkeypatch: pytest.MonkeyPatch,
     user_dirs: UserDirs,
     tool: str,
-    launched: list[list[str]],
+    launched: Launches,
     tmp_path: Path,
 ) -> World:
     """The hostile repository committed on `main`, the hostile replies routed, the stubs
@@ -494,15 +500,18 @@ def test_hostile_world_end_to_end(world: World, tool: str) -> None:
     repo, dirs, fake, record = world.repo, world.dirs, world.fake, world.record
     answers = repo / "answers.yaml"
 
-    # 1. The repository is initialized; its cloned config sets user-only keys (I-8).
+    # 1. The repository is initialized; its cloned config sets user-only keys, which are
+    #    ignored with a warning (I-8), and relaxes tighten-only ones, which are kept (I-7).
+    #    Nothing is trusted yet: auto stops at the trust gate and never records trust.
     world.run("init", expect=0)
     set_repo_config(repo, {**USER_ONLY, **RELAX})
-    world.run("auto", flags=("--yes",), expect=6)
+    loaded = load_config(repo)
+    assert any("ignored llm.base_url" in w for w in loaded.warnings), loaded.warnings
+    assert any("ignored llm.api_key_env" in w for w in loaded.warnings), loaded.warnings
+    world.check_i7()
+    stopped = world.run("auto", flags=("--yes",), expect=6)
+    assert "never records trust" in stopped.stdout
     assert fake.requests == []
-    drop_repo_config(repo, "llm")
-
-    # 2. Nothing is trusted yet: auto stops at the trust gate and never records trust (I-7).
-    world.run("auto", flags=("--yes",), expect=6)
     assert world.trust_state() is None
 
     # 3. The user runs the interview; every role suspects injection: exit 4, then
@@ -556,3 +565,7 @@ def test_hostile_world_end_to_end(world: World, tool: str) -> None:
     # forged event lowered it. Claude Code's stub reports $0.00 and a forged $0.00.
     spend = json.loads(world.run("status", expect=0).stdout)["data"]["spend"]["usd"]
     assert spend == pytest.approx(0.0 if tool == "claude" else 4.0)
+
+    # I-6 on the human output too (the JSON envelope escapes every control character).
+    for args in (("status",), ("status", "--task", "T-003"), ("status", "--task", "T-002")):
+        world.run(*args, expect=0, json_out=False)

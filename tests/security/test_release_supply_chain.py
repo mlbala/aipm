@@ -121,7 +121,7 @@ def test_the_readme_verify_command_pins_the_release_workflow_and_the_tag() -> No
 def test_pin_no_privileged_pull_request_triggers(path: Path) -> None:
     """A fork's pull request never runs with this repository's write token or secrets."""
     triggers = load(path)["on"]
-    names = set(triggers) if isinstance(triggers, dict) else {str(triggers)}
+    names = {str(t) for t in triggers} if isinstance(triggers, (dict, list)) else {str(triggers)}
     assert not names & {"pull_request_target", "workflow_run", "issue_comment"}
 
 
@@ -190,10 +190,10 @@ def test_pin_the_release_job_runs_no_project_code() -> None:
     assert release["needs"] == "build"
     for step in steps(release):
         assert not str(step.get("uses", "")).startswith("actions/checkout@")
-        run = str(step.get("run", ""))
-        if run:
-            first = shlex.split(run.replace("\\\n", " "))[0]
-            assert first in {"sha256sum", "gh"}, run
+        run = str(step.get("run", "")).replace("\\\n", " ")
+        for command in re.split(r"\n|;|&&|\|\||\||`|\$\(", run):
+            if command.strip():
+                assert shlex.split(command)[0] in {"sha256sum", "gh"}, run
 
 
 # ------------------------------------------------------------------ RT04-18 (install.sh)
@@ -225,6 +225,21 @@ def test_install_sh_never_runs_uv_from_a_relative_path_entry(
     assert not real.exists()
 
 
+@pytest.mark.parametrize("path", ["{rel}:{rest}", "{rest}:", "{rest}::/usr/bin"])
+def test_install_sh_refuses_any_relative_path_entry(
+    env: dict[str, str], tmp_path: Path, path: str
+) -> None:
+    """RT04-18, after the security review: a relative or empty entry (a trailing `:` too,
+    which field splitting drops) lets the repository shadow any command the script or uv's
+    installer runs, not only `uv`. Refused whether or not it holds a uv."""
+    repo = tmp_path / "repo"
+    (repo / "bin").mkdir(parents=True)
+    env = {**env, "PATH": path.format(rel="bin", rest=env["PATH"])}
+    code, _, err = run(env, "-y", "-t", "v0.4.0", cwd=repo)
+    assert code == 2, err
+    assert "relative" in err
+
+
 def test_install_sh_never_runs_uv_from_the_active_virtualenv(
     env: dict[str, str], tmp_path: Path
 ) -> None:
@@ -233,7 +248,7 @@ def test_install_sh_never_runs_uv_from_the_active_virtualenv(
     venv = repo / ".venv"
     marker = tmp_path / "planted.log"
     planted_uv(venv / "bin", marker)
-    env = {**env, "PATH": f"{venv / 'bin'}:{env['PATH']}", "VIRTUAL_ENV": str(venv)}
+    env = {**env, "PATH": f"{venv / 'bin'}:{env['PATH']}", "VIRTUAL_ENV": f"{venv}/"}
     code, _, err = run(env, "-t", "v0.4.0", cwd=repo)
     assert code == 2, err
     assert "virtualenv" in err
