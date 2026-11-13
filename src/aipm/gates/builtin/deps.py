@@ -21,7 +21,7 @@ from aipm.scanners import osv
 from aipm.scanners.base import ScanStatus
 from aipm.scanners.registry import RegistryError, first_release
 from aipm.security.diff_checks import LOCKFILES, is_manifest, new_dependencies, new_lock_packages
-from aipm.security.supply_chain import age_ok, typosquat_of
+from aipm.security.supply_chain import age_ok, edit_distance, normalize_name, typosquat_of
 
 NAME = "deps"
 MAX_LOOKUPS = 500
@@ -65,7 +65,9 @@ def check_new(ctx: GateContext, now: datetime) -> tuple[list[GateFinding], list[
     for path, eco, name, direct in packages:
         squat = typosquat_of(eco, name) if direct else None
         if squat is not None:
-            findings.append(_finding(path, "typosquat", f"{name} is one edit from {squat}"))
+            near = edit_distance(normalize_name(eco, name), squat, limit=1) <= 1
+            how = "is one edit from" if near else "copies, under a lookalike owner,"
+            findings.append(_finding(path, "typosquat", f"{name} {how} {squat}"))
         try:
             info = first_release(eco, name, fetch=ctx.fetch)
         except PolicyViolation:

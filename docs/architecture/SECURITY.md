@@ -382,7 +382,7 @@ Each adapter builds its argv in code from fixed fragments. The policy rejects an
 - **The deps gate checks:**
   - the package exists in its registry;
   - its first release is at least `min_dependency_age_days` old (default 30);
-  - typosquat distance from popular package names (direct dependencies only: upstream maintainers choose transitive names);
+  - typosquat distance from popular package names (direct dependencies only: upstream maintainers choose transitive names), and for Go a popular module's repository under an owner that imitates its owner (within two edits, or wrapping its name; red-team v0.4, RT04-13);
   - OSV advisories, failing on high severity or above.
 
   The first two apply to every package a lockfile adds too, under the name it installs (an npm alias `npm:other@1` is checked as `other`), at most 500 per attempt (more is an error).

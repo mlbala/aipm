@@ -139,12 +139,43 @@ def typosquat_distance(name: str, popular: Sequence[str]) -> int:
     return min((edit_distance(name, p) for p in others), default=4)
 
 
+_GO_MAJOR = re.compile(r"/v[2-9]\d*$")
+
+
+def _go_parts(module: str) -> tuple[str, str, str] | None:
+    """(host, owner, repository path with the major-version suffix folded) of a module path
+    such as `github.com/owner/repo/v2`; `None` for one without an owner."""
+    parts = _GO_MAJOR.sub("", module).split("/")
+    if len(parts) < 3:
+        return None
+    return parts[0], parts[1], "/".join(parts[2:])
+
+
+def _go_owner_lookalike(wanted: str, reference: Sequence[str]) -> str | None:
+    """The popular module `wanted` copies under an owner that imitates its owner: the same host
+    and repository, and an owner within two edits of it or wrapping its name (red-team v0.4,
+    RT04-13). A different, unrelated owner (`gofrs/uuid` next to `google/uuid`) is not one."""
+    mine = _go_parts(wanted)
+    if mine is None:
+        return None
+    host, owner, repo = mine
+    for candidate in reference:
+        theirs = _go_parts(candidate)
+        if theirs is None or theirs[0] != host or theirs[2] != repo or theirs[1] == owner:
+            continue
+        if edit_distance(owner, theirs[1], limit=2) <= 2 or theirs[1] in owner:
+            return candidate
+    return None
+
+
 def typosquat_of(ecosystem: Ecosystem, name: str, *, popular: Iterable[str] = ()) -> str | None:
     """The popular package `name` is one edit away from, if any (and it is not that package)."""
     wanted = normalize_name(ecosystem, name)
     reference = tuple(popular) or POPULAR[ecosystem]
     if wanted in reference:
         return None
+    if ecosystem is Ecosystem.GO and (found := _go_owner_lookalike(wanted, reference)):
+        return found
     scope, _, base = wanted.rpartition("/")
     for candidate in reference:
         if edit_distance(wanted, candidate, limit=1) <= 1:

@@ -21,13 +21,20 @@ from aipm.cli import output as cli_output
 from aipm.cli.main import app
 from aipm.config import loader as config_loader
 from aipm.domain.errors import HumanInputRequired, PolicyViolation
-from aipm.domain.models import APPROVED_NAMES, ApprovalGate, ArtifactKind, NetworkProfile
+from aipm.domain.models import (
+    APPROVED_NAMES,
+    ApprovalGate,
+    ArtifactKind,
+    Ecosystem,
+    NetworkProfile,
+)
 from aipm.domain.phase import Phase, PhaseReport
 from aipm.execution import git, worktree
 from aipm.execution.sandbox import ProcessKind, ProfilePaths, profile_for
 from aipm.gates import command_gate
 from aipm.gates.command_gate import toolchain_env
 from aipm.security.network import NetworkPolicy
+from aipm.security.supply_chain import typosquat_of
 from aipm.state import done_record
 from aipm.state.private_files import write_private
 from aipm.state.store import open_store
@@ -443,3 +450,45 @@ def test_c067_go_test_in_prepare_gets_no_go_hosts() -> None:
     argv = case("C-067")["input"]["text"].split()
     policy = command_gate._network(NetworkProfile.REGISTRIES, argv, ProcessKind.PREPARE)  # pyright: ignore[reportPrivateUsage]
     assert not GO_HOSTS & set(policy.domains)
+
+
+# ---------------------------------------------------------------- RT04-13: Go owner lookalikes
+
+
+@pytest.mark.parametrize(
+    ("name", "squats"),
+    [
+        ("github.com/stretchr-io/testify", "github.com/stretchr/testify"),
+        ("github.com/stretchrr-/testify", "github.com/stretchr/testify"),
+        ("github.com/stretchr-io/testify/v2", "github.com/stretchr/testify"),
+        ("github.com/the-stretchr/testify", "github.com/stretchr/testify"),
+        ("github.com/spf13-cli/cobra", "github.com/spf13/cobra"),
+        ("github.com/sirupsen-go/logrus", "github.com/sirupsen/logrus"),
+    ],
+)
+def test_a_go_module_under_a_lookalike_owner_is_a_typosquat(name: str, squats: str) -> None:
+    """The whole-path distance stopped at one edit, so an owner a few characters off, or one
+    that wraps the real owner's name, passed the deps gate as a new direct dependency."""
+    assert typosquat_of(Ecosystem.GO, name) == squats
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "github.com/gofrs/uuid",
+        "github.com/cockroachdb/errors",
+        "github.com/go-errors/errors",
+        "github.com/jackc/pgx/v5",
+        "github.com/go-chi/chi/v5",
+        "github.com/stretchr/testify",
+        "sigs.k8s.io/yaml",
+        "github.com/acme/billing",
+    ],
+)
+def test_real_go_modules_are_not_typosquats(name: str) -> None:
+    assert typosquat_of(Ecosystem.GO, name) is None
+
+
+def test_c068_owner_lookalike_is_flagged() -> None:
+    name = case("C-068")["input"]["text"].strip()
+    assert typosquat_of(Ecosystem.GO, name) == "github.com/stretchr/testify"
