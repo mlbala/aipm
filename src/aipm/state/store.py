@@ -711,7 +711,7 @@ class FileStateStore:
             return None
         try:
             entry: object = json.loads(data)
-        except ValueError:
+        except (ValueError, RecursionError):  # nested too deep is unreadable too (RT04-10)
             return None
         if not isinstance(entry, dict):
             return None

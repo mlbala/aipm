@@ -135,7 +135,7 @@ def recorded_tip(repo: Path, branch: str) -> str | None:
         return None
     try:
         tips: object = json.loads(data)
-    except ValueError:
+    except (ValueError, RecursionError):  # nested too deep is unreadable too (RT04-10)
         return None
     value = tips.get(branch) if isinstance(tips, dict) else None  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
     return value if isinstance(value, str) else None
@@ -147,7 +147,7 @@ def record_tip(repo: Path, branch: str, sha: str) -> None:
     data = read_private(path, limit=MAX_TIPS_BYTES)
     try:
         loaded: object = json.loads(data) if data else {}
-    except ValueError:
+    except (ValueError, RecursionError):
         loaded = {}
     tips = {str(k): v for k, v in loaded.items()} if isinstance(loaded, dict) else {}  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportUnknownArgumentType]
     tips[branch] = sha

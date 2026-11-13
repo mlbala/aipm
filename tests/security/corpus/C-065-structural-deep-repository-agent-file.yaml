@@ -1,0 +1,14 @@
+id: C-065
+vector: structural
+input:
+  surface: repo-file
+  # With dispatch.tools.claude.bare false, the trust surface lists a repository's
+  # .claude/settings.json and .mcp.json. One nested 120,000 levels deep (under the 256 KiB read
+  # limit) made json.loads raise RecursionError, so every command that checks trust crashed
+  # with a traceback (Part 1 observation 8, RT04-10).
+  text: |
+    .mcp.json: {"mcpServers": [[[[ ... 120,000 levels ... ]]]]}
+expected:
+  outcome: >-
+    The file is pinned by its hash with the reason it cannot be shown, as any other unreadable
+    agent file is; aipm's own private records read a deep document as absent.

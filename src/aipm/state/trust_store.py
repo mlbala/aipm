@@ -188,6 +188,8 @@ def _agent_file(path: Path) -> dict[str, Any] | None:
         parsed: object = json.loads(data)
     except ValueError:
         return {**entry, "error": "not JSON"}
+    except RecursionError:  # a cloned repository's file nested too deep (red-team v0.4, RT04-10)
+        return {**entry, "error": "nested too deeply to show"}
     if not isinstance(parsed, dict):
         return {**entry, "error": "not a JSON object"}
     return {**entry, "content": parsed}

@@ -83,7 +83,7 @@ def latest_spend(store: FileStateStore) -> SpendRecord | None:
             continue
         try:
             raw: object = json.loads(text)
-        except ValueError:
+        except (ValueError, RecursionError):  # nested too deep is unreadable too (RT04-10)
             continue
         data = cast("dict[str, object]", raw) if isinstance(raw, dict) else {}
         usd, tokens = data.get("spent_usd"), data.get("tokens_used")

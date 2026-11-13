@@ -6,6 +6,7 @@ crates. One section per finding (RT04-n); every test in a finding section failed
 fix. The "held" sections at the end pin controls the pass attacked without breaking them.
 """
 
+import hashlib
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -22,8 +23,18 @@ from aipm.config import loader as config_loader
 from aipm.domain.errors import HumanInputRequired
 from aipm.domain.models import APPROVED_NAMES, ApprovalGate, ArtifactKind
 from aipm.domain.phase import Phase, PhaseReport
+from aipm.execution import worktree
+from aipm.state import done_record
+from aipm.state.private_files import write_private
 from aipm.state.store import open_store
+from aipm.state.trust_store import (
+    execution_surface,
+    hash_surface,
+    render_surface,
+    repo_agent_config,
+)
 from tests.conftest import FakeSecrets
+from tests.fakes.project import clinic_config
 from tests.integration.build_flow import fake_registry, prepare_project
 from tests.integration.conftest import (
     UserDirs,
@@ -31,6 +42,7 @@ from tests.integration.conftest import (
 )
 from tests.integration.flow import aipm, approvals, discovered, ok, runner, trust
 from tests.integration.test_verify_cli import edit_config
+from tests.security.test_dispatch_surface import bare_off
 
 pytestmark = pytest.mark.usefixtures("allow_unix_sockets")
 CORPUS = Path(__file__).parent / "corpus"
@@ -236,3 +248,51 @@ def test_auto_still_runs_a_plan_that_moves_forward() -> None:
 
 def test_c064_a_cycle_stops_with_exit_4() -> None:
     assert case("C-064")["expected"]["exit_code"] == int(HumanInputRequired.exit_code)
+
+
+# ---------------------------------------------------------------- RT04-10: deep JSON in readers
+
+
+def _deep(depth: int) -> str:
+    return '{"mcpServers": ' + "[" * depth + "]" * depth + "}"
+
+
+@pytest.mark.parametrize("name", [".mcp.json", ".claude/settings.json"])
+@pytest.mark.parametrize("depth", [20_000, 120_000])
+def test_a_deep_repository_agent_file_is_pinned_by_hash(
+    tmp_path: Path, name: str, depth: int
+) -> None:
+    """A cloned repository's `.mcp.json` or `.claude/settings.json` nested too deeply made every
+    trust check crash with a traceback when bare mode is off (Part 1 observation 8)."""
+    repo = tmp_path / "repo"
+    (repo / ".claude").mkdir(parents=True)
+    text = _deep(depth)
+    (repo / name).write_text(text, encoding="utf-8")
+    agent = repo_agent_config(repo, bare_off())  # type: ignore[arg-type]
+    assert agent is not None
+    entry = agent[name]
+    assert entry["sha256"] == hashlib.sha256(text.encode()).hexdigest()
+    assert "content" not in entry and entry["error"]
+    surface = execution_surface(clinic_config(), repo_agent=agent)
+    assert "repository hooks and MCP servers" in "\n".join(
+        render_surface(surface, hash_surface(surface))
+    )
+
+
+def test_deep_private_records_read_as_none(tmp_path: Path, dirs: UserDirs) -> None:
+    """aipm's own records outside the repository fail closed on a deep document: no done
+    record, no recorded integration tip (exit 6 on merge), no cached reply, no spend."""
+    del dirs
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    deep = ("[" * 20_000 + "]" * 20_000).encode()  # under the 64 KiB limits
+    write_private(done_record._path(repo), deep)  # pyright: ignore[reportPrivateUsage]
+    write_private(worktree._tips_path(repo), deep)  # pyright: ignore[reportPrivateUsage]
+    assert done_record._load(repo) == {}  # pyright: ignore[reportPrivateUsage]
+    assert worktree.recorded_tip(repo, "aipm/integration") is None
+    worktree.record_tip(repo, "aipm/integration", "a" * 40)
+    assert worktree.recorded_tip(repo, "aipm/integration") == "a" * 40
+
+
+def test_c065_deep_agent_file_is_pinned() -> None:
+    assert "mcpServers" in case("C-065")["input"]["text"]

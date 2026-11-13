@@ -31,7 +31,7 @@ def _load(repo: Path) -> dict[str, object]:
     data = read_private(_path(repo), limit=MAX_RECORD_BYTES)
     try:
         loaded: object = json.loads(data) if data else {}
-    except ValueError:
+    except (ValueError, RecursionError):  # nested too deep is unreadable too (RT04-10)
         return {}
     return {str(k): v for k, v in loaded.items()} if isinstance(loaded, dict) else {}  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType, reportUnknownArgumentType]
 
