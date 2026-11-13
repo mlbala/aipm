@@ -1,0 +1,14 @@
+id: C-062
+vector: config-redirection
+input:
+  surface: repo-config
+  # With a command-line flag, `aipm build` read .pm/config.yaml once for the configuration it
+  # ran and again for the trust check. A process left behind by an earlier attempt (R-14), or
+  # anything without srt, could alternate the file so the untrusted copy ran (RT04-7).
+  text: |
+    aipm build --budget 5: read 1 sees gates.unit.run + ["-q"] (untrusted), read 2 the trusted file
+expected:
+  outcome: >-
+    The configuration is read once; trust is checked on that read without the flag layer, so an
+    untrusted surface exits 6 before anything runs.
+  exit_code: 6

@@ -68,6 +68,17 @@ class LoadedConfig:
     config: Config
     warnings: tuple[str, ...]
     sources: tuple[str, ...]
+    unflagged: Config | None = None
+    """The configuration before the command-line layer, from the same read of every file; `None`
+    when no flag was given (then it is `config`)."""
+
+    def without_flags(self) -> "LoadedConfig":
+        """This configuration without the command-line layer. Trust is checked on it, so the
+        surface checked and the one that runs come from one read of `.pm/config.yaml` (red-team
+        v0.4, RT04-7)."""
+        if self.unflagged is None:
+            return self
+        return LoadedConfig(config=self.unflagged, warnings=self.warnings, sources=self.sources)
 
 
 def user_config_path(env: Mapping[str, str] | None = None) -> Path:
@@ -387,7 +398,10 @@ def load_config(
             config, _validate(env_layer, ENV_SOURCE), path="", limits=_ENV, warnings=warnings
         )
 
+    unflagged: Config | None = None
     if flags:
+        unflagged = _validate(config.model_dump(mode="json", by_alias=True), "the configuration")
+        _check_open_network(unflagged, user_layer)
         flag_layer = _nested(
             {tuple(key.split(".")): value for key, value in flags.items()}, "flags"
         )
@@ -398,4 +412,6 @@ def load_config(
     final = _validate(config.model_dump(mode="json", by_alias=True), "the merged configuration")
     _check_open_network(final, user_layer)
     warnings.extend(f"relaxed: {item}" for item in relaxations(final))
-    return LoadedConfig(config=final, warnings=tuple(warnings), sources=tuple(sources))
+    return LoadedConfig(
+        config=final, warnings=tuple(warnings), sources=tuple(sources), unflagged=unflagged
+    )
