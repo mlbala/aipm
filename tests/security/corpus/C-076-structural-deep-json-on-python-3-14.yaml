@@ -1,0 +1,13 @@
+id: C-076
+vector: structural
+input:
+  surface: agent-output
+  # Python 3.14's json.loads parses JSON nested 100,000 deep, where 3.13 raised RecursionError.
+  # The RT04-1 and RT04-10 readers relied on that error, so on 3.14 a deep agent result line
+  # became a result and a deep repository .mcp.json became trust-surface content (RT04-21).
+  text: |
+    {"type": "result", "total_cost_usd": 0.0, "result": "x", "x": [[[ ... 300 levels ... ]]]}
+expected:
+  outcome: >-
+    Every reader refuses JSON nested deeper than 256 levels before parsing, on every Python
+    version: no result, no cost; a repository file is pinned by its hash as nested too deeply.

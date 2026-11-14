@@ -5,7 +5,6 @@ it appends an `ack` event for an ID this machine recorded in `.pm/events.jsonl` 
 itself an acknowledgement and is not acknowledged yet (§6.1).
 """
 
-import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +26,7 @@ from aipm.reporting.status import (
     render_status,
     render_task,
 )
+from aipm.security.json_limits import loads_bounded
 from aipm.state.done_record import claimed
 from aipm.state.store import FileStateStore
 
@@ -84,8 +84,8 @@ def latest_spend(store: FileStateStore) -> SpendRecord | None:
         if text is None:
             continue
         try:
-            raw: object = json.loads(text)
-        except (ValueError, RecursionError):  # nested too deep is unreadable too (RT04-10)
+            raw: object = loads_bounded(text)
+        except ValueError:  # nested too deep is unreadable too (RT04-10, RT04-21)
             continue
         data = cast("dict[str, object]", raw) if isinstance(raw, dict) else {}
         usd, tokens = data.get("spent_usd"), data.get("tokens_used")

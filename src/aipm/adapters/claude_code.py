@@ -20,7 +20,6 @@
   `AIPM-BLOCKED:` line of the final message. `AIPM-DONE` and any other claim are ignored.
 """
 
-import json
 import math
 import os
 import re
@@ -64,6 +63,7 @@ from aipm.execution.process import (
 from aipm.execution.sandbox import CONFIG_HOME_PROTECTED, launcher_for, which_outside
 from aipm.execution.worktree import WORKTREES_DIR, cache_root
 from aipm.security.command_policy import check_forbidden_flags
+from aipm.security.json_limits import loads_bounded
 from aipm.security.untrusted import (
     NonceFactory,
 )
@@ -261,8 +261,8 @@ def _last_result(stdout: bytes) -> _ResultEvent | None:
         if len(raw) > MAX_RESULT_LINE or b'"result"' not in raw:
             continue
         try:
-            data: object = json.loads(raw)
-        except (ValueError, RecursionError):  # a line nested too deep is broken too (RT04-1)
+            data: object = loads_bounded(raw)
+        except ValueError:  # a line nested too deep is broken too (RT04-1, RT04-21)
             continue
         if isinstance(data, dict) and cast("dict[str, object]", data).get("type") == "result":
             found.append(cast("dict[str, object]", data))

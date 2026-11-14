@@ -42,6 +42,7 @@ from aipm.context import generator
 from aipm.domain.errors import PolicyViolation
 from aipm.domain.models import GeneratedFile, ProjectContext, ToolName, Workspace
 from aipm.execution.process import ProcessResult
+from aipm.security.json_limits import loads_bounded
 
 API_DOMAINS: tuple[str, ...] = ("generativelanguage.googleapis.com",)
 """The `api-only` network profile; not documented by Google, so a wrong guess fails closed."""
@@ -200,8 +201,8 @@ def _result_doc(stdout: bytes) -> dict[str, object] | None:
     text = stdout.strip()
     if text.startswith(b"{") and len(text) <= MAX_OUTPUT_LINE:
         try:
-            data: object = json.loads(text)
-        except (ValueError, RecursionError):  # nested too deep is broken too (RT04-1)
+            data: object = loads_bounded(text)
+        except ValueError:  # nested too deep is broken too (RT04-1, RT04-21)
             data = None
         if isinstance(data, dict):
             return data  # pyright: ignore[reportUnknownVariableType]

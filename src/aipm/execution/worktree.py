@@ -25,6 +25,7 @@ import platformdirs
 from aipm.domain.errors import PolicyViolation, UsageError
 from aipm.domain.ids import is_valid_id
 from aipm.execution import git
+from aipm.security.json_limits import loads_bounded
 from aipm.security.paths import is_within
 from aipm.state.layout import repo_id
 from aipm.state.private_files import read_private, state_dir, write_private
@@ -157,8 +158,8 @@ def recorded_tip(repo: Path, branch: str) -> str | None:
     if data is None:
         return None
     try:
-        tips: object = json.loads(data)
-    except (ValueError, RecursionError):  # nested too deep is unreadable too (RT04-10)
+        tips: object = loads_bounded(data)
+    except ValueError:  # nested too deep is unreadable too (RT04-10, RT04-21)
         return None
     value = tips.get(branch) if isinstance(tips, dict) else None  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
     return value if isinstance(value, str) else None
@@ -169,8 +170,8 @@ def record_tip(repo: Path, branch: str, sha: str) -> None:
     path = _tips_path(repo)
     data = read_private(path, limit=MAX_TIPS_BYTES)
     try:
-        loaded: object = json.loads(data) if data else {}
-    except (ValueError, RecursionError):
+        loaded: object = loads_bounded(data) if data else {}
+    except ValueError:
         loaded = {}
     tips = {str(k): v for k, v in loaded.items()} if isinstance(loaded, dict) else {}  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportUnknownArgumentType]
     tips[branch] = sha

@@ -20,7 +20,6 @@ reports as an error: a lookup that fails never passes a package.
   requests without a User-Agent, so a fixed one naming aipm (never the user) is sent (v0.4).
 """
 
-import json
 import re
 import threading
 import urllib.error
@@ -32,6 +31,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 from aipm.domain.models import Ecosystem
+from aipm.security.json_limits import loads_bounded
 from aipm.security.supply_chain import check_package_name, normalize_name
 
 TIMEOUT_S = 15.0
@@ -202,8 +202,8 @@ def _crates_first(doc: dict[str, Any]) -> datetime | None:
 
 def _json_object(response: Response) -> dict[str, Any]:
     try:
-        doc = json.loads(response.body)
-    except (ValueError, RecursionError):
+        doc = loads_bounded(response.body)
+    except ValueError:  # nested too deep too (RT04-21)
         raise RegistryError("the registry's answer is not JSON") from None
     if not isinstance(doc, dict):
         raise RegistryError("the registry's answer is not a JSON object")

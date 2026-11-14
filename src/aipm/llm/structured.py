@@ -19,6 +19,8 @@ from typing import Any, get_args, get_origin
 
 from pydantic import BaseModel, ValidationError
 
+from aipm.security.json_limits import depth
+
 MAX_RESPONSE_CHARS = 524_288
 MAX_JSON_DEPTH = 64
 """Arrays and objects nested deeper than this are refused before parsing: the check must not
@@ -189,21 +191,8 @@ def describe_errors(exc: ValidationError, model: type[BaseModel]) -> list[str]:
     return problems
 
 
-_TOKEN = re.compile(r'"(?:[^"\\]++|\\.)*+(?:"|\\?\Z)|[\[\]{}]', re.DOTALL)
 """A JSON string, or one bracket. Possessive, and an unclosed string runs to the end of the text,
 so every `"` matches once and the scan stays linear on hostile input."""
-
-
-def _depth(text: str) -> int:
-    """The deepest nesting of arrays and objects, counting brackets outside strings."""
-    deepest = level = 0
-    for match in _TOKEN.finditer(text):
-        piece = match.group()
-        if piece[0] == '"':
-            continue
-        level += 1 if piece in "[{" else -1
-        deepest = max(deepest, level)
-    return deepest
 
 
 def parse_response[T: BaseModel](raw: str, schema: type[T]) -> T:
@@ -214,7 +203,7 @@ def parse_response[T: BaseModel](raw: str, schema: type[T]) -> T:
     fenced = _FENCE.match(text)
     if fenced:
         text = fenced.group("body").strip()
-    if _depth(text) > MAX_JSON_DEPTH:
+    if depth(text) > MAX_JSON_DEPTH:
         raise OutputInvalid(["the reply is nested too deeply"])
     try:
         data = json.loads(text, object_pairs_hook=_no_duplicates, parse_constant=_no_constants)

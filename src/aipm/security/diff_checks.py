@@ -40,6 +40,7 @@ from aipm.domain.models import (
     FileChange,
     Task,
 )
+from aipm.security.json_limits import loads_bounded
 from aipm.security.paths import is_protected, protected_patterns
 
 
@@ -261,8 +262,8 @@ def _json(text: str | None) -> dict[str, Any] | None:
     if text is None:
         return {}
     try:
-        value = json.loads(text)
-    except (ValueError, RecursionError):
+        value = loads_bounded(text)
+    except ValueError:  # nested too deep too (RT04-21)
         return None
     return cast("dict[str, Any]", value) if isinstance(value, dict) else None
 
