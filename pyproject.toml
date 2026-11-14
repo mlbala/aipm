@@ -25,21 +25,21 @@ dependencies = [
     "typer>=0.27",
     "rich>=15.0",
     "questionary>=2.1",
-    "pydantic>=2.14",
+    "pydantic>=2.14.3",
     "ruamel.yaml>=0.19",
     "jinja2>=3.1.6",        # 3.1.6 fixes a sandbox escape; aipm relies on SandboxedEnvironment
-    "filelock>=4.2",
-    "platformdirs>=4.13",
+    "filelock>=4.2.9",
+    "platformdirs>=4.14.5",
     "pathspec>=1.1",
-    "anthropic>=2.0.0",     # first release that sends API version 2026-10-21 (ARCHITECTURE §14)
-    "openai>=3.40",
+    "anthropic>=2.6.0",     # first release that sends API version 2026-10-21 (ARCHITECTURE §14)
+    "openai>=3.46.0",
 ]
 
 [project.optional-dependencies]
 otel = [
-    "opentelemetry-api>=1.45",
+    "opentelemetry-api>=1.45.2",
     "opentelemetry-sdk>=1.45",
-    "opentelemetry-exporter-otlp-proto-http>=1.45",
+    "opentelemetry-exporter-otlp-proto-http>=1.45.2",
 ]
 keyring = ["keyring>=25.7"]
 
@@ -56,12 +56,12 @@ dev = [
     "pytest>=9.2",
     "pytest-socket>=0.8.1",
     "pytest-cov>=7.1",
-    "hypothesis>=6.170",
+    "hypothesis>=6.170.14",
     "syrupy>=6.1",
-    "ruff>=0.17.3",
+    "ruff>=0.17.4",
     "pyright>=1.1.414",
     "import-linter>=2.15",
-    "zizmor==1.31.1",
+    "zizmor==1.32.0",
 ]
 
 # ---------------------------------------------------------------- build
