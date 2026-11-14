@@ -328,7 +328,10 @@ def test_an_unreadable_manifest_is_a_violation() -> None:
     ]
 
 
-def test_new_dependencies_skip_lockfiles_and_unreadable_before() -> None:
+def test_new_dependencies_skip_lockfiles_and_read_an_unreadable_base_as_empty() -> None:
+    """An unreadable base manifest used to hide every dependency the change added (red-team
+    v0.4, security review of RT04-21): it now counts as empty, as it does for lockfiles and
+    sources. Owner-approved change of this test's expectation."""
     changes = ChangeSet(
         "a" * 40,
         files=(
@@ -337,7 +340,23 @@ def test_new_dependencies_skip_lockfiles_and_unreadable_before() -> None:
             change("src/x.py", before="", after="import a\n"),
         ),
     )
-    assert new_dependencies(changes) == []
+    assert new_dependencies(changes) == [("pyproject.toml", Ecosystem.PYPI, "a")]
+
+
+@pytest.mark.parametrize(
+    "base",
+    [
+        '\ufeff{"dependencies": {"left-pad": "1.0.0"}}',  # a BOM, as Windows editors write it
+        '{"dependencies": {"left-pad": "1.0.0"}, "config": '
+        + "[" * 300 + "]" * 300 + "}",  # nested deeper than the JSON limit (RT04-21)
+    ],
+    ids=["bom", "deep"],
+)  # fmt: skip
+def test_an_unreadable_base_manifest_does_not_hide_a_new_dependency(base: str) -> None:
+    after = '{"dependencies": {"left-pad": "1.0.0", "evil-pkg": "1.0.0"}}'
+    changes = ChangeSet("a" * 40, files=(change("package.json", before=base, after=after),))
+    found = {name for _, _, name in new_dependencies(changes)}
+    assert "evil-pkg" in found
     assert normalize_pypi("Foo__Bar.baz") == "foo-bar-baz"
 
 

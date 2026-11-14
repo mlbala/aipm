@@ -772,9 +772,12 @@ def new_dependencies(changes: ChangeSet) -> list[tuple[str, Ecosystem, str]]:
     for change in changes.files:
         if is_lockfile(change.path) or not is_manifest(change.path):
             continue
-        before = manifest_deps(change.path, change.before)
+        # An unreadable base counts as empty, as for lockfiles and sources: it must not hide a
+        # new dependency (red-team v0.4, review of RT04-21). An unreadable result is a
+        # violation of its own (`_new_sources`).
+        before = manifest_deps(change.path, change.before) or Deps(frozenset())
         after = manifest_deps(change.path, change.after)
-        if before is None or after is None:
+        if after is None:
             continue
         found += [(change.path, eco, n) for eco, n in sorted(after.names - before.names)]
     return found
