@@ -416,7 +416,7 @@ Each adapter builds its argv in code from fixed fragments. The policy rejects an
 | I-4 | Terminal deception | An OSC 8 link disguises a URL; OSC 52 writes the clipboard | §7.1, §7.10 |
 | D-1 | Runaway cost or time | An agent loops; retries never end | ARCH §12.5 (budgets, timeouts, retries, parallel cap) |
 | D-4 | Spend is counted short | A forged second `result` event with a lower total; a resumed session whose total falls; a parallel batch started past the budget | The highest reported total is charged; a falling total is charged the task budget; a task holds its budget from scheduling (red-team v0.3, RT03-7, RT03-8); `status` and resume order builds by start time (RT04-20); R-15 |
-| D-2 | Oversized inputs | A 50 MB `idea.md`; JSON nested 100,000 deep in agent output or a repository's `.mcp.json` | §7.1 (size caps), 1 MiB YAML limit; deep JSON is unreadable, never a crash (RT04-1, RT04-10) |
+| D-2 | Oversized inputs | A 50 MB `idea.md`; JSON nested 100,000 deep in agent output or a repository's `.mcp.json` | §7.1 (size caps), 1 MiB YAML limit; JSON nested deeper than 256 levels is unreadable on every Python version, never a crash (RT04-1, RT04-10, RT04-21) |
 | D-3 | Orphaned processes | An agent spawns a daemon | §10 (process group kill) |
 | E-1 | Injection leads to command execution through gates | See T-3 | §7.4, §10, §6 |
 | E-2 | Injection leads to dangerous agent tool use | Agent asked to `rm -rf ~` | §9 (sandbox, least-privilege flags, `--bare`, forbidden flags) |
