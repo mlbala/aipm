@@ -5,6 +5,7 @@ The release and install findings (RT04-16 to RT04-19) are in `test_release_suppl
 the hostile-world run is `tests/e2e/test_hostile_world.py`, which found this one.
 """
 
+import ast
 import hashlib
 import json
 from collections.abc import Callable, Iterator
@@ -19,6 +20,7 @@ from aipm.adapters.gemini import GeminiAdapter
 from aipm.gates.reports import ReportError, parse_jest
 from aipm.llm.fake import FakeLLM
 from aipm.scanners import registry
+from aipm.scanners.base import read_report
 from aipm.scanners.registry import RegistryError
 from aipm.security import diff_checks, json_limits
 from aipm.security.json_limits import MAX_DEPTH, TooDeep, depth, loads_bounded
@@ -115,15 +117,31 @@ def test_loads_bounded_refuses_json_deeper_than_the_limit_on_every_python(
         loads_bounded("[]")
 
 
+def agent_lines(tool: str, nest: str) -> bytes:
+    """Output in each tool's format that reports a result and an `AIPM-BLOCKED:` question,
+    every event also carrying `nest`."""
+    question = '"AIPM-BLOCKED: which port?"'
+    lines = {
+        "claude": [f'{{"type": "result", "subtype": "success", "is_error": false, '
+                   f'"total_cost_usd": 0.5, "result": {question}, "x": {nest}}}'],
+        "codex": [f'{{"type": "item.completed", "item": {{"type": "agent_message", '
+                  f'"text": {question}}}, "x": {nest}}}',
+                  f'{{"type": "turn.completed", "usage": {{}}, "x": {nest}}}'],
+        "gemini": [f'{{"response": {question}, "stats": {{}}, "x": {nest}}}'],
+    }[tool]  # fmt: skip
+    return ("\n".join(lines) + "\n").encode()
+
+
 @pytest.mark.parametrize("adapter", [CodexAdapter(), GeminiAdapter(), ClaudeCodeAdapter()],
                          ids=lambda a: a.name.value)  # fmt: skip
-def test_a_result_line_deeper_than_the_limit_is_no_result(adapter: Any) -> None:
-    """C-056 at a depth every Python parses: a result event that also nests deeper than the
-    limit is broken output, never a result or a cost."""
-    start = '{"type": "result", "total_cost_usd": 0.0, "result": "x", "response": "x", "x": '
-    line = nested(DEEPER, start).encode()
-    result = adapter.parse_result(output(line + b"\n"))
-    assert (result.cost_usd, result.blocked_question) == (None, None)
+def test_a_result_deeper_than_the_limit_is_no_result(adapter: Any) -> None:
+    """C-056 at a depth every Python parses: output that nests deeper than the limit is broken
+    output, never a result, a cost or a question. The shallow copy shows the same output is
+    read when it is not too deep, so the test would notice a parse."""
+    shallow = adapter.parse_result(output(agent_lines(adapter.name.value, nested(5))))
+    assert shallow.saw_result and shallow.blocked_question == "which port?"
+    deep = adapter.parse_result(output(agent_lines(adapter.name.value, nested(DEEPER))))
+    assert (deep.saw_result, deep.cost_usd, deep.blocked_question) == (False, None, None)
 
 
 @pytest.mark.parametrize("name", [".mcp.json", ".claude/settings.json"])
@@ -140,22 +158,82 @@ def test_a_repository_agent_file_deeper_than_the_limit_is_pinned_by_hash(
                            "error": "nested too deeply to show"}  # fmt: skip
 
 
-def test_registry_answers_test_reports_and_tool_config_deeper_than_the_limit_are_unreadable() -> (
-    None
-):
-    deep = nested(DEEPER, '{"x": ')
-    with pytest.raises(RegistryError):
-        registry._json_object(registry.Response(200, deep.encode()))  # pyright: ignore[reportPrivateUsage]
-    with pytest.raises(ReportError):
-        parse_jest(nested(DEEPER, '{"testResults": ').encode())
-    assert diff_checks._json(deep) is None  # pyright: ignore[reportPrivateUsage]
+def _registry(text: str) -> object:
+    try:
+        return registry._json_object(registry.Response(200, text.encode()))  # pyright: ignore[reportPrivateUsage]
+    except RegistryError:
+        return "unreadable"
+
+
+def _jest(text: str) -> object:
+    try:
+        return parse_jest(text.encode())
+    except ReportError:
+        return "unreadable"
+
+
+def _report(text: str, tmp_path: Path) -> object:
+    path = tmp_path / "report.json"
+    path.write_text(text, encoding="utf-8")
+    return read_report(path)
+
+
+@pytest.mark.parametrize("reader", ["registry", "jest", "tool config", "scanner report"])
+def test_every_reader_finds_json_deeper_than_the_limit_unreadable(
+    reader: str, tmp_path: Path
+) -> None:
+    """Each reader reads the shallow document, and finds the same document nested deeper than
+    the limit unreadable (registry answers, test reports, tool configuration, scanner reports).
+    aipm's own records (status, the reply cache, done records, integration tips) read a deep
+    document as absent through the same `loads_bounded` (RT04-10)."""
+    read = {
+        "registry": _registry,
+        "jest": _jest,
+        "tool config": diff_checks._json,  # pyright: ignore[reportPrivateUsage]
+        "scanner report": lambda text: _report(text, tmp_path),
+    }[reader]
+    unreadable = {"registry": "unreadable", "jest": "unreadable", "tool config": None,
+                  "scanner report": None}[reader]  # fmt: skip
+    start = '{"testResults": [], "x": '
+    assert read(nested(5, start)) != unreadable
+    assert read(nested(DEEPER, start)) == unreadable
+
+
+_JSON_PARSERS = {"load", "loads", "JSONDecoder", "raw_decode"}
+
+
+def _json_parse_uses(tree: ast.AST) -> list[int]:
+    """Lines that import `json` under another name, import a parser from it, or use one."""
+    found: list[int] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            found += [node.lineno for a in node.names if a.name == "json" and a.asname]
+        elif isinstance(node, ast.ImportFrom) and node.module == "json":
+            found += [node.lineno for a in node.names if a.name in _JSON_PARSERS | {"*"}]
+        elif isinstance(node, ast.Attribute) and node.attr in _JSON_PARSERS:
+            if isinstance(node.value, ast.Name) and node.value.id == "json":
+                found.append(node.lineno)
+            elif node.attr == "raw_decode":
+                found.append(node.lineno)
+    return found
 
 
 def test_only_the_bounded_loader_parses_json_with_the_standard_library() -> None:
     """Every reader goes through `loads_bounded`; `llm/structured.py` checks the depth itself
-    (64 levels) before its own `json.loads` with hooks. pydantic's parser has its own limit."""
+    (64 levels) before its own `json.loads` with hooks. pydantic's parser has its own limit
+    (200 levels), the same on every Python."""
     src = Path(json_limits.__file__).parents[1]
     allowed = {src / "security" / "json_limits.py", src / "llm" / "structured.py"}
     for path in sorted(src.rglob("*.py")):
         if path not in allowed:
-            assert "json.loads(" not in path.read_text(encoding="utf-8"), path
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            assert _json_parse_uses(tree) == [], path
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["json.loads(x)", "json.load(f)", "json.JSONDecoder().decode(x)", "d.raw_decode(x)",
+     "from json import loads", "from json import load", "import json as j"],
+)  # fmt: skip
+def test_the_parser_ban_catches_each_spelling(source: str) -> None:
+    assert _json_parse_uses(ast.parse(source)) != []

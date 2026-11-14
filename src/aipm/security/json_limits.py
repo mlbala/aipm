@@ -22,26 +22,35 @@ class TooDeep(ValueError):
     """JSON nested deeper than the limit. A `ValueError`, like any other unreadable JSON."""
 
 
-def depth(text: str) -> int:
-    """The deepest nesting of arrays and objects, counting brackets outside strings."""
+def depth(text: str, *, stop_above: int | None = None) -> int:
+    """The deepest nesting of arrays and objects, counting brackets outside strings. With
+    `stop_above`, the scan ends as soon as the nesting passes it."""
     deepest = level = 0
     for match in _TOKEN.finditer(text):
         piece = match.group()
         if piece[0] == '"':
             continue
         level += 1 if piece in "[{" else -1
-        deepest = max(deepest, level)
+        if level > deepest:
+            deepest = level
+            if stop_above is not None and deepest > stop_above:
+                break
     return deepest
 
 
 def loads_bounded(data: str | bytes, *, max_depth: int = MAX_DEPTH, **kwargs: Any) -> Any:
     """`json.loads(data, **kwargs)`, or `TooDeep` when `data` nests deeper than `max_depth`.
 
-    Bytes are decoded as `json.loads` would (UTF-8, -16 or -32); undecodable bytes raise
-    `UnicodeDecodeError`, a `ValueError`. Callers catch `ValueError` for every unreadable input.
+    Bytes are decoded exactly as `json.loads` decodes them (UTF-8, -16 or -32, with
+    `surrogatepass`); undecodable bytes raise `UnicodeDecodeError`, a `ValueError`. Callers catch
+    `ValueError` for every unreadable input. Fewer brackets than the limit skip the scan.
     """
-    text = data.decode(json.detect_encoding(data)) if isinstance(data, bytes) else data
-    if depth(text) > max_depth:
+    if isinstance(data, bytes):
+        text = data.decode(json.detect_encoding(data), "surrogatepass")
+    else:
+        text = data
+    brackets = text.count("[") + text.count("{")
+    if brackets > max_depth and depth(text, stop_above=max_depth) > max_depth:
         raise TooDeep(f"nested deeper than {max_depth} levels")
     try:
         return json.loads(text, **kwargs)
