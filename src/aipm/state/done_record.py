@@ -13,6 +13,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from aipm.domain.models import Done, Task, TaskStatus
+from aipm.security.json_limits import loads_bounded
 from aipm.state.layout import repo_id
 from aipm.state.private_files import read_private, state_dir, write_private
 
@@ -30,8 +31,8 @@ def _entry(done: Done) -> dict[str, str | None]:
 def _load(repo: Path) -> dict[str, object]:
     data = read_private(_path(repo), limit=MAX_RECORD_BYTES)
     try:
-        loaded: object = json.loads(data) if data else {}
-    except ValueError:
+        loaded: object = loads_bounded(data) if data else {}
+    except ValueError:  # nested too deep is unreadable too (RT04-10, RT04-21)
         return {}
     return {str(k): v for k, v in loaded.items()} if isinstance(loaded, dict) else {}  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType, reportUnknownArgumentType]
 

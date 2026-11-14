@@ -1,0 +1,12 @@
+id: C-068
+vector: smuggling
+input:
+  surface: llm-output
+  # A declared Go dependency under an owner that imitates a popular module's owner. The
+  # typosquat check measured the whole module path and stopped at one edit, so an owner three
+  # characters off passed as a new direct dependency (RT04-13).
+  text: github.com/stretchr-io/testify
+expected:
+  outcome: >-
+    The deps gate reports a typosquat of github.com/stretchr/testify: same host and repository
+    name (major version folded), and an owner within two edits of, or wrapping, the real one.

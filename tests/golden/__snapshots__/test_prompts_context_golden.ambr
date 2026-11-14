@@ -96,6 +96,8 @@
   - MUST NOT modify `.gitmodules`
   - MUST NOT modify `.aipmignore`
   - MUST NOT modify `**/.env*`
+  - MUST NOT modify `AGENTS.override.md`
+  - MUST NOT modify `CLAUDE.local.md`
   - MUST NOT modify a test file or test configuration that your task does not own.
   - MUST NOT add a dependency that your task does not declare in `deps_add`.
   - MUST NOT use the network, except your own coding tool's API.
@@ -154,6 +156,8 @@
   - MUST NOT modify `.gitmodules`
   - MUST NOT modify `.aipmignore`
   - MUST NOT modify `**/.env*`
+  - MUST NOT modify `AGENTS.override.md`
+  - MUST NOT modify `CLAUDE.local.md`
   - MUST NOT modify a test file or test configuration that this task does not own.
   - MUST NOT add a dependency other than the ones this task declares: pypi `slowapi`.
   - MUST NOT use the network, except your own coding tool's API.
@@ -265,6 +269,8 @@
   - MUST NOT modify `.gitmodules`
   - MUST NOT modify `.aipmignore`
   - MUST NOT modify `**/.env*`
+  - MUST NOT modify `AGENTS.override.md`
+  - MUST NOT modify `CLAUDE.local.md`
   - MUST NOT modify a test file or test configuration that this task does not own.
   - MUST NOT add any dependency.
   - MUST NOT use the network, except your own coding tool's API.

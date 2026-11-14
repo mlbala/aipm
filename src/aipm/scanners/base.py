@@ -12,7 +12,6 @@ A scanner that is not installed gives `skipped` with an install hint; a scanner 
 writes a report aipm cannot read, gives `error`. Neither ever passes. Findings are T2.
 """
 
-import json
 import os
 import shutil
 import stat
@@ -27,6 +26,7 @@ from aipm.domain.errors import PolicyViolation
 from aipm.domain.models import Severity
 from aipm.execution.process import ProcessResult, build_env, is_inside, run_safe
 from aipm.execution.sandbox import ProcessKind, ProfilePaths, Runtime, profile_for
+from aipm.security.json_limits import loads_bounded
 from aipm.security.network import NetworkPolicy, parse_network
 from aipm.security.redact import Redactor
 
@@ -303,8 +303,8 @@ def read_report(path: Path) -> Any:
     if len(data) > MAX_REPORT_BYTES:
         return None
     try:
-        return json.loads(data or b"null")
-    except (ValueError, RecursionError):
+        return loads_bounded(data or b"null")
+    except ValueError:  # nested too deep too (RT04-21)
         return None
 
 

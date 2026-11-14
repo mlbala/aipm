@@ -129,11 +129,12 @@ def _plan(ctx: typer.Context, *, yes: bool) -> None:
                 f"the execution surface cannot be trusted: {review.surface_error}",
                 hint="Fix the gate commands in .pm/config.yaml, then run `aipm approve plan`.",
             )
-        if not screens.ask_plan(review):
+        if not screens.ask_plan(review, offer_trust=not opts.in_auto):
             typer.echo("Not approved.")
             succeed(ctx, "approve", {**review.to_data(), "recorded": False})
             return
-        trust_surface = review.surface_hash
+        # Inside `aipm auto` a yes approves the plan only (ADR-0028; red-team v0.4, RT04-8).
+        trust_surface = None if opts.in_auto else review.surface_hash
     recorded, trusted = use_case.approve_plan(
         opts.project, sha256=review.sha256, trust_surface=trust_surface
     )
@@ -143,7 +144,7 @@ def _plan(ctx: typer.Context, *, yes: bool) -> None:
             typer.echo("The execution surface is trusted.")
         elif review.surface_hash is not None:
             print_untrusted(
-                "Trust is not recorded by --yes. Review `aipm trust --show`, then run "
+                "Trust is not recorded by --yes or aipm auto. Review `aipm trust --show`, then run "
                 f"`aipm trust --confirm {review.surface_hash[:12]}`."
             )
         else:

@@ -235,6 +235,8 @@
     - `.gitmodules`
     - `.aipmignore`
     - `**/.env*`
+    - `AGENTS.override.md`
+    - `CLAUDE.local.md`
   
   ## Project settings
   

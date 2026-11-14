@@ -61,6 +61,12 @@ CREDENTIAL_PATHS: tuple[str, ...] = (
     # Step 08 review: a dotenv file in the home directory, which tools that search upward for
     # `.env` (Gemini CLI) would load.
     ".env",
+    # Red-team v0.4 (RT04-4): the v0.4 agents' token files, which a build's gates and prepare
+    # step (agent-written and repository code) could still read: Gemini's documented key file,
+    # the dotenv Codex loads from its home, Gemini's MCP OAuth tokens, Copilot CLI's
+    # plain-text token fallback and the Copilot editor plugins' OAuth tokens.
+    ".gemini/.env", ".codex/.env", ".gemini/mcp-oauth-tokens.json", ".copilot/config.json",
+    ".config/github-copilot", ".gemini/mcp-oauth-tokens-v2.json", ".codex/.credentials.json",
 )  # fmt: skip
 """SECURITY.md §3 developer credentials, relative to the home directory."""
 
@@ -80,8 +86,32 @@ AGENT_GLOBAL_CONFIG: tuple[str, ...] = (
     ".claude/session-env",
     ".codex/config.toml", ".codex/AGENTS.md", ".codex/skills",
     ".gemini/settings.json", ".gemini/GEMINI.md", ".copilot/config.json",
+    # Red-team v0.4 (RT04-3): everything each v0.4 adapter protects in its own config home
+    # (`ConfigHomeSpec.protected`), at the home the tool uses without aipm.
+    ".codex/AGENTS.override.md", ".codex/rules", ".codex/hooks", ".codex/hooks.json",
+    ".codex/prompts", ".codex/.env",
+    ".gemini/AGENTS.md", ".gemini/.env", ".gemini/commands", ".gemini/extensions",
+    ".gemini/policies", ".gemini/agents", ".gemini/skills", ".gemini/hooks",
+    ".gemini/trustedFolders.json", ".env",
+    ".copilot/settings.json", ".copilot/mcp-config.json", ".copilot/lsp-config.json",
+    ".copilot/permissions-config.json", ".copilot/providers.json", ".copilot/hooks",
+    ".copilot/agents", ".copilot/skills", ".copilot/extensions", ".copilot/instructions",
+    ".copilot/copilot-instructions.md",
 )  # fmt: skip
-"""Agents' global settings, hooks, plugins and skills, relative to home (SECURITY.md §9.1)."""
+"""Agents' global settings, hooks, plugins and skills, relative to home (SECURITY.md §9.1).
+`tests/security/test_redteam_v04.py` checks that every adapter's `ConfigHomeSpec.protected`
+is here (this layer cannot import the adapters)."""
+
+TOOLCHAIN_CONFIG: tuple[str, ...] = (
+    ".cargo/config.toml", ".cargo/config", ".rustup/settings.toml",
+    "Library/Application Support/go/env", ".config/go/env",
+)  # fmt: skip
+"""The user's Cargo, rustup and Go settings, relative to home (red-team v0.4, RT04-11). Cargo
+reads `$CARGO_HOME/config.toml` (a `rustc-wrapper` or test `runner` is any program), rustup's
+settings can override the toolchain for a directory, and `go env -w` writes Go's env file
+(`os.UserConfigDir()/go/env`), where `GOFLAGS=-toolexec=…` would wrap every later build. Gates get
+no `CARGO_HOME`, `RUSTUP_HOME` or `GOENV`, so these are the files they read. No process aipm
+starts may write them, and a build watches them."""
 
 CONFIG_HOME_PROTECTED: tuple[str, ...] = (
     "settings.json", "settings.local.json", "CLAUDE.md", "hooks", "agents", "skills",
@@ -100,6 +130,7 @@ PACKAGE_CACHES: tuple[str, ...] = (
 _PROTECTED_LITERALS: tuple[str, ...] = (
     ".pm", ".git", ".github", ".gitlab-ci.yml", "AGENTS.md", "CLAUDE.md", "GEMINI.md", ".claude",
     ".gemini", ".codex", ".agents", ".mcp.json", ".gitattributes", ".gitmodules", ".aipmignore",
+    "AGENTS.override.md", "CLAUDE.local.md",
 )  # fmt: skip
 """SECURITY.md §9.2 as literal paths. `**/.env*` is added as a pattern, which only macOS applies;
 the protected-path check after the gates catches a change to one anywhere."""
@@ -195,6 +226,7 @@ def profile_for(
         allow = [paths.output_dir if paths.output_dir is not None else paths.temp_dir]
     deny_write = [paths.workspace / rel for rel in _PROTECTED_LITERALS]
     deny_write += [home / rel for rel in AGENT_GLOBAL_CONFIG]
+    deny_write += [home / rel for rel in TOOLCHAIN_CONFIG]
     deny_write += agent_config
     workspace = str(paths.workspace)
     patterns = () if _GLOB_CHARS & set(workspace) else (f"{workspace}/{ENV_PATTERN}",)

@@ -311,8 +311,9 @@ def run(
     adapter = get_adapter(parse_tool(options.tool, cfg.dispatch.default_tool))
     # Trust is checked without the command-line layer: --parallel, --max-retries, --timeout and
     # --budget are the person's own choice for this run and change nothing aipm executes, but
-    # relaxing a tighten-only key is part of the surface (SECURITY.md §6).
-    require_trusted(root, load_config(root) if flags else loaded, command=options.kind)
+    # relaxing a tighten-only key is part of the surface (SECURITY.md §6). Both come from one
+    # read of the files, so what is checked is what runs (red-team v0.4, RT04-7).
+    require_trusted(root, loaded.without_flags(), command=options.kind)
     if not cfg.dispatch.enabled:
         raise UsageError(
             "dispatch is turned off (dispatch.enabled: false)",

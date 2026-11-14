@@ -82,25 +82,32 @@ def _started(events: Sequence[JournalEvent]) -> JournalEvent | None:
     return None
 
 
-def find_resumable(store: FileStateStore) -> str | None:
-    """The newest build run, if its journal has no `run_finished` (ARCHITECTURE §12.6).
-
-    Runs are ordered by their `run_started` time, since run IDs only name the minute. An older
-    unfinished run behind a finished one is never resumed.
-    """
-    newest: tuple[datetime, str] | None = None
-    finished: dict[str, bool] = {}
+def build_runs_newest_first(store: FileStateStore) -> list[tuple[str, list[JournalEvent]]]:
+    """Every build run with a readable journal, newest first by its `run_started` time: run IDs
+    name only the minute, so two builds in one minute sort by their random suffix
+    (red-team v0.4, RT04-20)."""
+    found: list[tuple[datetime, str, list[JournalEvent]]] = []
     for run_id in store.run_ids():
         events = load(store, run_id)
         started = _started(events or [])
-        if started is None or events is None:
-            continue
-        finished[run_id] = any(e.type is JournalEventType.RUN_FINISHED for e in events)
-        if newest is None or (started.ts, run_id) > newest:
-            newest = (started.ts, run_id)
-    if newest is None or finished[newest[1]]:
+        if started is not None and events is not None:
+            found.append((started.ts, run_id, events))
+    found.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [(run_id, events) for _, run_id, events in found]
+
+
+def find_resumable(store: FileStateStore) -> str | None:
+    """The newest build run, if its journal has no `run_finished` (ARCHITECTURE §12.6).
+
+    An older unfinished run behind a finished one is never resumed.
+    """
+    runs = build_runs_newest_first(store)
+    if not runs:
         return None
-    return newest[1]
+    run_id, events = runs[0]
+    if any(e.type is JournalEventType.RUN_FINISHED for e in events):
+        return None
+    return run_id
 
 
 @dataclass(slots=True)

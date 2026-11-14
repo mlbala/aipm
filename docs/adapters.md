@@ -37,6 +37,8 @@ Release: [github.com/openai/codex/releases](https://github.com/openai/codex/rele
 | API domains | ❓ | Not documented; aipm assumes `api.openai.com` (a wrong guess fails closed) | — |
 | Exit codes | ❓ | Not documented; aipm's gates decide | — |
 
+A worktree whose root holds `AGENTS.override.md`, in any case, is refused (exit 6), because Codex would read it instead of aipm's `AGENTS.md`. The file is a protected path, so an agent cannot add one either (red-team v0.4, RT04-2).
+
 **aipm's argv:** `codex exec --sandbox workspace-write --json --ephemeral --ignore-rules -c approval_policy=never -c analytics.enabled=false -c check_for_update_on_startup=false -`
 
 ## Gemini CLI 0.68.0
@@ -53,7 +55,7 @@ Release: [github.com/google-gemini/gemini-cli/releases](https://github.com/googl
 | Sandbox inside `srt` | ❓ | Not documented; aipm passes `--sandbox` only when `srt` is not used | — |
 | Context discovery | ✅ | `GEMINI.md` hierarchy; `context.fileName` accepts a list; `@./file.md` imports, ignored inside code spans | [GEMINI.md](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/gemini-md.md), [Memory import](https://github.com/google-gemini/gemini-cli/blob/main/docs/reference/memport.md) |
 | Config home relocation | ✅ | `GEMINI_CLI_HOME` is the root under which `.gemini/` is created | [Configuration](https://github.com/google-gemini/gemini-cli/blob/main/docs/reference/configuration.md) |
-| Workspace settings | ⚠ | With folder trust off (default), `<project>/.gemini/settings.json` and `.env` load; with it on, headless runs in an untrusted folder exit. aipm refuses a worktree whose root holds `.gemini/` or `.env*` in any case, writes an empty `.env` in the worktree's parent so the upward `.env` search stops there, and sets `GEMINI_SANDBOX` so no `.env` can change it | [Trusted folders](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/trusted-folders.md) |
+| Workspace settings | ⚠ | With folder trust off (default), `<project>/.gemini/settings.json` and `.env` load; with it on, headless runs in an untrusted folder exit. aipm refuses a worktree whose root holds `.gemini/` or `.env*` in any case, writes an empty `.env` in the worktree's parent so the upward `.env` search stops there (and refuses a `.gemini` entry there, which Gemini would check first; RT04-6), and sets `GEMINI_SANDBOX` so no `.env` can change it | [Trusted folders](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/trusted-folders.md) |
 | Forbidden flags | ✅ | `--yolo`/`-y`, `--approval-mode yolo`, `--skip-trust` | [CLI reference](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/cli-reference.md) |
 | Auth variable | ✅ | `GEMINI_API_KEY` | [Configuration](https://github.com/google-gemini/gemini-cli/blob/main/docs/reference/configuration.md) |
 | Telemetry and updates | ✅ | `privacy.usageStatisticsEnabled: false`, `general.enableAutoUpdate: false`; telemetry off by default | [Configuration](https://github.com/google-gemini/gemini-cli/blob/main/docs/reference/configuration.md), [Telemetry](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/telemetry.md) |

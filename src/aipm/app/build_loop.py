@@ -28,6 +28,7 @@ import signal
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 
 from pydantic import JsonValue
@@ -661,7 +662,9 @@ class BuildLoop:
                 update={"status": TaskStatus.IN_PROGRESS, "base_sha": base, "blocked": None}
             )
         )
-        integrity = await asyncio.to_thread(git.integrity_snapshot, wt, self.home)
+        integrity = await asyncio.to_thread(
+            partial(git.integrity_snapshot, extra=git.BUILD_WATCH), wt, self.home
+        )
         fresh = await asyncio.to_thread(self._fresh_home, task_id)
         agent_before = await asyncio.to_thread(prepare_config_home, fresh, self.adapter.config_home)
         last = _Attempted(passed=False)
@@ -707,6 +710,7 @@ class BuildLoop:
             files={},
             ledger={},
             extra_protected=policy.extra_protected,
+            watch=git.BUILD_WATCH,
         )
         return git.change_set(
             wt,
@@ -983,6 +987,7 @@ class BuildLoop:
         """Prepare and gates, then the checks again. `None` when the task was blocked or the
         build interrupted meanwhile."""
         task = self.tasks[task_id]
+        await asyncio.to_thread(self.worktrees.check_parents)  # RT04-11, again before gates
         scanned = changed_hashes(wt, changes)
         ignores = await asyncio.to_thread(base_ignores, wt, base)
         review, unavailable = reviewer(
@@ -1016,6 +1021,8 @@ class BuildLoop:
         )
         if self.interrupted:
             return None
+        # A gate's code may have planted one while the gates ran (security review of RT04-11).
+        await asyncio.to_thread(self.worktrees.check_parents)
         for result in gate_run.results:
             self._journal(
                 JournalEventType.GATE_RESULT,

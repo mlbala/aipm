@@ -26,10 +26,12 @@ def command(
         from aipm.app import plan as use_case
         from aipm.cli.review import ReviewPrompter
 
-        prompter = ReviewPrompter() if is_interactive(ctx) else None
+        offer_trust = not opts.in_auto
+        prompter = ReviewPrompter(offer_trust=offer_trust) if is_interactive(ctx) else None
         options = use_case.PlanOptions(
-            max_tasks=max_tasks, accept_risk=accept_risk, accept_stale=accept_stale, yes=opts.yes
-        )
+            max_tasks=max_tasks, accept_risk=accept_risk, accept_stale=accept_stale, yes=opts.yes,
+            trust=offer_trust,
+        )  # fmt: skip
         result = use_case.run(opts.project, options=options, prompter=prompter)
         warn(result.warnings)
         if not opts.json:

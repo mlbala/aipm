@@ -41,6 +41,7 @@ from aipm.security.command_policy import (
     compile_prepare,
     program_name,
 )
+from aipm.security.json_limits import TooDeep, loads_bounded
 from aipm.security.paths import is_within
 from aipm.security.sanitize import sanitize_text
 
@@ -185,7 +186,9 @@ def _agent_file(path: Path) -> dict[str, Any] | None:
     if len(data) > MAX_AGENT_CONFIG_BYTES:
         return {**entry, "error": "too large to show"}
     try:
-        parsed: object = json.loads(data)
+        parsed: object = loads_bounded(data)
+    except TooDeep:  # a cloned repository's file nested too deep (red-team v0.4, RT04-10, RT04-21)
+        return {**entry, "error": "nested too deeply to show"}
     except ValueError:
         return {**entry, "error": "not JSON"}
     if not isinstance(parsed, dict):

@@ -13,7 +13,6 @@
   subclass supplies its argv, its environment and how to read its output.
 """
 
-import json
 import os
 import re
 import shutil
@@ -47,6 +46,7 @@ from aipm.execution.process import (
 from aipm.execution.sandbox import launcher_for, which_outside
 from aipm.execution.worktree import WORKTREES_DIR, cache_root
 from aipm.security.command_policy import check_forbidden_flags
+from aipm.security.json_limits import loads_bounded
 from aipm.security.sanitize import sanitize_text
 from aipm.security.untrusted import (
     NonceFactory,
@@ -192,8 +192,8 @@ def json_lines(stdout: bytes) -> Iterator[dict[str, object]]:
         if len(raw) > MAX_OUTPUT_LINE or not raw.lstrip().startswith(b"{"):
             continue
         try:
-            data: object = json.loads(raw)
-        except ValueError:
+            data: object = loads_bounded(raw)
+        except ValueError:  # a line nested too deep is broken too (RT04-1, RT04-21)
             continue
         if isinstance(data, dict):
             yield cast("dict[str, object]", data)

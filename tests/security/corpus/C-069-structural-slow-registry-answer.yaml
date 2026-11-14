@@ -1,0 +1,13 @@
+id: C-069
+vector: structural
+input:
+  surface: registry-metadata
+  # Each socket read of a registry lookup had a 15 s timeout, but nothing bounded the whole
+  # answer: a body that arrives a few bytes at a time held the deps gate for as long as the
+  # registry liked, up to the 32 MB read limit (RT04-14).
+  text: |
+    HTTP/1.1 200 OK, body sent at 1 byte every 10 s
+expected:
+  outcome: >-
+    The lookup fails closed with "took too long to answer" once 60 s have passed in total; the
+    deps gate reports it as an error.

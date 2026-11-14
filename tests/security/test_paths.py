@@ -235,6 +235,7 @@ def test_protected_paths_match_security_section_9_2() -> None:
         "AGENTS.md", "CLAUDE.md", "GEMINI.md", ".claude/**",
         ".gemini/**", ".codex/**", ".agents/**", ".mcp.json",
         ".gitattributes", ".gitmodules", ".aipmignore", "**/.env*",
+        "AGENTS.override.md", "CLAUDE.local.md",
     }  # fmt: skip
 
 

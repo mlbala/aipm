@@ -20,8 +20,8 @@ reports as an error: a lookup that fails never passes a package.
   requests without a User-Agent, so a fixed one naming aipm (never the user) is sent (v0.4).
 """
 
-import json
 import re
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -31,9 +31,14 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 from aipm.domain.models import Ecosystem
+from aipm.security.json_limits import loads_bounded
 from aipm.security.supply_chain import check_package_name, normalize_name
 
 TIMEOUT_S = 15.0
+DEADLINE_S = 60.0
+"""The most one lookup may take in total, connecting, headers and body together: `TIMEOUT_S`
+bounds each socket operation only, so an answer that trickles in (through a proxy named in
+`HTTPS_PROXY`, for instance) would otherwise hold the deps gate (red-team v0.4, RT04-14)."""
 MAX_RESPONSE_BYTES = 32 * 1_048_576
 PYPI_SIMPLE = "https://pypi.org/simple/{name}/"
 NPM_DOC = "https://registry.npmjs.org/{name}"
@@ -85,6 +90,33 @@ def _fetch(url: str, headers: Mapping[str, str]) -> Response:
     """GET over HTTPS with no redirects; 404 is an answer, anything else but 200 an error."""
     if not url.startswith("https://"):
         raise RegistryError("registry lookups use HTTPS only")
+    return _bounded(_get, url, headers)
+
+
+def _bounded(get: Fetch, url: str, headers: Mapping[str, str]) -> Response:
+    """`get(url, headers)` in a daemon thread, given at most `DEADLINE_S` in total. A lookup
+    still running then is abandoned (its socket operations time out on their own, and a daemon
+    thread never holds the process open) and the lookup fails closed."""
+    box: list[Response | BaseException] = []
+
+    def work() -> None:
+        try:
+            box.append(get(url, headers))
+        except BaseException as exc:  # handed to the caller below
+            box.append(exc)
+
+    worker = threading.Thread(target=work, name="aipm-registry-lookup", daemon=True)
+    worker.start()
+    worker.join(DEADLINE_S)
+    if worker.is_alive() or not box:
+        raise RegistryError(f"the registry took too long to answer (over {DEADLINE_S:.0f} s)")
+    result = box[0]
+    if isinstance(result, BaseException):
+        raise result
+    return result
+
+
+def _get(url: str, headers: Mapping[str, str]) -> Response:
     opener = urllib.request.build_opener(_NoRedirect())
     request = urllib.request.Request(url, headers=dict(headers), method="GET")  # noqa: S310
     try:
@@ -170,8 +202,8 @@ def _crates_first(doc: dict[str, Any]) -> datetime | None:
 
 def _json_object(response: Response) -> dict[str, Any]:
     try:
-        doc = json.loads(response.body)
-    except (ValueError, RecursionError):
+        doc = loads_bounded(response.body)
+    except ValueError:  # nested too deep too (RT04-21)
         raise RegistryError("the registry's answer is not JSON") from None
     if not isinstance(doc, dict):
         raise RegistryError("the registry's answer is not a JSON object")

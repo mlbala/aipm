@@ -6,7 +6,6 @@ path it generated in the attempt's private temp dir, deleted just before the gat
 before it is parsed, and every report is capped.
 """
 
-import json
 import os
 import re
 import stat
@@ -15,6 +14,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
+
+from aipm.security.json_limits import loads_bounded
 
 MAX_REPORT_BYTES = 16 * 1_048_576
 MAX_CASES = 50_000
@@ -132,8 +133,8 @@ _JEST_STATUS = {
 def parse_jest(data: bytes) -> TestReport:
     """A jest or vitest JSON report (`--json --outputFile`, `--reporter=json`)."""
     try:
-        doc = json.loads(data)
-    except (ValueError, RecursionError):
+        doc = loads_bounded(data)
+    except ValueError:  # nested too deep too (RT04-21)
         raise ReportError("the test report is not valid JSON") from None
     data_doc = cast("dict[str, Any]", doc) if isinstance(doc, dict) else {}
     suites = data_doc.get("testResults")

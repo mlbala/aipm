@@ -1,0 +1,24 @@
+id: C-066
+vector: path
+input:
+  surface: worktrees-parent
+  # Go searches the working directory and every parent for go.work, Cargo reads
+  # .cargo/config(.toml) in every parent, and rustup finds a toolchain file the same way. The
+  # task worktrees live under aipm's cache, so without srt a process could plant one beside them
+  # for every later task; the user's own Cargo, rustup and Go settings were neither denied nor
+  # watched, and nothing kept Go from downloading another toolchain (RT04-11).
+  text: |
+    <worktrees>/<repo_id>/../.cargo/config.toml: [alias] nextest = "run"
+    <worktrees>/go.work: use ../T-002
+    ~/.cargo/config.toml: [build] rustc-wrapper = "/tmp/w"
+    ~/.cargo/config: [target.x86_64-apple-darwin] runner = "/tmp/w"
+    ~/.rustup/settings.toml: [overrides] "<worktree>" = "/tmp/toolchain"
+    ~/Library/Application Support/go/env: GOFLAGS=-toolexec=/tmp/w
+    ~/.config/go/env: GOFLAGS=-toolexec=/tmp/w
+expected:
+  outcome: >-
+    A go.work, .cargo or rust-toolchain entry beside the worktrees stops the build before an
+    agent or gate runs; the user's toolchain settings are denied to every sandboxed process and
+    a change during a build is severe; Go runs with GOTOOLCHAIN=local and, without a go.work at
+    the worktree root, GOWORK=off.
+  exit_code: 6

@@ -9,10 +9,12 @@ The loop is the phase engine's `next_command`, one step at a time:
   approval, as `aipm approve <artifact> --yes` does.
 - `aipm trust`, a blocked plan (`aipm status`) and an uninitialized repository stop the loop.
 
-`auto` never records trust (SECURITY.md §6 rule 4): it checks the execution surface before its
-first step and exits 6 with `aipm trust` when it is not trusted, and the phase engine stops it
-again at the trust gate when G2 changed the surface. Any step that fails stops the loop with that
-step's exit code (4, 5, 6 and 8 among them) and the exact command to run next.
+`auto` never records trust (SECURITY.md §6 rule 4), not even when a person answers G3 in a
+terminal: its steps run with `in_auto`, so G3 records the approval only (RT04-8). It checks the
+execution surface before its first step and exits 6 with `aipm trust` when it is not trusted,
+and the phase engine stops it again at the trust gate when G2 changed the surface. Any step
+that fails stops the loop with that step's exit code (4, 5, 6 and 8 among them) and the exact
+command to run next.
 """
 
 from collections.abc import Callable
@@ -205,6 +207,7 @@ def run(
     derive = report or _phase
     result = AutoResult()
     last: tuple[str, str | None, tuple[str, ...]] | None = None
+    seen: set[tuple[str, str | None, tuple[str, ...]]] = set()
     for _ in range(MAX_STEPS):
         current = derive(project)
         result.phase = current.phase.value
@@ -215,7 +218,16 @@ def run(
                 "not approved, or a step that needs you)",
                 hint=f"Run `{current.next_command}` yourself to see what it needs.",
             )
+        if state in seen:
+            # Steps that undo each other would otherwise run, and spend, until MAX_STEPS
+            # (red-team v0.4, RT04-9).
+            raise HumanInputRequired(
+                f"aipm auto stopped: the plan came back to `{current.next_command}` without "
+                "getting further",
+                hint=f"Run `{current.next_command}` yourself to see what it needs.",
+            )
         last = state
+        seen.add(state)
         step = next_step(current)
         if step.kind is StepKind.DONE:
             return result

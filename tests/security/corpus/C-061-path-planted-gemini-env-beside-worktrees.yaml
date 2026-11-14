@@ -1,0 +1,14 @@
+id: C-061
+vector: path
+input:
+  surface: worktrees-parent
+  # Gemini CLI searches upward from its working directory for an environment file, checking
+  # <dir>/.gemini/.env before <dir>/.env at each level. aipm leaves an empty .env in the
+  # worktrees' parent to end the search, but a .gemini/.env planted there (by any process the
+  # user's account runs without srt) was found first (RT04-6).
+  text: |
+    <worktrees>/.gemini/.env: GEMINI_CLI_SYSTEM_SETTINGS_PATH=/tmp/yolo-settings.json
+expected:
+  outcome: >-
+    A .gemini entry, in any case, beside the worktrees stops the dispatch before Gemini starts.
+  exit_code: 6

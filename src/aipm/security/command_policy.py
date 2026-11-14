@@ -197,6 +197,34 @@ _FORBIDDEN_VALUES: dict[ToolName, tuple[tuple[str, frozenset[str]], ...]] = {
 }
 _CODEX_APPROVAL = re.compile(r"approval_policy\s*=\s*(.*)", re.IGNORECASE)
 """A Codex `-c approval_policy=<v>` override: only `never` keeps every command in the sandbox."""
+_CODEX_CONFIG: dict[str, str] = {
+    "approval_policy": "never",
+    "analytics.enabled": "false",
+    "check_for_update_on_startup": "false",
+}
+"""The only `-c`/`--config` overrides a Codex argv may hold, with their one allowed value
+(red-team v0.4, RT04-5). Any other key could widen the sandbox (`sandbox_workspace_write.*`),
+pick a profile with its own policy (`profiles.*`), pass the environment through
+(`shell_environment_policy.*`) or start an MCP server outside the sandbox (`mcp_servers.*`)."""
+_CODEX_OPTIONS = ("--add-dir", "--search", "--profile")
+"""Codex options that widen what the agent may write or reach, or load a profile."""
+_CODEX_FLAGS = frozenset({"--json", "--ephemeral", "--ignore-rules", "-"})
+_CODEX_VALUED = frozenset({"--sandbox", "-s", "--ask-for-approval", "-a", "--config", "-c"})
+"""The only options a Codex argv may hold after `exec` (their values are checked above): the
+argv aipm builds is fixed, so anything else is refused (security review of part 1)."""
+_GEMINI_FLAGS = frozenset({"--sandbox"})
+_GEMINI_VALUED: dict[str, str | None] = {
+    "--approval-mode": "auto_edit",
+    "--output-format": "json",
+    "--extensions": "none",
+    "--allowed-tools": None,
+    "--prompt": None,
+}
+"""The only options a Gemini argv may hold, with their one allowed value (`None`: any value,
+`--allowed-tools` must be one shell rule)."""
+_GEMINI_RULE = re.compile(r"run_shell_command\([^()]+\)")
+_CAMEL = re.compile(r"[A-Z]")
+_SHORT_GROUP = re.compile(r"-([A-Za-z]{2,})(=.*)?")
 
 
 def _deny(message: str) -> PolicyViolation:
@@ -557,6 +585,119 @@ def compile_prepare(prepare: PrepareDef, *, policy: CommandPolicy) -> Argv:
     return check_argv(prepare.run, policy, stage="prepare")
 
 
+def _option_values(argv: Argv, long: str, short: str) -> list[str | None]:
+    """Every value given to an option, in each spelling clap accepts: `--long v`, `--long=v`,
+    `-s v` and `-sv`; `None` for one that ends the argv without a value."""
+    found: list[str | None] = []
+    for index, arg in enumerate(argv):
+        if arg in (long, short):
+            found.append(argv[index + 1] if index + 1 < len(argv) else None)
+        elif arg.startswith(f"{long}="):
+            found.append(arg.split("=", 1)[1])
+        elif arg.startswith(short) and not arg.startswith("--"):
+            found.append(arg[len(short) :])
+    return found
+
+
+def _plain(value: str) -> str:
+    return value.strip().strip("'\"").strip().casefold()
+
+
+def _check_codex_options(argv: Argv) -> None:
+    """Every spelling of `--sandbox`, `--ask-for-approval` and `--config`, and the options that
+    widen Codex's reach (red-team v0.4, RT04-5)."""
+    for value in _option_values(argv, "--sandbox", "-s"):
+        if value is not None and _plain(value) != "workspace-write":
+            raise PolicyViolation(f"codex: sandbox mode {value[:40]!r} is forbidden")
+    for value in _option_values(argv, "--ask-for-approval", "-a"):
+        if value is not None and _plain(value) != "never":
+            raise PolicyViolation(f"codex: approval policy {value[:40]!r} is forbidden")
+    for value in _option_values(argv, "--config", "-c"):
+        if value is None:
+            continue
+        key, _, setting = value.partition("=")
+        key = "".join(ch for ch in key if ch not in " '\"").casefold()
+        if key == "approval_policy" and _plain(setting) != "never":
+            raise PolicyViolation(f"codex: approval policy {setting[:40]!r} is forbidden")
+        if _CODEX_CONFIG.get(key) != _plain(setting):
+            raise PolicyViolation(f"codex: the config override {key[:60]!r} is forbidden")
+    for arg in argv:
+        name = arg.split("=", 1)[0]
+        attached = arg.startswith("-p") and not arg.startswith("--")
+        if name in _CODEX_OPTIONS or attached:
+            raise PolicyViolation(f"codex: option {name[:40]} is forbidden")
+
+
+def _yargs_argv(argv: Argv) -> Argv:
+    """`argv` as yargs reads its option names: `--approvalMode` is `--approval-mode`, `--y` is
+    `-y`, and a short group `-sy` or `-dy=true` is `-s -y` or `-d -y=true` (red-team v0.4,
+    RT04-5, and its security review)."""
+    out: list[str] = []
+    for arg in argv:
+        group = _SHORT_GROUP.fullmatch(arg)
+        if arg.startswith("--"):
+            name, sep, value = arg.partition("=")
+            kebab = _CAMEL.sub(lambda m: "-" + m.group(0).lower(), name[2:])
+            prefix = "-" if len(kebab) == 1 else "--"
+            out.append(f"{prefix}{kebab}{sep}{value}")
+        elif group is not None:
+            letters, tail = group.group(1), group.group(2) or ""
+            out.extend(f"-{ch}" for ch in letters[:-1])
+            out.append(f"-{letters[-1]}{tail}")
+        else:
+            out.append(arg)
+    return tuple(out)
+
+
+def _check_codex_exact(argv: Argv) -> None:
+    """Nothing but `exec` and the options aipm passes: no global option before `exec`, no
+    positional prompt but `-` (security review of part 1)."""
+    if "exec" not in argv:
+        raise PolicyViolation("codex: anything but `codex exec` is forbidden")
+    start = argv.index("exec")
+    for arg in argv[:start]:
+        if arg.startswith("-"):
+            raise PolicyViolation(f"codex: option {arg[:40]!r} before exec is forbidden")
+    index = start + 1
+    while index < len(argv):
+        arg = argv[index]
+        attached = arg[:2] in ("-s", "-a", "-c") and len(arg) > 2 and not arg.startswith("--")
+        if arg in _CODEX_VALUED:
+            index += 2
+            continue
+        if arg in _CODEX_FLAGS or attached or arg.split("=", 1)[0] in _CODEX_VALUED:
+            index += 1
+            continue
+        raise PolicyViolation(f"codex: {arg[:40]!r} is forbidden: aipm passes only its own options")
+
+
+def _check_gemini_exact(argv: Argv) -> None:
+    """Nothing but the options aipm passes, each with its one value (security review of part
+    1). The launcher comes first: the program, then any absolute path (its script)."""
+    index = 1
+    while index < len(argv) and argv[index].startswith("/"):
+        index += 1
+    while index < len(argv):
+        name, sep, value = argv[index].partition("=")
+        index += 1
+        if name in _GEMINI_FLAGS and not sep:
+            continue
+        if name not in _GEMINI_VALUED:
+            raise PolicyViolation(
+                f"gemini: {argv[index - 1][:40]!r} is forbidden: aipm passes only its own options"
+            )
+        if not sep:
+            value = argv[index] if index < len(argv) else ""
+            index += 1
+        wanted = _GEMINI_VALUED[name]
+        if name == "--allowed-tools":
+            allowed = _GEMINI_RULE.fullmatch(value) is not None
+        else:
+            allowed = wanted is None or value == wanted
+        if not allowed:
+            raise PolicyViolation(f"gemini: {name} {value[:40]!r} is forbidden")
+
+
 def _check_codex(argv: Argv) -> None:
     """No full access, and no approval policy but `never`: an approval would let a command run
     outside the sandbox, and nobody is there to answer one."""
@@ -573,13 +714,18 @@ def _check_codex(argv: Argv) -> None:
             value = match.group(1) if match else None
         if value is not None and value.strip(" '\"").casefold() != "never":
             raise PolicyViolation(f"codex: approval policy {value[:40]!r} is forbidden")
+    _check_codex_options(argv)
+    _check_codex_exact(argv)
 
 
 def check_forbidden_flags(tool: ToolName, argv: Argv, *, allow_auto_mode: bool = False) -> None:
     """Raise `PolicyViolation` if `argv` holds a forbidden flag (ARCHITECTURE §11).
 
     `allow_auto_mode` is `dispatch.tools.claude.allow_auto_mode` from the user-level config.
+    Gemini's argv is read as yargs reads it (camelCase names, short groups).
     """
+    if tool is ToolName.GEMINI:
+        argv = _yargs_argv(argv)
     for arg in argv:
         for flag in _FORBIDDEN_FLAGS[tool]:
             if arg == flag or arg.startswith(f"{flag}="):
@@ -597,3 +743,5 @@ def check_forbidden_flags(tool: ToolName, argv: Argv, *, allow_auto_mode: bool =
             folded = value.casefold()
             if folded in values and not (folded == "auto" and allow_auto_mode):
                 raise PolicyViolation(f"{tool.value}: {option} {value} is forbidden")
+    if tool is ToolName.GEMINI:
+        _check_gemini_exact(argv)

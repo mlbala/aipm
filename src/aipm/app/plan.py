@@ -86,6 +86,9 @@ class PlanOptions:
     accept_risk: bool = False
     accept_stale: bool = False
     yes: bool = False
+    trust: bool = False
+    """Whether an interactive G3 may also record trust. Off unless the caller asks: `aipm plan`
+    alone does, `aipm auto` never (ADR-0028; red-team v0.4, RT04-8)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,8 +335,12 @@ class _Plan:
             if review.surface_hash is None:
                 raise PolicyViolation(trust_hint)
             record_approval(self.store, ApprovalGate.G3, name, review.sha256)
-            if review.trusted:
-                return "approved", True
+            if review.trusted or not self.options.trust:
+                if not review.trusted:
+                    self.notes.append(
+                        f"G3 recorded without trust (aipm auto never records it); {trust_hint}"
+                    )
+                return "approved", review.trusted
             report = trust_use_case.confirm(self.root, review.surface_hash)
             return "approved", report.trusted
         self.notes.append("review .pm/worksheet.md, then run `aipm approve plan`")

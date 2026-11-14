@@ -52,6 +52,7 @@ from aipm.domain.models import (
 from aipm.domain.models.artifacts import is_adr_file_name
 from aipm.observability.redaction import process_redactor
 from aipm.security.agent_text import agent_text_problems
+from aipm.security.json_limits import loads_bounded
 from aipm.security.redact import Redactor
 from aipm.security.sanitize import sanitize_text
 from aipm.state import frontmatter
@@ -710,8 +711,8 @@ class FileStateStore:
         if data is None or not self._ours(name, data):
             return None
         try:
-            entry: object = json.loads(data)
-        except ValueError:
+            entry: object = loads_bounded(data)
+        except ValueError:  # nested too deep is unreadable too (RT04-10, RT04-21)
             return None
         if not isinstance(entry, dict):
             return None

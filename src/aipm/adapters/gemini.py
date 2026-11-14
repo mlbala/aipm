@@ -42,6 +42,7 @@ from aipm.context import generator
 from aipm.domain.errors import PolicyViolation
 from aipm.domain.models import GeneratedFile, ProjectContext, ToolName, Workspace
 from aipm.execution.process import ProcessResult
+from aipm.security.json_limits import loads_bounded
 
 API_DOMAINS: tuple[str, ...] = ("generativelanguage.googleapis.com",)
 """The `api-only` network profile; not documented by Google, so a wrong guess fails closed."""
@@ -95,7 +96,17 @@ def env_guard(directory: Path) -> None:
     """An empty, read-only `.env` in `directory`, so Gemini's search for one, which walks up
     from its working directory, ends there and never loads the user's `~/.env` or
     `~/.gemini/.env` (security review of step 08). An existing one must be an empty regular
-    file, or dispatch is refused (exit 6)."""
+    file, or dispatch is refused (exit 6).
+
+    At each level Gemini looks for `.gemini/.env` before `.env`, so a `.gemini` entry in
+    `directory`, in any case, is refused too (exit 6; red-team v0.4, RT04-6)."""
+    planted = sorted(e.name for e in os.scandir(directory) if e.name.casefold() == ".gemini")
+    if planted:
+        raise PolicyViolation(
+            f"{directory / planted[0]} would give Gemini CLI an environment file before aipm's "
+            "empty .env",
+            hint="Remove it; nothing aipm writes there is named .gemini.",
+        )
     guard = directory / ".env"
     try:
         fd = os.open(guard, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
@@ -190,8 +201,8 @@ def _result_doc(stdout: bytes) -> dict[str, object] | None:
     text = stdout.strip()
     if text.startswith(b"{") and len(text) <= MAX_OUTPUT_LINE:
         try:
-            data: object = json.loads(text)
-        except ValueError:
+            data: object = loads_bounded(text)
+        except ValueError:  # nested too deep is broken too (RT04-1, RT04-21)
             data = None
         if isinstance(data, dict):
             return data  # pyright: ignore[reportUnknownVariableType]

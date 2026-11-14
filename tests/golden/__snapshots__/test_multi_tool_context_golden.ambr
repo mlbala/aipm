@@ -41,7 +41,7 @@
   Use this protocol for every aipm task, together with the task prompt (`aipm prompt T-ID` prints it).
   
   1. Read the task prompt: its acceptance criteria, the files it owns and the files it may read.
-  2. Change only the files the task owns. You MUST NOT modify a protected path: `.pm/**`, `.git/**`, `.github/**`, `.gitlab-ci.yml`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.claude/**`, `.gemini/**`, `.codex/**`, `.agents/**`, `.mcp.json`, `.gitattributes`, `.gitmodules`, `.aipmignore`, `**/.env*`.
+  2. Change only the files the task owns. You MUST NOT modify a protected path: `.pm/**`, `.git/**`, `.github/**`, `.gitlab-ci.yml`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.claude/**`, `.gemini/**`, `.codex/**`, `.agents/**`, `.mcp.json`, `.gitattributes`, `.gitmodules`, `.aipmignore`, `**/.env*`, `AGENTS.override.md`, `CLAUDE.local.md`.
   3. MUST NOT add a dependency that your task does not declare in `deps_add`.
   4. MUST NOT use the network, except your own coding tool's API.
   5. Write tests that carry each acceptance criterion's ID, then make them pass.

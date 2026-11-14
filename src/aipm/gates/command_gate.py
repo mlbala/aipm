@@ -65,6 +65,16 @@ def resolve_program(name: str, repo: Path) -> str:
     return name if found is None else found
 
 
+def toolchain_env(root: Path) -> dict[str, str]:
+    """Go runs the toolchain installed here and never downloads another (`GOTOOLCHAIN=local`),
+    and takes no `go.work` from a directory above the workspace (`GOWORK=off` unless the
+    workspace root has its own, which Go finds first). Red-team v0.4, RT04-11."""
+    env = {"GOTOOLCHAIN": "local"}
+    if not (root / "go.work").exists():
+        env["GOWORK"] = "off"
+    return env
+
+
 def gate_env(ctx: GateContext) -> dict[str, str]:
     """The base allowlist (SECURITY.md §8), with the temp dir and no in-tree bytecode."""
     temp = ctx.ws.temp_dir
@@ -73,6 +83,7 @@ def gate_env(ctx: GateContext) -> dict[str, str]:
             "TMPDIR": str(temp),
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONPYCACHEPREFIX": str(temp / "pycache"),
+            **toolchain_env(ctx.root),
         }
     )
 
@@ -98,6 +109,11 @@ def ecosystems_for(argv: Sequence[str]) -> tuple[Ecosystem, ...]:
     return _ECOSYSTEMS.get(program_name(argv[0]), (Ecosystem.PYPI, Ecosystem.NPM))
 
 
+def _go_mod_download(argv: Sequence[str]) -> bool:
+    """`go mod download`, with nothing between `go` and `mod download`."""
+    return program_name(argv[0]) == "go" and list(argv[1:3]) == ["mod", "download"]
+
+
 def _network(profile: NetworkProfile, argv: Sequence[str], kind: ProcessKind) -> NetworkPolicy:
     if profile is NetworkProfile.API_ONLY:
         raise PolicyViolation(
@@ -105,9 +121,11 @@ def _network(profile: NetworkProfile, argv: Sequence[str], kind: ProcessKind) ->
             hint="Use none (the default), registries or open for gates and the prepare step.",
         )
     ecosystems = ecosystems_for(argv)
-    if kind is not ProcessKind.PREPARE:
+    if kind is not ProcessKind.PREPARE or not _go_mod_download(argv):
         # The Go proxy fetches any module path from its origin, and its storage host takes
         # anyone's bucket: test code could carry data out through either (step 08 review).
+        # Only `go mod download`, which runs no repository code, gets them (ADR-0029); a test
+        # run in the prepare step borrowed them by its program name (red-team v0.4, RT04-12).
         ecosystems = tuple(e for e in ecosystems if e is not Ecosystem.GO)
     return parse_network(profile.value, ecosystems=ecosystems)
 
@@ -238,7 +256,7 @@ def run_prepare(ctx: GateContext) -> CommandOutcome | None:
     profile = sandbox_for(ctx, ProcessKind.PREPARE, min_network(prepare.network, ctx), argv)
     started = time.monotonic()
     env = build_env(
-        extra={"TMPDIR": str(ctx.ws.temp_dir)},
+        extra={"TMPDIR": str(ctx.ws.temp_dir), **toolchain_env(ctx.root)},
         base_allowlist=(*BASE_ENV_ALLOWLIST, *PREPARE_ENV),
     )
     result = run_safe(

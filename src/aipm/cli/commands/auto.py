@@ -55,7 +55,7 @@ class _Steps:
     @contextmanager
     def _as_step(self) -> Generator[None]:
         """The step sees `--json` off; with `--json`, its output goes to stderr."""
-        self.ctx.obj = replace(self.opts, json=False)
+        self.ctx.obj = replace(self.opts, json=False, in_auto=True)
         try:
             if self.opts.json:
                 with redirect_stdout(sys.stderr):

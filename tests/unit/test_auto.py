@@ -190,7 +190,8 @@ def test_a_step_that_changes_nothing_stops_the_loop() -> None:
 
 
 def test_the_loop_has_a_step_limit() -> None:
-    commands: list[str | None] = ["aipm discover", "aipm plan"] * MAX_STEPS
+    # Distinct states: a run that comes back to a state stops earlier (red-team v0.4, RT04-9).
+    commands: list[str | None] = [f"aipm prompt T-{n:03d}" for n in range(1, MAX_STEPS + 2)]
     engine = Engine(commands)
     with pytest.raises(AipmError, match=f"after {MAX_STEPS} steps"):
         go(engine, Steps(engine), yes=True)

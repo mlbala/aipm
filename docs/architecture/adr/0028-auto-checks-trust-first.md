@@ -17,9 +17,9 @@ SECURITY.md wins when the two documents differ (AGENTS.md).
 
 ## Decision
 
-Option 2. `aipm auto` first checks that the repository is initialized and that its current execution surface is trusted, through the same read-only `require_trusted` the other commands use, and exits 6 with `aipm trust --show` and `aipm trust` as the next commands otherwise. It never writes the trust store. When G2 copies the stack template's gates into `.pm/config.yaml`, the surface changes, the phase engine stops at `aipm trust` after G3, and `auto` exits 6 again.
+Option 2. `aipm auto` first checks that the repository is initialized and that its current execution surface is trusted, through the same read-only `require_trusted` the other commands use, and exits 6 with `aipm trust --show` and `aipm trust` as the next commands otherwise. It never writes the trust store, also when the user answers G3 interactively: inside `auto`, the G3 question asks about the plan only and a yes records the approval only (red-team v0.4, RT04-8; `aipm plan` and `aipm approve plan` run alone still offer trust). When G2 copies the stack template's gates into `.pm/config.yaml`, the surface changes, the phase engine stops at `aipm trust` after G3, and `auto` exits 6 again.
 
-The loop then runs only what its table names: `discover`, `design` (`--regenerate`), `plan`, `approve prd|design|plan` (G1-G3: a pause without `--yes`, exit 4 when nobody can answer), and `build` for ready tasks. `aipm trust`, a blocked plan and an unknown next command stop it. A step that fails stops it with that step's exit code and the command to run next; a step that changes nothing stops it with exit 4; so do 50 steps.
+The loop then runs only what its table names: `discover`, `design` (`--regenerate`), `plan`, `approve prd|design|plan` (G1-G3: a pause without `--yes`, exit 4 when nobody can answer), and `build` for ready tasks. `aipm trust`, a blocked plan and an unknown next command stop it. A step that fails stops it with that step's exit code and the command to run next; a step that changes nothing, or a state the run has already been in (red-team v0.4, RT04-9), stops it with exit 4; so do 50 steps.
 
 ## Consequences
 

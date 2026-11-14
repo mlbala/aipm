@@ -1,0 +1,14 @@
+id: C-063
+vector: config-redirection
+input:
+  surface: repo-config
+  # In an interactive `aipm auto`, G2 copies the stack's gates (a new surface), and the G3
+  # question in the plan step asked "Approve the plan (G3) and trust these exact commands?".
+  # A yes recorded trust from inside auto, which never records trust (ADR-0028, RT04-8).
+  text: |
+    aipm auto (a terminal): G2 y, G3 "approve and trust these exact commands?" y
+expected:
+  outcome: >-
+    Inside auto, G3 records the approval only and asks nothing about trust; auto stops at the
+    trust gate and names `aipm trust`. `aipm plan` and `aipm approve plan` alone still offer it.
+  exit_code: 6

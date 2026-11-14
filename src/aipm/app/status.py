@@ -5,7 +5,6 @@ it appends an `ack` event for an ID this machine recorded in `.pm/events.jsonl` 
 itself an acknowledgement and is not acknowledged yet (§6.1).
 """
 
-import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +18,7 @@ from aipm.domain.errors import UsageError
 from aipm.domain.ids import is_valid_id
 from aipm.domain.models import SecurityEventKind, Task
 from aipm.domain.phase import derive_phase
+from aipm.execution.journal import build_runs_newest_first
 from aipm.reporting.status import (
     SpendRecord,
     StatusView,
@@ -26,6 +26,7 @@ from aipm.reporting.status import (
     render_status,
     render_task,
 )
+from aipm.security.json_limits import loads_bounded
 from aipm.state.done_record import claimed
 from aipm.state.store import FileStateStore
 
@@ -76,14 +77,15 @@ MAX_COST_BYTES = 65_536
 
 
 def latest_spend(store: FileStateStore) -> SpendRecord | None:
-    """The newest build's `cost.json`, read only if aipm wrote it (the write ledger)."""
-    for run_id in reversed(store.run_ids()):
+    """The newest build's `cost.json`, read only if aipm wrote it (the write ledger). Builds
+    are ordered by their `run_started` time, as resume orders them (RT04-20)."""
+    for run_id, _ in build_runs_newest_first(store):
         text = store.read_run_text(run_id, ["cost.json"], limit=MAX_COST_BYTES)
         if text is None:
             continue
         try:
-            raw: object = json.loads(text)
-        except ValueError:
+            raw: object = loads_bounded(text)
+        except ValueError:  # nested too deep is unreadable too (RT04-10, RT04-21)
             continue
         data = cast("dict[str, object]", raw) if isinstance(raw, dict) else {}
         usd, tokens = data.get("spent_usd"), data.get("tokens_used")

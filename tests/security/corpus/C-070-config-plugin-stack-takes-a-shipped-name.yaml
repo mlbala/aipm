@@ -1,0 +1,12 @@
+id: C-070
+vector: config-redirection
+input:
+  surface: plugin
+  # An aipm.stacks plugin named like a shipped stack was ignored without a word (the shipped
+  # template won), and `aipm doctor` listed it as loaded; so was one whose name no stack can
+  # have, or whose object is not YAML text (RT04-15).
+  text: python-uv python-pip node-npm node-pnpm go rust-cargo
+expected:
+  outcome: >-
+    The plugin is refused before it is imported, with a warning that `aipm doctor` shows; the
+    shipped template is the one used.

@@ -21,8 +21,8 @@ jobs:
     name: Scorecard
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      actions: read
+      contents: read # check out the repository
+      actions: read # read the workflow runs that the CI and Dangerous-Workflow checks inspect
       security-events: write # upload the SARIF to code scanning
       id-token: write # publish the results for the badge
     steps:

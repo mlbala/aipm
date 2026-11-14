@@ -1,0 +1,14 @@
+id: C-071
+vector: structural
+input:
+  surface: release-workflow
+  # The release published dist/* but attested only the wheel, the sdist and the SBOM, so a
+  # SHA256SUMS swapped on the release page carried no provenance, although the README said
+  # every file had an attestation (RT04-16).
+  text: |
+    gh release create "${TAG}" dist/*
+    subject-path: dist/*.whl dist/*.tar.gz dist/aipm.cdx.json
+expected:
+  outcome: >-
+    The attestation step's subjects are the published set (dist/*), so SHA256SUMS has its own
+    build-provenance attestation; test_release_supply_chain.py pins the two sets as equal.

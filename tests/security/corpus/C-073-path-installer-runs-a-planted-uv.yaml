@@ -1,0 +1,15 @@
+id: C-073
+vector: path
+input:
+  surface: install.sh
+  # install.sh ran the first uv on PATH without asking, so a uv planted in a cloned
+  # repository ran when the user installed aipm from inside it with `.` or a relative entry in
+  # PATH, or with the repository's virtualenv active (RT04-18).
+  text: |
+    PATH=.:$PATH sh install.sh
+    VIRTUAL_ENV=$PWD/.venv PATH=$PWD/.venv/bin:$PATH sh install.sh
+expected:
+  outcome: >-
+    install.sh refuses a uv from a relative PATH entry or from inside the active virtualenv,
+    names it and exits 2; the planted uv never runs.
+  exit_code: 2

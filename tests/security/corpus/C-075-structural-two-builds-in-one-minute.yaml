@@ -1,0 +1,14 @@
+id: C-075
+vector: structural
+input:
+  surface: run-journal
+  # `aipm status` took the newest build by run ID, which names only the minute and a random
+  # suffix, so of two builds started in one minute it showed whichever sorted last: a build
+  # that spent $4.00 showed $0.00 (RT04-20).
+  text: |
+    r-20261113-1200-ffff  (older, spent $0.30)
+    r-20261113-1200-0000  (newer, spent $0.70)
+expected:
+  outcome: >-
+    Builds are ordered by their run_started time, as resume orders them; status shows the
+    newest build's spend.

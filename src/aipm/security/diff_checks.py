@@ -40,6 +40,7 @@ from aipm.domain.models import (
     FileChange,
     Task,
 )
+from aipm.security.json_limits import loads_bounded
 from aipm.security.paths import is_protected, protected_patterns
 
 
@@ -261,8 +262,8 @@ def _json(text: str | None) -> dict[str, Any] | None:
     if text is None:
         return {}
     try:
-        value = json.loads(text)
-    except (ValueError, RecursionError):
+        value = loads_bounded(text)
+    except ValueError:  # nested too deep too (RT04-21)
         return None
     return cast("dict[str, Any]", value) if isinstance(value, dict) else None
 
@@ -771,9 +772,12 @@ def new_dependencies(changes: ChangeSet) -> list[tuple[str, Ecosystem, str]]:
     for change in changes.files:
         if is_lockfile(change.path) or not is_manifest(change.path):
             continue
-        before = manifest_deps(change.path, change.before)
+        # An unreadable base counts as empty, as for lockfiles and sources: it must not hide a
+        # new dependency (red-team v0.4, review of RT04-21). An unreadable result is a
+        # violation of its own (`_new_sources`).
+        before = manifest_deps(change.path, change.before) or Deps(frozenset())
         after = manifest_deps(change.path, change.after)
-        if before is None or after is None:
+        if after is None:
             continue
         found += [(change.path, eco, n) for eco, n in sorted(after.names - before.names)]
     return found
