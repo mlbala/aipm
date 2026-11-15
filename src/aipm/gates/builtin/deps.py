@@ -85,6 +85,8 @@ class _Checked:
     """Why each lookup that got no answer at all failed (`RegistryUnavailable`)."""
     flagged: set[str] = field(default_factory=set[str])
     """The casefolded names that got a finding, an error or no answer."""
+    began: float = 0.0
+    """When the lookups started: every lookup of the attempt shares `DEPS_BUDGET_S`."""
 
 
 def check_new(ctx: GateContext, now: datetime) -> tuple[list[GateFinding], list[str]]:
@@ -122,7 +124,7 @@ def _check(ctx: GateContext, now: datetime, *, only: Ecosystem | None) -> _Check
         checked.errors.append((packages[0][0], f"{len(packages)} new packages, more than the "
                                f"{MAX_LOOKUPS} aipm looks up"))  # fmt: skip
         packages = packages[:MAX_LOOKUPS]
-    began = _clock()
+    checked.began = began = _clock()
     for index, (path, eco, name, direct) in enumerate(packages):
         if _clock() - began > DEPS_BUDGET_S:
             left = len(packages) - index
@@ -176,8 +178,18 @@ def _check_versions(ctx: GateContext, checked: _Checked) -> None:
     origin, and the version string can carry data as well as the path can (security review of
     the v0.4 decisions). Modules whose name check already failed are not asked again."""
     pairs = [(p, m, v) for p, m, v in new_go_requirements(ctx.changes)
-             if m.casefold() not in checked.flagged][:MAX_LOOKUPS]  # fmt: skip
-    for path, module, version in pairs:
+             if m.casefold() not in checked.flagged]  # fmt: skip
+    if len(pairs) > MAX_LOOKUPS:  # an error, never a pass (security review)
+        checked.errors.append((pairs[0][0], f"{len(pairs)} new module versions, more than the "
+                               f"{MAX_LOOKUPS} aipm looks up"))  # fmt: skip
+        pairs = pairs[:MAX_LOOKUPS]
+    for index, (path, module, version) in enumerate(pairs):
+        if _clock() - checked.began > DEPS_BUDGET_S:
+            checked.unavailable.append(
+                f"registry lookups took over {DEPS_BUDGET_S:.0f} s; "
+                f"{len(pairs) - index} module version(s) were not checked"
+            )
+            break
         try:
             cached = go_version_cached(module, version, fetch=ctx.fetch)
         except PolicyViolation:

@@ -555,6 +555,8 @@ def run(project: Path | None, options: VerifyOptions) -> VerifyResult:
                 root, cfg, store, options, temp, sandbox.launcher, warnings, packages
             ).run()
     finally:
-        remove_tree(temp)
-        if packages is not None:
-            remove_tree(packages)  # Go leaves its module cache read-only (ADR-0031)
+        try:
+            if packages is not None:
+                remove_tree(packages)  # Go leaves its module cache read-only (ADR-0031)
+        finally:
+            remove_tree(temp)

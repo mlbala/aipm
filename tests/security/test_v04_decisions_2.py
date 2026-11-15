@@ -642,6 +642,40 @@ def test_a_version_that_is_not_one_fails_before_prepare(
     assert [f.rule for f in prepare.findings] == ["invalid-version"]
 
 
+def test_more_new_versions_than_aipm_looks_up_fail_before_prepare(
+    tmp_path: Path, prepared: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-review: the version check stopped at its cap without saying so."""
+    monkeypatch.setattr(deps, "MAX_LOOKUPS", 1)
+    asked, fetch = version_proxy(200)
+    ctx = go_ctx(tmp_path, fetch)
+    before = f"{GO_BEFORE}\nrequire (\n\texample.com/a v1.0.0\n\texample.com/b v1.0.0\n)\n"
+    after = before.replace("v1.0.0", "v1.1.0")
+    change = FileChange(path="go.mod", status=ChangeStatus.MODIFIED, mode="100644",
+                        before=before, after=after)  # fmt: skip
+    run = run_gates(dataclasses.replace(ctx, changes=ChangeSet("a" * 40, files=(change,))))
+    assert prepared == []
+    assert len(asked) == 1
+    prepare = next(r for r in run.results if r.name == "prepare")
+    assert prepare.status is GateStatus.FAIL
+
+
+def test_version_lookups_share_the_lookup_budget(
+    tmp_path: Path, prepared: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = [0.0]
+
+    def tick() -> float:
+        clock[0] += deps.DEPS_BUDGET_S + 1
+        return clock[0]
+
+    monkeypatch.setattr(deps, "_clock", tick)
+    _, fetch = version_proxy(200)
+    run = run_gates(bump_ctx(tmp_path, fetch, "v1.2.0"))
+    assert prepared == []
+    assert run.registry_unavailable is not None and "not checked" in run.registry_unavailable
+
+
 @pytest.mark.parametrize("status", [500, 502, 503, 504, 429, 403, 418])
 def test_a_status_that_is_no_answer_means_the_registry_is_unavailable(status: int) -> None:
     with pytest.raises(RegistryUnavailable):
