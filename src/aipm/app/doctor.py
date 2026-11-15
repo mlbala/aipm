@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import cast
 
 from aipm import __version__
+from aipm.app import trust as trust_use_case
 from aipm.app.workspace import find_repo_root
 from aipm.config.loader import load_config
 from aipm.config.schema import Config
@@ -119,7 +120,7 @@ def _lock(root: Path) -> dict[str, object]:
 def _trust(root: Path, config: Config) -> dict[str, object]:
     try:
         store = default_trust_store(root)
-        digest = hash_surface(store.surface(config, root=root))
+        digest = hash_surface(trust_use_case.repository_surface(store, config, root))
         trusted = store.is_trusted(repo_id(root), digest)
     except AipmError as exc:
         return {"trusted": False, "surface_hash": None, "error": _clean(exc.message, 500)}

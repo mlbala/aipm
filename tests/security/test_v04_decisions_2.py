@@ -4,7 +4,7 @@
 One section per decision; the smaller items of session 2 are in `test_v04_decisions.py`. This
 module uses the integration fixtures (a planned clinic project, the stub agent), which that
 module's own `isolated` fixture would clash with. Every test in a section failed before its
-change.
+change, except those that pin what must stay the same (a hash that must not change).
 """
 
 import dataclasses
@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from aipm.app import trust as trust_use_case
+from aipm.config.schema import Config
 from aipm.domain.errors import PolicyViolation, UsageError
 from aipm.domain.models import (
     BlockedReason,
@@ -54,8 +56,10 @@ from aipm.scanners.registry import (
     first_release,
     go_escape,
 )
+from aipm.security.diff_checks import is_package_config
 from aipm.security.network import NetworkPolicy
 from aipm.state.layout import repo_id
+from aipm.state.trust_store import FileTrustStore, hash_surface
 from tests.conftest import FakeSecrets, run_git
 from tests.integration.build_flow import (
     FIXTURE,
@@ -606,3 +610,190 @@ def test_verify_blocks_the_task_and_exits_8_when_the_proxy_cannot_be_asked(
     assert task.status is TaskStatus.BLOCKED
     assert task.blocked is not None
     assert task.blocked.reason is BlockedReason.REGISTRY_UNAVAILABLE
+
+
+# -------------------------------------------------------------- N-4: toolchain files in the surface
+
+TOOLCHAIN_FILES = [
+    ".cargo/config.toml", ".cargo/config", "rust-toolchain.toml", "rust-toolchain", "go.work",
+    ".npmrc", ".yarnrc.yml", ".yarnrc", "uv.toml", ".python-version", ".tool-versions",
+]  # fmt: skip
+
+
+def surface_of(repo: Path) -> dict[str, object]:
+    store = FileTrustStore(repo.parent / "trust.json", which=lambda _: None)
+    return trust_use_case.repository_surface(store, Config(), repo)
+
+
+def hash_of(repo: Path) -> str:
+    return hash_surface(surface_of(repo))
+
+
+def put(repo: Path, rel: str, text: str) -> None:
+    path = repo / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def commit(repo: Path, *paths: str) -> None:
+    run_git(repo, "add", "-A", "--", *(paths or (".",)))
+    run_git(repo, "commit", "-q", "--allow-empty", "-m", "change")
+
+
+def committed(repo: Path, rel: str, text: str) -> None:
+    put(repo, rel, text)
+    commit(repo)
+
+
+@pytest.mark.parametrize("rel", TOOLCHAIN_FILES)
+def test_each_toolchain_file_is_part_of_the_surface(tmp_repo: Path, rel: str) -> None:
+    """A `git pull` that changes where code or a toolchain comes from asks for trust again."""
+    without = hash_of(tmp_repo)
+    committed(tmp_repo, rel, "first\n")
+    first = hash_of(tmp_repo)
+    committed(tmp_repo, rel, "second\n")
+    second = hash_of(tmp_repo)
+    assert len({without, first, second}) == 3
+    files = surface_of(tmp_repo)["toolchain_files"]
+    assert isinstance(files, dict) and rel in files
+
+
+def test_a_repository_without_toolchain_files_keeps_its_hash(tmp_repo: Path) -> None:
+    """The key joins the surface only when a file exists, so existing repositories without
+    these files need no new trust."""
+    store = FileTrustStore(tmp_repo.parent / "trust.json", which=lambda _: None)
+    assert "toolchain_files" not in surface_of(tmp_repo)
+    assert hash_of(tmp_repo) == store.surface_hash(Config())
+
+
+def test_an_uncommitted_change_is_left_to_the_post_change_checks(tmp_repo: Path) -> None:
+    """In manual mode the agent edits the working tree: its change to `.npmrc` must be a
+    dependency violation in `verify`, not a question to trust the surface again."""
+    committed(tmp_repo, ".npmrc", "registry=https://registry.npmjs.org/\n")
+    before = hash_of(tmp_repo)
+    put(tmp_repo, ".npmrc", "registry=https://evil.example/\n")
+    put(tmp_repo, ".python-version", "3.99\n")
+    assert hash_of(tmp_repo) == before
+
+
+def test_a_repository_without_a_commit_has_no_toolchain_entry(tmp_path: Path) -> None:
+    repo = tmp_path / "fresh"
+    repo.mkdir()
+    run_git(repo, "init", "-q", "-b", "main")
+    put(repo, ".npmrc", "registry=https://evil.example/\n")
+    assert "toolchain_files" not in surface_of(repo)
+
+
+def test_conftest_and_other_project_files_are_not_hashed(tmp_repo: Path) -> None:
+    before = hash_of(tmp_repo)
+    for rel in ("conftest.py", "tests/conftest.py", "pip.conf", "go.work.sum",
+                "pnpm-workspace.yaml", "src/.npmrc", "sub/go.work",
+                ".cargo/credentials.toml"):  # fmt: skip
+        put(tmp_repo, rel, "x = 1\n")
+    commit(tmp_repo)
+    assert hash_of(tmp_repo) == before
+
+
+PYPROJECT = """[project]
+name = "app"
+dependencies = [{deps}]
+
+[tool.uv]
+index-url = "{index}"
+"""
+
+
+def test_only_the_tool_uv_table_of_pyproject_is_hashed(tmp_repo: Path) -> None:
+    good = "https://pypi.org/simple"
+    committed(tmp_repo, "pyproject.toml", PYPROJECT.format(deps='"httpx"', index=good))
+    first = hash_of(tmp_repo)
+    committed(tmp_repo, "pyproject.toml", PYPROJECT.format(deps='"httpx", "rich"', index=good))
+    assert hash_of(tmp_repo) == first, "a dependency change alone needs no new trust"
+    evil = "https://evil.example/simple"
+    committed(tmp_repo, "pyproject.toml", PYPROJECT.format(deps='"httpx"', index=evil))
+    assert hash_of(tmp_repo) != first
+
+
+def test_a_pyproject_without_tool_uv_is_not_hashed(tmp_repo: Path) -> None:
+    before = hash_of(tmp_repo)
+    committed(tmp_repo, "pyproject.toml", '[project]\nname = "app"\n')
+    assert hash_of(tmp_repo) == before
+
+
+def test_an_unparsable_pyproject_is_pinned_by_its_whole_content(tmp_repo: Path) -> None:
+    committed(tmp_repo, "pyproject.toml", "[tool.uv\nindex-url = 1\n")
+    first = hash_of(tmp_repo)
+    committed(tmp_repo, "pyproject.toml", "[tool.uv\nindex-url = 2\n")
+    assert hash_of(tmp_repo) != first
+
+
+def _index_only(repo: Path, rel: str, text: str) -> None:
+    """Commit `rel` without a file in the working tree (two spellings cannot both exist on a
+    case-insensitive filesystem)."""
+    blob = repo / "blob.tmp"
+    blob.write_text(text, encoding="utf-8")
+    oid = run_git(repo, "hash-object", "-w", "blob.tmp").strip()
+    blob.unlink()
+    run_git(repo, "update-index", "--add", "--cacheinfo", f"100644,{oid},{rel}")
+
+
+def test_another_spelling_of_a_toolchain_file_is_hashed_as_that_file(tmp_repo: Path) -> None:
+    """macOS opens a committed `.NPMRC` as `.npmrc`."""
+    before = hash_of(tmp_repo)
+    _index_only(tmp_repo, ".NPMRC", "registry=https://evil.example/\n")
+    _index_only(tmp_repo, ".Cargo/CONFIG.toml", "[build]\nrustc-wrapper = '/x'\n")
+    run_git(tmp_repo, "commit", "-q", "-m", "spellings")
+    files = surface_of(tmp_repo)["toolchain_files"]
+    assert isinstance(files, dict)
+    assert {".npmrc", ".cargo/config.toml"} <= set(files)
+    assert hash_of(tmp_repo) != before
+
+
+def test_two_spellings_of_a_toolchain_file_make_the_surface_untrustable(tmp_repo: Path) -> None:
+    _index_only(tmp_repo, ".npmrc", "registry=https://registry.npmjs.org/\n")
+    _index_only(tmp_repo, ".NPMRC", "registry=https://evil.example/\n")
+    run_git(tmp_repo, "commit", "-q", "-m", "spellings")
+    with pytest.raises(PolicyViolation, match="both"):
+        surface_of(tmp_repo)
+
+
+@pytest.mark.parametrize("kind", ["file link", "directory link", "directory", "huge"])
+def test_a_toolchain_file_aipm_cannot_pin_makes_the_surface_untrustable(
+    tmp_repo: Path, tmp_path: Path, kind: str
+) -> None:
+    """A link's target could change without changing the hash: refused (exit 6), as is anything
+    that is not a regular file of at most 1 MiB."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "config.toml").write_text("[build]\n", encoding="utf-8")
+    if kind == "file link":
+        (tmp_repo / ".npmrc").symlink_to(elsewhere / "config.toml")
+    elif kind == "directory link":
+        (tmp_repo / ".cargo").symlink_to(elsewhere, target_is_directory=True)
+    elif kind == "directory":
+        put(tmp_repo, "uv.toml/inner.txt", "x\n")
+    else:
+        (tmp_repo / ".npmrc").write_bytes(b"#" * (1_048_576 + 1))
+    commit(tmp_repo)
+    with pytest.raises(PolicyViolation, match="toolchain"):
+        surface_of(tmp_repo)
+
+
+def test_a_pulled_package_setting_needs_trust_again_end_to_end(
+    tmp_repo: Path, dirs: UserDirs
+) -> None:
+    del dirs
+    ok(aipm(tmp_repo, "init"))
+    trust(tmp_repo)
+    shown = json.loads(ok(aipm(tmp_repo, "trust", "--show", flags=["--json"])).stdout)["data"]
+    assert shown["trusted"] is True
+    committed(tmp_repo, ".npmrc", "registry=https://evil.example/\n")
+    shown = json.loads(ok(aipm(tmp_repo, "trust", "--show", flags=["--json"])).stdout)["data"]
+    assert shown["trusted"] is False
+    assert ".npmrc" in shown["surface"]["toolchain_files"]
+    assert ".npmrc" in ok(aipm(tmp_repo, "trust", "--show")).stdout
+
+
+@pytest.mark.parametrize("path", [".python-version", "sub/.tool-versions", ".TOOL-VERSIONS"])
+def test_an_agent_changing_a_toolchain_version_file_is_a_dependency_change(path: str) -> None:
+    assert is_package_config(path)

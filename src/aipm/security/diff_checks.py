@@ -123,7 +123,8 @@ MAX_LOCKFILE_BYTES = 16 * 1_048_576
 PACKAGE_CONFIG = frozenset(
     {".npmrc", ".pnpmfile.cjs", ".pnpmfile.mjs", ".yarnrc", ".yarnrc.yml", "bunfig.toml",
      "uv.toml", "pip.conf", "pip.ini", "pnpm-workspace.yaml",
-     "go.work", "go.work.sum", "rust-toolchain", "rust-toolchain.toml"}
+     "go.work", "go.work.sum", "rust-toolchain", "rust-toolchain.toml",
+     ".python-version", ".tool-versions"}
 )  # fmt: skip
 PACKAGE_CODE_DIRS = ("/.yarn/releases/", "/.yarn/plugins/")
 CARGO_CONFIG = ("/.cargo/config", "/.cargo/config.toml")

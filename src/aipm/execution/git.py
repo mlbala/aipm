@@ -728,6 +728,43 @@ def tree_entries(repo: Path, rev: str) -> dict[str, tuple[str, str]]:
     return entries
 
 
+@dataclass(frozen=True, slots=True)
+class TreeEntry:
+    """One entry of a git tree: its name, mode (`100644`, `120000` for a link, `040000` for a
+    directory, ...), type (`blob`, `tree`, `commit`) and object id."""
+
+    name: str
+    mode: str
+    kind: str
+    object_id: str
+
+
+def list_tree(repo: Path, treeish: str) -> list[TreeEntry]:
+    """The entries directly in `treeish` (a commit or a tree object), not recursing. Reads
+    objects only, so no filter, hook or index setting of the repository runs."""
+    if not _SHA.fullmatch(treeish):
+        raise UsageError("not an object id")
+    out = _checked(_run(repo, "ls-tree", "-z", treeish, max_output=MAX_LIST_BYTES), "ls-tree")
+    entries: list[TreeEntry] = []
+    for record in _fields(out):
+        meta, _, raw_name = record.partition(b"\t")
+        parts = meta.split(b" ")
+        name = _decode(raw_name)
+        if len(parts) != 3 or name is None or not _SHA.fullmatch(parts[2].decode("ascii")):
+            raise UsageError("git ls-tree printed an entry aipm cannot read")
+        entries.append(TreeEntry(name, parts[0].decode("ascii"), parts[1].decode("ascii"),
+                                 parts[2].decode("ascii")))  # fmt: skip
+    return entries
+
+
+def committed_head(repo: Path) -> str | None:
+    """`head_sha`, or `None` when the repository has no commit yet."""
+    try:
+        return head_sha(repo)
+    except UsageError:
+        return None
+
+
 def read_object(repo: Path, object_id: str, *, max_bytes: int) -> tuple[bytes, bool]:
     """A blob's bytes, without filters or textconv, and whether it was cut at `max_bytes`."""
     if not _SHA.fullmatch(object_id):

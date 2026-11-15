@@ -973,7 +973,7 @@ logging: {level: info, json: false}
 | `aipm` | v0.1 | | Phase report and next step (§7.3) |
 | `aipm init` | v0.1 | `--provider`, `--tool`, `--stack`, `--force` | Creates `.pm/`, detects the stack, writes the repo map, copies gates, runs the trust flow |
 | `aipm doctor` | v0.1 | | Tool versions, capabilities, sandbox, which API key env vars are set (never their values), plugins. `--fix-schema` arrives with the first v2 schema (§6.2). |
-| `aipm trust` | v0.1 | `--show`, `--revoke`, `--confirm HASH12` | Shows the exact argv of `prepare` and all gates, dispatch flags, network profiles and the surface hash, then records trust ([SECURITY.md §6](SECURITY.md#6-execution-trust)) |
+| `aipm trust` | v0.1 | `--show`, `--revoke`, `--confirm HASH12` | Shows the exact argv of `prepare` and all gates, dispatch flags, network profiles, the hashes of the repository's committed toolchain files ([ADR-0032](adr/0032-toolchain-files-in-the-trust-surface.md)) and the surface hash, then records trust ([SECURITY.md §6](SECURITY.md#6-execution-trust)) |
 | `aipm discover` | v0.1 | `--from FILE`, `--answers FILE`, `--defaults`, `--edit Q-ID`, `--max-rounds`, `--threshold`, `--accept-risk` | §8 |
 | `aipm approve <prd\|design\|plan\|context>` | v0.1 | `--yes` | Non-interactive approval |
 | `aipm design` | v0.1 | `--regenerate`, `--accept-risk`, `--accept-stale` | Architecture, ADRs, threat model |
