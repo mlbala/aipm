@@ -31,7 +31,7 @@ dependencies = [
     "filelock>=4.2.9",
     "platformdirs>=4.14.5",
     "pathspec>=1.1",
-    "anthropic>=2.6.0",     # first release that sends API version 2026-10-21 (ARCHITECTURE §14)
+    "anthropic>=2.6.0",     # needs >=2.0.0 (API version 2026-10-21, ARCHITECTURE §14); Dependabot set the floor
     "openai>=3.46.0",
 ]
 
