@@ -1,5 +1,6 @@
 """The owner's v0.4 decisions, session 3 (docs/security/reviews/v0.4-decisions-progress.md):
-the nightly `ci-long` workflow (v0.3 rec 6) and the real `srt` in CI (v0.3 rec 3).
+the nightly `ci-long` workflow (v0.3 rec 6), the real `srt` in CI (v0.3 rec 3) and `install.sh`
+installing the attested wheel (N-7).
 
 The workflows are read with the safe YAML loader and checked as written; nothing here runs on
 GitHub. `tests/security/test_release_supply_chain.py` checks every workflow's triggers,
@@ -9,10 +10,33 @@ permissions and action pins; the tests here check what each new job is for.
 import json
 import re
 import shlex
+from pathlib import Path
 from typing import Any
 
+import pytest
+
 from tests.conftest import REPO_ROOT
-from tests.security.test_release_supply_chain import WORKFLOWS, ci_uv_version, load, steps
+from tests.integration.test_install_sh import (
+    SCRIPT,
+    WHEEL,
+    WHEEL_BYTES,
+    recording_uv,
+    release,
+    run,
+    script_trusting,
+    serve,
+    sha256,
+    stub,
+    without_gh,
+)
+from tests.integration.test_install_sh import env as env  # noqa: PLC0414 - the fixture
+from tests.security.test_release_supply_chain import (
+    README,
+    WORKFLOWS,
+    ci_uv_version,
+    load,
+    steps,
+)
 
 CI_LONG = WORKFLOWS / "ci-long.yml"
 
@@ -135,3 +159,231 @@ def test_the_sandbox_job_sets_up_linux_only_on_linux_and_requires_every_tool() -
     assert len(tests) == 1
     assert tests[0]["env"] == {"AIPM_REQUIRE_REAL_SRT": "1"}
     assert "tests/security/test_real_sandbox.py" in str(tests[0]["run"])
+
+
+# ------------------------------------------------------------------ N-7: install.sh
+
+
+def gh_stub(env: dict[str, str], tmp_path: Path, *, logged_in: bool, verified: bool) -> Path:
+    """A `gh` first on PATH that logs each call; `auth status` and `attestation verify` succeed
+    or fail as asked."""
+    log = tmp_path / "gh.log"
+    body = (
+        f'printf "%s\\n" "$*" >> "{log}"\n'
+        f'case "$1 $2" in "auth status") exit {0 if logged_in else 1} ;;\n'
+        f'"attestation verify") exit {0 if verified else 1} ;; esac\nexit 3'
+    )
+    stub(Path(env["PATH"].split(":")[0]) / "gh", body)
+    return log
+
+
+def readme_verify_flags() -> list[str]:
+    """The README's `gh attestation verify` options, without the file and with the tag left
+    out of `--source-ref`."""
+    for line in README.read_text(encoding="utf-8").splitlines():
+        if line.strip().startswith("gh attestation verify"):
+            words = shlex.split(line.split("#", 1)[0])[4:]  # after "gh attestation verify FILE"
+            return [re.sub(r"^refs/tags/.*", "refs/tags/", w) for w in words]
+    raise AssertionError("no gh attestation verify in the README")
+
+
+@pytest.mark.parametrize("tag", ["v0.3.9", "v0.1.0", "v0.0.99", "v0.4.0-rc1"])
+def test_install_sh_refuses_a_tag_older_than_v0_4_0(
+    env: dict[str, str], tmp_path: Path, tag: str
+) -> None:
+    """N-7: releases before v0.4.0 publish no attested wheel. The script refuses them before any
+    download, and prints the command that builds the tag from source instead."""
+    env = without_gh(env, tmp_path)
+    uv_log = recording_uv(env, tmp_path)
+    curl_log = serve(env, tmp_path, release(tag))
+    code, _, err = run(env, "-t", tag, cwd=tmp_path)
+    assert code == 2, err
+    assert f"uv tool install git+https://github.com/mlbala/aipm@{tag}" in err
+    assert not curl_log.exists()
+    assert not uv_log.exists()
+
+
+@pytest.mark.parametrize("tag", ["v0.4.0", "v0.4.1", "v0.10.0", "v1.0.0", "v0.5.0-rc1"])
+def test_install_sh_installs_v0_4_0_and_later(
+    env: dict[str, str], tmp_path: Path, tag: str
+) -> None:
+    env = without_gh(env, tmp_path)
+    uv_log = recording_uv(env, tmp_path)
+    serve(env, tmp_path, release(tag))
+    code, _, err = run(env, "-t", tag, cwd=tmp_path)
+    assert code == 0, err
+    assert uv_log.read_text(encoding="utf-8").endswith(WHEEL_BYTES.decode())
+
+
+def test_install_sh_pins_the_uv_installer_by_hash() -> None:
+    text = SCRIPT.read_text(encoding="utf-8")
+    pins = re.findall(r'^UV_INSTALLER_SHA256="([0-9a-f]{64})"$', text, flags=re.MULTILINE)
+    assert len(pins) == 1
+    assert pins[0] != sha256(b"")
+    assert set(pins[0]) != {"0"}  # not a placeholder
+
+
+def test_install_sh_never_runs_a_uv_installer_with_another_hash(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    """N-7 (RT04-19's remainder): the pinned release URL alone trusted whatever GitHub served
+    for it. An installer whose SHA-256 differs from the pinned one is never run."""
+    env = without_gh(env, tmp_path)
+    ran = tmp_path / "ran.log"
+    served = f'echo ran >> "{ran}"\n'.encode()
+    url = "https://github.com/astral-sh/uv/releases/download/0.13.6/uv-installer.sh"
+    serve(env, tmp_path, {url: served, **release("v0.4.0")})
+    script = script_trusting(tmp_path, b"the installer the owner pinned\n")
+    code, _, err = run(env, "-y", "-t", "v0.4.0", cwd=tmp_path, script=script)
+    assert code == 1, err
+    assert "SHA-256" in err
+    assert not ran.exists()
+
+
+def test_install_sh_installs_nothing_on_a_wheel_hash_mismatch(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    env = without_gh(env, tmp_path)
+    uv_log = recording_uv(env, tmp_path)
+    files = release("v0.4.1", sums=f"{sha256(b'another wheel')}  {WHEEL}\n")
+    serve(env, tmp_path, files)
+    code, _, err = run(env, "-t", "v0.4.1", cwd=tmp_path)
+    assert code == 1, err
+    assert "does not match" in err
+    assert not uv_log.exists()
+
+
+@pytest.mark.parametrize(
+    "sums",
+    [
+        "",
+        f"{'0' * 64}  aipm-0.4.1.tar.gz\n",
+        f"{sha256(WHEEL_BYTES)}  {WHEEL}\n{sha256(WHEEL_BYTES)}  aipm-9.9.9-py3-none-any.whl\n",
+        f"{sha256(WHEEL_BYTES)}  ../{WHEEL}\n",
+        f"{sha256(WHEEL_BYTES)} *{WHEEL}\n",
+    ],
+    ids=["empty", "no-wheel", "two-wheels", "a-path", "binary-mode"],
+)
+def test_install_sh_installs_nothing_when_sha256sums_lists_no_single_wheel(
+    env: dict[str, str], tmp_path: Path, sums: str
+) -> None:
+    """N-7: the wheel's name comes from SHA256SUMS (a pre-release's wheel is named by its
+    normalised version), so exactly one plain wheel name must be listed."""
+    env = without_gh(env, tmp_path)
+    uv_log = recording_uv(env, tmp_path)
+    serve(env, tmp_path, release("v0.4.1", sums=sums))
+    code, _, err = run(env, "-t", "v0.4.1", cwd=tmp_path)
+    assert code == 1, err
+    assert "SHA256SUMS" in err
+    assert not uv_log.exists()
+
+
+@pytest.mark.parametrize("missing", ["SHA256SUMS", WHEEL])
+def test_install_sh_installs_nothing_when_a_download_fails(
+    env: dict[str, str], tmp_path: Path, missing: str
+) -> None:
+    env = without_gh(env, tmp_path)
+    uv_log = recording_uv(env, tmp_path)
+    files = {k: v for k, v in release("v0.4.1").items() if not k.endswith(f"/{missing}")}
+    serve(env, tmp_path, files)
+    code, _, _ = run(env, "-t", "v0.4.1", cwd=tmp_path)
+    assert code != 0
+    assert not uv_log.exists()
+
+
+def test_install_sh_verifies_the_attestation_with_the_readme_flags(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    """N-7 (a): with gh installed, the wheel is installed only after `gh attestation verify`
+    accepts it, with the same pinned signer workflow and tag the README tells users to check."""
+    uv_log = recording_uv(env, tmp_path)
+    gh_log = gh_stub(env, tmp_path, logged_in=True, verified=True)
+    serve(env, tmp_path, release("v0.4.1"))
+    code, out, err = run(env, "-t", "v0.4.1", cwd=tmp_path)
+    assert code == 0, err
+    auth, verify = gh_log.read_text(encoding="utf-8").splitlines()
+    assert auth.split()[:2] == ["auth", "status"]
+    words = verify.split()
+    assert words[:2] == ["attestation", "verify"]
+    assert uv_log.read_text(encoding="utf-8").split()[2] == words[2]  # the file it checked
+    assert words[3:] == [
+        "--repo", "mlbala/aipm",
+        "--signer-workflow", "mlbala/aipm/.github/workflows/release.yml",
+        "--source-ref", "refs/tags/v0.4.1",
+        "--deny-self-hosted-runners",
+    ]  # fmt: skip
+    assert [re.sub(r"^refs/tags/.*", "refs/tags/", w) for w in words[3:]] == (readme_verify_flags())
+    assert "only the SHA-256" not in out
+
+
+def test_install_sh_installs_nothing_when_the_attestation_fails(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    uv_log = recording_uv(env, tmp_path)
+    gh_stub(env, tmp_path, logged_in=True, verified=False)
+    serve(env, tmp_path, release("v0.4.1"))
+    code, _, err = run(env, "-t", "v0.4.1", cwd=tmp_path)
+    assert code == 1, err
+    assert "verification failed" in err
+    assert "gh auth login" not in err
+    assert not uv_log.exists()
+
+
+def test_install_sh_tells_a_logged_out_gh_from_a_failed_verification(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    """The owner's choice for N-7: fail closed (exit 1) when gh cannot check, and say why."""
+    uv_log = recording_uv(env, tmp_path)
+    gh_log = gh_stub(env, tmp_path, logged_in=False, verified=True)
+    serve(env, tmp_path, release("v0.4.1"))
+    code, _, err = run(env, "-t", "v0.4.1", cwd=tmp_path)
+    assert code == 1, err
+    assert "not logged in" in err
+    assert "run gh auth login and retry" in err
+    assert "verification failed" not in err
+    assert "attestation" not in gh_log.read_text(encoding="utf-8")
+    assert not uv_log.exists()
+
+
+def test_install_sh_without_gh_says_only_the_hash_was_checked(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    env = without_gh(env, tmp_path)
+    recording_uv(env, tmp_path)
+    serve(env, tmp_path, release("v0.4.1"))
+    code, out, err = run(env, "-t", "v0.4.1", cwd=tmp_path)
+    assert code == 0, err
+    assert "only the SHA-256 was checked" in out + err
+
+
+def test_install_sh_never_builds_from_source() -> None:
+    """N-7: the tag install built from source with a build backend resolved at install time
+    (R-21). The only `git+` left is in the message for tags older than v0.4.0."""
+    text = SCRIPT.read_text(encoding="utf-8")
+    installs = [line.strip() for line in text.splitlines() if "tool install" in line]
+    runs_uv = [line for line in installs if line.startswith('"$UV"')]
+    assert runs_uv == ['"$UV" tool install "$dir/$wheel"']
+    assert all("git+" not in line for line in runs_uv)
+    assert text.count("git+") == 1
+
+
+@pytest.mark.parametrize(
+    "tag", ["junk\nv0.4.0", "v0.1.0\nrm -rf ~", "v0.4.0\x1b[2J", "v0.4.0 ", "v0.4.0/../x"]
+)
+def test_install_sh_refuses_a_tag_with_other_characters(
+    env: dict[str, str], tmp_path: Path, tag: str
+) -> None:
+    """Security review of session 3 (low): grep checks each line on its own, so a tag with a
+    second line passed when one line matched, and the refusal for old tags printed the other
+    line as part of the command to run. A tag is now refused for any character outside
+    letters, digits, `.` and `-`, before anything else reads it."""
+    env = without_gh(env, tmp_path)
+    uv_log = recording_uv(env, tmp_path)
+    curl_log = serve(env, tmp_path, release("v0.4.0"))
+    code, out, err = run(env, "-t", tag, cwd=tmp_path)
+    assert code == 2, err
+    assert "\x1b" not in out + err
+    assert "rm -rf" not in out + err
+    assert "uv tool install git+" not in err
+    assert not curl_log.exists()
+    assert not uv_log.exists()

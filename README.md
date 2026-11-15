@@ -16,7 +16,15 @@
 uv tool install git+https://github.com/mlbala/aipm
 ```
 
-Or run [`install.sh`](install.sh) (`sh install.sh [-y] [-t TAG]`): it prints what it will do, refuses to run with a relative or empty PATH entry or an active virtualenv (run it from a shell with no repository environment loaded), asks before installing uv with the official installer of one pinned uv release if uv is missing, then runs the same `uv tool install` for a release tag (`v0.4.0` by default). It builds from the tag; to install the attested files instead, see [Verifying a release](#verifying-a-release).
+Or run [`install.sh`](install.sh) (`sh install.sh [-y] [-t TAG]`), which installs a release's attested wheel (`v0.4.0` by default, and no older):
+
+1. It prints what it will do, and refuses to run with a relative or empty PATH entry or an active virtualenv (run it from a shell with no repository environment loaded).
+2. If uv is missing, it asks, then runs the official installer of one pinned uv release after checking its SHA-256.
+3. It downloads the wheel and `SHA256SUMS` from the release and checks the wheel's SHA-256.
+4. If [`gh`](https://cli.github.com/) is installed, it runs `gh attestation verify` on the wheel with the flags under [Verifying a release](#verifying-a-release), and stops if gh is not logged in (`gh auth login`) or the check fails. Without gh it says that only the SHA-256 was checked: `SHA256SUMS` comes from the same release, so that catches a broken download, not a replaced release.
+5. It runs `uv tool install` on the wheel. Its dependencies come from PyPI at install time, as with any wheel.
+
+A tag older than `v0.4.0` has no attested wheel; the script refuses it and prints the `uv tool install git+…@<tag>` command that builds it from source.
 
 aipm needs Python 3.13 or later. It is distributed from GitHub only ([ADR-0001](docs/architecture/adr/0001-distribute-from-github.md)).
 
