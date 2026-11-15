@@ -41,6 +41,7 @@ All notable changes to aipm are recorded here. The format follows [Keep a Change
 
 ### Changed
 
+- The `node-pnpm` stack template's prepare step is `pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile`, so a `.pnpmfile.cjs` the repository already had no longer runs in prepare (v0.2 O-1). **Existing `node-pnpm` repositories must re-trust once:** copy the new prepare argv and allowed prefix into `.pm/config.yaml` (or run `aipm init --force`), then run `aipm trust`. A repository that needs its pnpmfile to install keeps the old argv in its config and accepts that it runs (R-13).
 - A `registries` network profile opens only the registries of the program the step runs (`uv`/`pip`: PyPI, `npm`/`pnpm`/`yarn`: npm, `go`: the Go proxy, `cargo`: crates.io).
 - The command policy refuses `go run|generate|tool|env|install`, `-exec`, `-toolexec`, `-vettool`, gotestsum's `--raw-command`, `--post-run-command` and `--watch`, and `cargo run|install`, `--config`, `-Z` and `+toolchain`; and the Codex flags `--full-auto`, `--approve-for-me`, `--not-so-yolo` and any approval policy but `never`, Copilot `--assisted-approval` and Gemini `--skip-trust`.
 - `aipm doctor` reports `CODEX_API_KEY` and `COPILOT_GITHUB_TOKEN` (set or not, never the values).
@@ -73,6 +74,17 @@ The v0.4 red-team pass ([docs/security/reviews/v0.4.md](docs/security/reviews/v0
 - The release attested every published file but `SHA256SUMS`, and the README's `gh attestation verify --repo` accepted an attestation from any workflow run in the repository. Every published file is attested, and the documented command pins the signer workflow, the tag and GitHub's runners.
 - `install.sh` ran the first `uv` on PATH, which inside a cloned repository could be the repository's own (a relative PATH entry, or its active virtualenv); it now refuses to run with any relative or empty PATH entry or an active virtualenv. It ran uv's latest installer as served; it now fetches uv 0.13.6's, and a signal no longer leaves the download behind. It installs `v0.4.0` by default (it was `v0.2.0`).
 - `aipm status` showed the spend of whichever build sorted last by run ID, which names only the minute, so after two builds in one minute it could show the older one's. Builds are now ordered by their start time, as resume orders them.
+
+
+The owner's decisions on the v0.4 review's open items ([docs/security/reviews/v0.4.md](docs/security/reviews/v0.4.md) §6.3):
+
+- `aipm -C <repo> init` checks the user config against `<repo>`, not the repository around the working directory, before it writes anything (v0.1 O-4). `init --force` still repairs a broken `.pm/config.yaml`.
+- An `AIPM_CONFIG` that names a missing file makes every command that loads the configuration exit 6, instead of silently running without the user config; a missing config at the default location is still fine (v0.1 O-2).
+- Every run warns when `AIPM_CONFIG` is set, when `HOME` is not your account's home directory, and when `AIPM_CONFIG`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME` or `XDG_CACHE_HOME` points inside a git work tree: a repository `.env` loaded by pipenv or direnv can move them, and the setting outlives a `cd` (v0.1 O-1; residual risk R-24).
+- `dispatch.tools.<tool>.pass_env` can no longer name a variable that would undo aipm's setup around an agent: loader and interpreter options (`NODE_OPTIONS`, `DYLD_*`, `LD_*`, `PYTHONPATH`, …), shell options, `GIT_*`, Go, Cargo, npm, pip and uv settings, `PATH`/`HOME`/`TMPDIR`, the variables aipm sets for agents, and `COPILOT_ALLOW_ALL`. The config loader exits 6 and names the variable (N-2; SECURITY.md §8).
+- Every `--trace` run prints the host that receives the spans and your `OTEL_EXPORTER_OTLP_HEADERS` (never a user name or password from the URL), and every proxy variable set in the environment (any `*_proxy` name, in any case, as `requests` reads them). An endpoint that is not a plain ASCII `http(s)://host[:port]/path` (a backslash, a space, a second `@`, a non-ASCII host) sends nothing, because parsers disagree about its host. aipm hands the exporter the URL it resolved, by the OTLP rules (`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, else the base endpoint plus `/v1/traces`), so the printed host is the one used (N-5; R-8).
+- The command policy refuses Go's `-modfile` and `-overlay` (`-modfile=x`, `-modfile x`, `--modfile`, …) for `go` and `gotestsum` in gates and prepare: they read a `go.mod` the dependency checks do not know, or source files the diff does not show (N-6; ADR-0029).
+- SECURITY.md: residual risks R-24 (a moved config or state directory, warned only) and R-25 (the user config's check-then-open race, accepted: v0.1 O-3); R-18 records that repository context files stay a residual risk for v0.4, with a dispatch-time check planned for v0.5 (N-3).
 
 The v0.3 red-team pass ([docs/security/reviews/v0.3.md](docs/security/reviews/v0.3.md)) found ten problems (two medium, seven low, one info), all fixed, and settled O-3 of the v0.2 review (the last item):
 

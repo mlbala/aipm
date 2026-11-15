@@ -121,12 +121,14 @@ def _repo(tmp_path: Path, text: str = "schema_version: 1\n") -> Path:
 
 def test_a_repository_cannot_open_the_network(tmp_path: Path) -> None:
     repo = _repo(tmp_path, "schema_version: 1\nsecurity: {network: {gates: open}}\n")
+    (tmp_path / "none.yaml").write_text("", encoding="utf-8")  # an empty user config
     loaded = load_config(repo, env={"AIPM_CONFIG": str(tmp_path / "none.yaml")})
     assert loaded.config.security.network.gates is NetworkProfile.NONE
     assert any("cannot be relaxed" in w for w in loaded.warnings)
 
 
 def test_the_environment_cannot_open_the_network(tmp_path: Path) -> None:
+    (tmp_path / "none.yaml").write_text("", encoding="utf-8")  # an empty user config
     env = {
         "AIPM_CONFIG": str(tmp_path / "none.yaml"),
         "AIPM_SECURITY__NETWORK__GATES": "open",

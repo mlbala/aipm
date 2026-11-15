@@ -10,20 +10,35 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from aipm.app.workspace import find_repo_root
+from aipm.config.locations import location_warnings
 from aipm.domain.errors import AipmError
 from aipm.observability import tracing
 from aipm.plugins import loader
 
 
-def configure(*, project: Path | None, plugins: bool, trace: bool) -> str | None:
+def configure(*, project: Path | None, plugins: bool, trace: bool) -> list[str]:
     """Record whether plugins may load and the repository they may never come from, and turn
-    spans on with `--trace` (ADR-0027). Returns a warning when `--trace` cannot take effect."""
+    spans on with `--trace` (ADR-0027). Returns the warnings to print on every run: a moved
+    config or state directory (v0.1 O-1), the host `--trace` sends spans to (N-5), and
+    `--trace` that cannot take effect."""
     try:
         root: Path | None = find_repo_root(project)
     except AipmError:
         root = None
     loader.configure(enabled=plugins, repo=root)
-    return tracing.configure_tracing(enabled=trace)
+    warnings = location_warnings()
+    trace_warning = tracing.configure_tracing(enabled=trace)
+    if trace_warning is not None:
+        warnings.append(trace_warning)
+    host = tracing.destination()
+    if host is not None:
+        # Every --trace run names the receiving host: a repository .env can set the endpoint,
+        # and the user's OTEL_EXPORTER_OTLP_HEADERS token goes with the spans (N-5, R-8).
+        warnings.append(
+            f"--trace sends spans, with your OTEL_EXPORTER_OTLP_HEADERS, to {host}; check that "
+            "it is yours"
+        )
+    return warnings
 
 
 @contextmanager

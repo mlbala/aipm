@@ -1,15 +1,17 @@
 # Stack template: node-pnpm with vitest (ARCHITECTURE §13.1, build prompt 06).
 # Tools run as `node node_modules/<tool>/...`, never through `pnpm run` (scripts run through a
 # shell) or `pnpm dlx`/`pnpm exec` (they can fetch packages). The prepare step is the only place
-# packages are installed, from the lockfile, with install scripts off.
+# packages are installed, from the lockfile, with install scripts and the repository's
+# `.pnpmfile.cjs` off (v0.2 O-1).
 allowed_executables:                  # argv prefixes (SECURITY.md §10 rule 2)
-  - [pnpm, install, --frozen-lockfile, --ignore-scripts]
+  - [pnpm, install, --frozen-lockfile, --ignore-scripts, --ignore-pnpmfile]
   - [node, node_modules/eslint/bin/eslint.js]
   - [node, node_modules/prettier/bin/prettier.cjs]
   - [node, node_modules/typescript/bin/tsc]
   - [node, node_modules/vitest/vitest.mjs, run]
 test_roots: [tests, __tests__]        # where {test_paths} looks for owned tests
-prepare: {run: [pnpm, install, --frozen-lockfile, --ignore-scripts], network: registries}
+prepare: {run: [pnpm, install, --frozen-lockfile, --ignore-scripts, --ignore-pnpmfile],
+          network: registries}
 gates:
   lint: {run: [node, node_modules/eslint/bin/eslint.js, "{paths}"], required: true}
   format: {run: [node, node_modules/prettier/bin/prettier.cjs, --check, "{paths}"], required: false}

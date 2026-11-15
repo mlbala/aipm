@@ -21,6 +21,16 @@ from typing import Any, Protocol
 from aipm import __version__
 
 ENDPOINT_ENV = "OTEL_EXPORTER_OTLP_ENDPOINT"
+TRACES_ENDPOINT_ENV = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
+_NO_HOST = "(no host)"
+_ENDPOINT = re.compile(
+    r"(?P<scheme>https?)://(?:[^@/?#\[\]]*@)?"
+    r"(?P<host>\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252}[A-Za-z0-9])?)"
+    r"(?::(?P<port>[0-9]{1,5}))?(?:[/?#][!-~]*)?"
+)
+"""The only endpoint form aipm sends spans to: plain ASCII, no spaces, backslashes or second `@`,
+so the host aipm prints is the host `requests` connects to whatever parser reads it (urllib3
+ends the host at a backslash, Python's `urlsplit` does not; security review of N-5)."""
 SPAN_NAMES = frozenset({"aipm.command", "aipm.llm", "aipm.dispatch", "aipm.gate"})
 ATTRIBUTES = frozenset(
     {
@@ -66,6 +76,66 @@ def clean_attributes(attrs: Mapping[str, object]) -> dict[str, bool | int | floa
     return out
 
 
+def traces_endpoint(environ: Mapping[str, str]) -> str:
+    """The URL spans are sent to, by the OTLP/HTTP rules: the traces endpoint when set, else the
+    base endpoint plus `/v1/traces`. aipm hands this URL to the exporter itself, so the host it
+    prints is the host that receives the spans (N-5)."""
+    traces = environ.get(TRACES_ENDPOINT_ENV)
+    if traces:
+        return traces
+    return f"{environ.get(ENDPOINT_ENV, '').removesuffix('/')}/v1/traces"
+
+
+def endpoint_host(url: str) -> str:
+    """`host[:port]` of `url`, never a user name or password; `(no host)` when `url` is not of
+    the one unambiguous form aipm sends to (`_ENDPOINT`)."""
+    printable = url.isascii() and all("!" <= ch <= "~" for ch in url)
+    match = _ENDPOINT.fullmatch(url) if printable and "\\" not in url else None
+    if match is None:
+        return _NO_HOST
+    port = match["port"]
+    if port is not None and not 0 < int(port) < 65536:
+        return _NO_HOST
+    host = match["host"].lower()
+    return host if port is None else f"{host}:{port}"
+
+
+def _proxies(environ: Mapping[str, str]) -> list[str]:
+    """Every proxy variable set in the environment, as `host (NAME)`.
+
+    `requests` takes any variable whose name ends in `_proxy`, in any letter case, and keys it by
+    scheme or by `scheme://host` (`Http_Proxy`, `http://collector_proxy`), so every such name is
+    named rather than guessing which one applies. `NO_PROXY` is not consulted: this may name a
+    proxy the spans bypass, never miss one they take (re-review of N-5).
+    """
+    found: list[str] = []
+    for name, value in sorted(environ.items()):
+        folded = name.lower()
+        if not value or not folded.endswith("_proxy") or folded == "no_proxy":
+            continue
+        shown = endpoint_host(value if "://" in value else f"http://{value}")
+        found.append(f"{shown} ({name[:60]})")
+    return found
+
+
+def destination() -> str | None:
+    """Where spans go, while tracing sends them to an OTLP endpoint: the host, and every proxy
+    variable set in the environment; else `None`."""
+    return _state.get("host")
+
+
+def _endpoint_problem(env: Mapping[str, str]) -> str | None:
+    """What the endpoint lacks for spans to be sent, or `None`."""
+    if not (env.get(ENDPOINT_ENV) or env.get(TRACES_ENDPOINT_ENV)):
+        return ENDPOINT_ENV
+    if endpoint_host(traces_endpoint(env)) == _NO_HOST:
+        return (
+            "a plain http(s)://host[:port]/path endpoint (ASCII, no spaces, backslashes or "
+            "second @)"
+        )
+    return None
+
+
 def configure_tracing(
     *, enabled: bool, environ: Mapping[str, str] | None = None, exporter: object | None = None
 ) -> str | None:
@@ -75,8 +145,9 @@ def configure_tracing(
     if not enabled:
         return None
     env = os.environ if environ is None else environ
-    if exporter is None and not env.get(ENDPOINT_ENV):
-        return f"--trace needs {ENDPOINT_ENV}; no spans are sent"
+    problem = None if exporter is not None else _endpoint_problem(env)
+    if problem is not None:
+        return f"--trace needs {problem}; no spans are sent"
     try:
         from opentelemetry.sdk.resources import Resource  # noqa: PLC0415
         from opentelemetry.sdk.trace import TracerProvider  # noqa: PLC0415
@@ -95,8 +166,16 @@ def configure_tracing(
             )
         except ImportError:
             return "--trace needs the otel extra (aipm[otel]); no spans are sent"
-        provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+        endpoint = traces_endpoint(env)
+        try:
+            otlp = OTLPSpanExporter(endpoint=endpoint)
+        except (RuntimeError, ValueError, OSError) as exc:  # e.g. an unknown credential provider
+            return f"--trace cannot set up the exporter ({type(exc).__name__}); no spans are sent"
+        provider.add_span_processor(BatchSpanProcessor(otlp))
         atexit.register(provider.shutdown)
+        proxies = _proxies(env)
+        host = endpoint_host(endpoint)
+        _state["host"] = host if not proxies else f"{host}, through a proxy: {', '.join(proxies)}"
     else:
         provider.add_span_processor(SimpleSpanProcessor(exporter))  # type: ignore[arg-type]
     _state["provider"] = provider

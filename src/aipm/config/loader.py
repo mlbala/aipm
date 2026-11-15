@@ -11,7 +11,9 @@ always the user's own (ADR-0018, SECURITY.md §6 rule 5):
 - an `AIPM_*` variable may relax a tighten-only key, with a warning naming the key;
 - the user config file, wherever `AIPM_CONFIG`, `HOME` or `XDG_CONFIG_HOME` puts it, must be an
   absolute path outside the repository (compared by inode, so firmlinks and case variants count)
-  and a regular file (exit 6 otherwise).
+  and a regular file (exit 6 otherwise);
+- a missing user config is an empty one at the default location, but exit 6 when `AIPM_CONFIG`
+  names it (v0.1 O-2).
 
 Each ignored key, and each tighten-only value that ends up looser than the built-in default,
 becomes a warning that the CLI prints on every run.
@@ -28,14 +30,15 @@ from typing import Any, get_args, get_origin
 import platformdirs
 from pydantic import BaseModel, ValidationError
 
+from aipm.config.locations import USER_CONFIG_ENV, git_root
 from aipm.config.schema import Config, KeyClass, Tighten, key_class, stricter
 from aipm.domain.errors import PolicyViolation, SchemaError
 from aipm.domain.models import SCHEMA_VERSION, ArtifactKind, NetworkProfile
+from aipm.security.env_policy import denied_pass_env
 from aipm.security.paths import is_within
 from aipm.state.store import open_store
 from aipm.state.yamlio import MAX_YAML_BYTES, load_yaml
 
-USER_CONFIG_ENV = "AIPM_CONFIG"
 _ENV_ALIASES: Mapping[str, tuple[str, ...]] = {"AIPM_LOG_LEVEL": ("logging", "level")}
 REPO_SOURCE = ".pm/config.yaml"
 ENV_SOURCE = "AIPM_* environment variables"
@@ -265,15 +268,6 @@ def _env_layer(env: Mapping[str, str]) -> dict[str, Any]:
     return _nested(items, "environment")
 
 
-def _git_root(start: Path) -> Path | None:
-    """The nearest directory from `start` upwards that holds `.git`, like `find_repo_root`."""
-    current = Path(os.path.realpath(start))
-    for candidate in (current, *current.parents):
-        if os.path.lexists(candidate / ".git"):
-            return candidate
-    return None
-
-
 def _check_user_path(path: Path, project: Path | None) -> None:
     """The user config must be absolute and outside the repository (ADR-0018).
 
@@ -287,7 +281,7 @@ def _check_user_path(path: Path, project: Path | None) -> None:
             hint="A relative path is read from the current directory, which may be a "
             "repository. Point AIPM_CONFIG at an absolute path, or `~/...`.",
         )
-    root = project if project is not None else _git_root(Path.cwd())
+    root = project if project is not None else git_root(Path.cwd())
     if root is not None and is_within(path, root):
         raise PolicyViolation(
             f"the user config {str(path)[:200]} is inside the repository; a repository can "
@@ -297,12 +291,28 @@ def _check_user_path(path: Path, project: Path | None) -> None:
         )
 
 
-def _read_user_layer(path: Path) -> object:
-    """Read the user config: a regular file (links followed), never a FIFO or a device."""
+def _explicit(env: Mapping[str, str]) -> bool:
+    """Whether `AIPM_CONFIG` names the user config (an empty value means the default)."""
+    return bool(env.get(USER_CONFIG_ENV))
+
+
+def _read_user_layer(path: Path, *, explicit: bool) -> object:
+    """Read the user config: a regular file (links followed), never a FIFO or a device.
+
+    A missing file at the default location is an empty config (a new user has none). A missing
+    file that `AIPM_CONFIG` names is refused (exit 6): running without the settings the user
+    pointed at, such as a stricter network profile, would be a silent fallback (v0.1 O-2).
+    """
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     except FileNotFoundError:
-        return {}
+        if not explicit:
+            return {}
+        raise PolicyViolation(
+            f"{USER_CONFIG_ENV} names {str(path)[:200]}, which does not exist",
+            hint=f"Create the file (it may be empty), or unset {USER_CONFIG_ENV} to use "
+            f"{user_config_path({})}. aipm does not run without the user config you named.",
+        ) from None
     except OSError as exc:
         raise SchemaError(f"cannot read user config {path} ({exc.strerror})") from None
     mode = os.fstat(fd).st_mode
@@ -322,9 +332,9 @@ def _read_user_layer(path: Path) -> object:
     return load_yaml(text, source=str(path))
 
 
-def _user_layer(path: Path, project: Path | None) -> Config:
+def _user_layer(path: Path, project: Path | None, *, explicit: bool) -> Config:
     _check_user_path(path, project)
-    return _validate(_read_user_layer(path), str(path))
+    return _validate(_read_user_layer(path, explicit=explicit), str(path))
 
 
 def user_redact_patterns(
@@ -336,8 +346,10 @@ def user_redact_patterns(
     without end would hang every redaction, and one that matches aipm's own sentences would erase
     them from prompts (red-team v0.1 review).
     """
-    path = user_config_path(os.environ if env is None else env)
-    return list(_user_layer(path, project).security.extra_redact_patterns)
+    environ = os.environ if env is None else env
+    path = user_config_path(environ)
+    layer = _user_layer(path, project, explicit=_explicit(environ))
+    return list(layer.security.extra_redact_patterns)
 
 
 def _check_open_network(final: Config, user: Config) -> None:
@@ -357,19 +369,37 @@ def _check_open_network(final: Config, user: Config) -> None:
             )
 
 
+def _check_pass_env(config: Config) -> None:
+    """Refuse a `pass_env` name that would undo aipm's setup around an agent (N-2)."""
+    for tool, settings in config.dispatch.tools.items():
+        denied = [name for name in settings.pass_env if denied_pass_env(name)]
+        if denied:
+            key = f"dispatch.tools.{getattr(tool, 'value', tool)}.pass_env"
+            raise PolicyViolation(
+                f"{key} names {', '.join(denied)[:200]}, which aipm never passes to an agent",
+                hint="Remove the name. These variables load code before the agent runs, change "
+                "where git, Go, Cargo, npm, pip or uv get code, or undo the settings aipm gives "
+                "the agent (SECURITY.md §8).",
+            )
+
+
 def load_config(
     project: Path | None,
     *,
     env: Mapping[str, str] | None = None,
     flags: Mapping[str, object] | None = None,
+    read_repo: bool = True,
 ) -> LoadedConfig:
     """Merge every layer; ignore repo relaxations and user-only repo keys, with warnings.
 
-    Exit 6 when the environment sets a user-only key, or when the user config is relative or
-    inside the repository.
+    Exit 6 when the environment sets a user-only key, when the user config is relative or
+    inside the repository, when `AIPM_CONFIG` names a file that does not exist, or when a
+    `pass_env` list names a variable aipm never passes to an agent.
 
     `project` is the repository root (None outside a repository). `flags` maps dotted keys,
-    such as `dispatch.default_tool`, to values given on the command line.
+    such as `dispatch.default_tool`, to values given on the command line. With `read_repo`
+    false, the user config is still checked against `project`, but `.pm/config.yaml` is not
+    read (`aipm init --force` rewrites it, so a broken one must not stop the repair).
     """
     environ = os.environ if env is None else env
     warnings: list[str] = []
@@ -378,13 +408,13 @@ def load_config(
 
     user_path = user_config_path(environ)
     _check_user_path(user_path, project)
-    user_raw = _read_user_layer(user_path)
+    user_raw = _read_user_layer(user_path, explicit=_explicit(environ))
     if user_raw != {}:
         sources.append(str(user_path))
     user_layer = _validate(user_raw, str(user_path))
     config = _merge(config, user_layer, path="", limits=_OWN, warnings=[])
 
-    if project is not None:
+    if project is not None and read_repo:
         repo_text = open_store(project).read_text(ArtifactKind.CONFIG)
         if repo_text is not None:
             sources.append(REPO_SOURCE)
@@ -402,6 +432,7 @@ def load_config(
     if flags:
         unflagged = _validate(config.model_dump(mode="json", by_alias=True), "the configuration")
         _check_open_network(unflagged, user_layer)
+        _check_pass_env(unflagged)
         flag_layer = _nested(
             {tuple(key.split(".")): value for key, value in flags.items()}, "flags"
         )
@@ -411,6 +442,7 @@ def load_config(
 
     final = _validate(config.model_dump(mode="json", by_alias=True), "the merged configuration")
     _check_open_network(final, user_layer)
+    _check_pass_env(final)
     warnings.extend(f"relaxed: {item}" for item in relaxations(final))
     return LoadedConfig(
         config=final, warnings=tuple(warnings), sources=tuple(sources), unflagged=unflagged
