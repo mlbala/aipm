@@ -34,6 +34,7 @@ from aipm.config.locations import USER_CONFIG_ENV, git_root
 from aipm.config.schema import Config, KeyClass, Tighten, key_class, stricter
 from aipm.domain.errors import PolicyViolation, SchemaError
 from aipm.domain.models import SCHEMA_VERSION, ArtifactKind, NetworkProfile
+from aipm.security.env_policy import denied_pass_env
 from aipm.security.paths import is_within
 from aipm.state.store import open_store
 from aipm.state.yamlio import MAX_YAML_BYTES, load_yaml
@@ -368,6 +369,20 @@ def _check_open_network(final: Config, user: Config) -> None:
             )
 
 
+def _check_pass_env(config: Config) -> None:
+    """Refuse a `pass_env` name that would undo aipm's setup around an agent (N-2)."""
+    for tool, settings in config.dispatch.tools.items():
+        denied = [name for name in settings.pass_env if denied_pass_env(name)]
+        if denied:
+            key = f"dispatch.tools.{getattr(tool, 'value', tool)}.pass_env"
+            raise PolicyViolation(
+                f"{key} names {', '.join(denied)[:200]}, which aipm never passes to an agent",
+                hint="Remove the name. These variables load code before the agent runs, change "
+                "where git, Go, Cargo, npm, pip or uv get code, or undo the settings aipm gives "
+                "the agent (SECURITY.md §8).",
+            )
+
+
 def load_config(
     project: Path | None,
     *,
@@ -378,7 +393,8 @@ def load_config(
     """Merge every layer; ignore repo relaxations and user-only repo keys, with warnings.
 
     Exit 6 when the environment sets a user-only key, when the user config is relative or
-    inside the repository, or when `AIPM_CONFIG` names a file that does not exist.
+    inside the repository, when `AIPM_CONFIG` names a file that does not exist, or when a
+    `pass_env` list names a variable aipm never passes to an agent.
 
     `project` is the repository root (None outside a repository). `flags` maps dotted keys,
     such as `dispatch.default_tool`, to values given on the command line. With `read_repo`
@@ -416,6 +432,7 @@ def load_config(
     if flags:
         unflagged = _validate(config.model_dump(mode="json", by_alias=True), "the configuration")
         _check_open_network(unflagged, user_layer)
+        _check_pass_env(unflagged)
         flag_layer = _nested(
             {tuple(key.split(".")): value for key, value in flags.items()}, "flags"
         )
@@ -425,6 +442,7 @@ def load_config(
 
     final = _validate(config.model_dump(mode="json", by_alias=True), "the merged configuration")
     _check_open_network(final, user_layer)
+    _check_pass_env(final)
     warnings.extend(f"relaxed: {item}" for item in relaxations(final))
     return LoadedConfig(
         config=final, warnings=tuple(warnings), sources=tuple(sources), unflagged=unflagged

@@ -10,11 +10,13 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from aipm.adapters import claude_code, codex, copilot, gemini
 from aipm.cli.main import app
 from aipm.config import locations
 from aipm.config.loader import load_config, user_redact_patterns
 from aipm.config.schema import Config
 from aipm.domain.errors import PolicyViolation
+from aipm.security.env_policy import DENIED_NAMES, denied_pass_env
 
 runner = CliRunner()
 
@@ -173,3 +175,82 @@ def test_the_cli_prints_location_warnings_on_stderr(
     result = runner.invoke(app, ["--json", "-C", str(tmp_path / "outside"), "doctor"])
     assert "warning: XDG_STATE_HOME" in result.stderr
     assert "XDG_STATE_HOME" not in result.stdout
+
+
+# ---------------------------------------------------------------- N-2: the pass_env deny list
+
+# Every name and family the owner listed. Families are tested with the members the owner named
+# and with others; each entry is refused from every tool's pass_env.
+DENIED = [
+    # the review's list
+    "NODE_OPTIONS", "NODE_PATH", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME", "BASH_ENV", "ENV",
+    "COPILOT_ALLOW_ALL",
+    "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH",
+    "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT",
+    # the variables aipm sets for agents
+    "CLAUDE_CONFIG_DIR", "CODEX_HOME", "COPILOT_HOME", "GEMINI_CLI_HOME", "GEMINI_SANDBOX",
+    "DISABLE_AUTOUPDATER", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    # the owner's additions
+    "PATH", "HOME", "TMPDIR",
+    "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB",
+    "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS",
+    "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_GLOBAL",
+    "GIT_SSH_COMMAND", "GIT_EXEC_PATH", "GIT_DIR", "GIT_WORK_TREE", "GIT_ASKPASS",
+    "GOFLAGS", "GOPROXY", "GONOSUMDB", "GONOSUMCHECK", "GOINSECURE", "GOTOOLCHAIN",
+    "RUSTFLAGS", "RUSTC_WRAPPER",
+    "CARGO_HOME", "CARGO_BUILD_RUSTC_WRAPPER", "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER",
+    "NPM_CONFIG_REGISTRY", "npm_config_registry", "Npm_Config_Userconfig",
+    "npm_CONFIG_globalconfig",
+    "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_CONFIG_FILE",
+    "UV_INDEX_URL", "UV_PYTHON", "UV_CONFIG_FILE",
+    "SHELLOPTS", "BASHOPTS", "IFS", "PS4", "PROMPT_COMMAND", "ZDOTDIR",
+]  # fmt: skip
+
+ALLOWED = ["GITHUB_TOKEN", "MY_API_TOKEN", "LANG", "UVICORN_PORT", "NODE_ENV", "GOPATH_X", "path"]
+
+
+def _user_config(tmp_path: Path, tool: str, names: list[str]) -> dict[str, str]:
+    user = tmp_path / "user.yaml"
+    listed = ", ".join(f'"{name}"' for name in names)
+    text = f"dispatch: {{tools: {{{tool}: {{pass_env: [{listed}]}}}}}}\n"
+    user.write_text(text, encoding="utf-8")
+    return {"AIPM_CONFIG": str(user), "HOME": str(tmp_path)}
+
+
+@pytest.mark.parametrize("name", DENIED)
+def test_a_denied_name_in_pass_env_exits_6(isolated: Path, tmp_path: Path, name: str) -> None:
+    del isolated
+    assert denied_pass_env(name)
+    with pytest.raises(PolicyViolation, match="pass_env") as info:
+        load_config(None, env=_user_config(tmp_path, "claude", ["MY_TOKEN", name]))
+    assert name in info.value.message
+
+
+@pytest.mark.parametrize("tool", ["claude", "codex", "copilot", "gemini"])
+def test_the_deny_list_covers_every_tool(isolated: Path, tmp_path: Path, tool: str) -> None:
+    del isolated
+    with pytest.raises(PolicyViolation, match=f"dispatch.tools.{tool}.pass_env"):
+        load_config(None, env=_user_config(tmp_path, tool, ["LD_PRELOAD"]))
+
+
+def test_a_command_line_flag_cannot_pass_a_denied_name(isolated: Path, tmp_path: Path) -> None:
+    del isolated
+    env = {"AIPM_CONFIG": str(tmp_path / "user.yaml"), "HOME": str(tmp_path)}
+    (tmp_path / "user.yaml").write_text("", encoding="utf-8")
+    with pytest.raises(PolicyViolation, match="pass_env"):
+        load_config(None, env=env, flags={"dispatch.tools.claude.pass_env": ["NODE_OPTIONS"]})
+
+
+@pytest.mark.parametrize("name", ALLOWED)
+def test_other_names_still_pass(isolated: Path, tmp_path: Path, name: str) -> None:
+    del isolated
+    assert not denied_pass_env(name)
+    loaded = load_config(None, env=_user_config(tmp_path, "claude", [name]))
+    assert loaded.config.dispatch.tools["claude"].pass_env == [name]
+
+
+def test_every_variable_aipm_sets_for_an_agent_is_denied() -> None:
+    """A new adapter's config home or agent setting must join the deny list."""
+    homes = {m.CONFIG_HOME.env_var for m in (claude_code, codex, copilot, gemini)}
+    agent = {*claude_code.AGENT_ENV, *dict(gemini.GeminiAdapter.agent_env)}
+    assert homes | agent <= DENIED_NAMES

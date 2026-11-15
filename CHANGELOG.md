@@ -80,6 +80,7 @@ The owner's decisions on the v0.4 review's open items ([docs/security/reviews/v0
 - `aipm -C <repo> init` checks the user config against `<repo>`, not the repository around the working directory, before it writes anything (v0.1 O-4). `init --force` still repairs a broken `.pm/config.yaml`.
 - An `AIPM_CONFIG` that names a missing file exits 6 instead of silently running without the user config; a missing config at the default location is still fine (v0.1 O-2).
 - Every run warns when `AIPM_CONFIG` is set, when `HOME` is not your account's home directory, and when `AIPM_CONFIG`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME` or `XDG_CACHE_HOME` points inside a git work tree: a repository `.env` loaded by pipenv or direnv can move them, and the setting outlives a `cd` (v0.1 O-1; residual risk R-24).
+- `dispatch.tools.<tool>.pass_env` can no longer name a variable that would undo aipm's setup around an agent: loader and interpreter options (`NODE_OPTIONS`, `DYLD_*`, `LD_*`, `PYTHONPATH`, …), shell options, `GIT_*`, Go, Cargo, npm, pip and uv settings, `PATH`/`HOME`/`TMPDIR`, the variables aipm sets for agents, and `COPILOT_ALLOW_ALL`. The config loader exits 6 and names the variable (N-2; SECURITY.md §8).
 
 The v0.3 red-team pass ([docs/security/reviews/v0.3.md](docs/security/reviews/v0.3.md)) found ten problems (two medium, seven low, one info), all fixed, and settled O-3 of the v0.2 review (the last item):
 
