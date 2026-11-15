@@ -807,6 +807,21 @@ def test_a_repository_without_a_commit_has_no_toolchain_entry(tmp_path: Path) ->
     assert "toolchain_files" not in surface_of(repo)
 
 
+def test_a_broken_head_is_an_error_not_an_empty_repository(tmp_repo: Path) -> None:
+    """Security review: only an unborn branch has no toolchain files."""
+    (tmp_repo / ".git" / "HEAD").write_text("1" * 40 + "\n", encoding="utf-8")
+    with pytest.raises(UsageError):
+        surface_of(tmp_repo)
+
+
+def test_a_deeply_nested_tool_uv_is_pinned_not_a_crash(tmp_repo: Path) -> None:
+    """Security review: a cloned `pyproject.toml` nested too deep crashed every trust check."""
+    deep = "[" * 2000 + "]" * 2000
+    committed(tmp_repo, "pyproject.toml", f"[tool.uv]\nx = {deep}\n")
+    files = surface_of(tmp_repo)["toolchain_files"]
+    assert isinstance(files, dict) and "pyproject.toml" in files
+
+
 def test_conftest_and_other_project_files_are_not_hashed(tmp_repo: Path) -> None:
     before = hash_of(tmp_repo)
     for rel in ("conftest.py", "tests/conftest.py", "pip.conf", "go.work.sum",

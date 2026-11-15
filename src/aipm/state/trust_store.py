@@ -263,15 +263,19 @@ def select_toolchain(names: Iterable[str], wanted: tuple[str, ...]) -> dict[str,
 def _tool_uv(data: bytes) -> dict[str, str] | None:
     """`pyproject.toml`'s `[tool.uv]` table, hashed as sorted JSON, so a dependency change
     alone needs no new trust; a file that does not parse is pinned whole."""
+    whole = {"sha256": hashlib.sha256(data).hexdigest(), "error": "not valid TOML"}
     try:
         doc = tomllib.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
-        return {"sha256": hashlib.sha256(data).hexdigest(), "error": "not valid TOML"}
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError):
+        return whole  # nested too deep too (as RT04-21 for JSON)
     tool = doc.get("tool")
     table = cast("dict[str, object]", tool).get("uv") if isinstance(tool, dict) else None
     if table is None:
         return None
-    text = json.dumps(table, sort_keys=True, separators=(",", ":"), default=str)
+    try:
+        text = json.dumps(table, sort_keys=True, separators=(",", ":"), default=str)
+    except (RecursionError, ValueError):
+        return {**whole, "error": "nested too deeply to read"}
     return {"sha256": hashlib.sha256(text.encode()).hexdigest(), "table": "tool.uv"}
 
 

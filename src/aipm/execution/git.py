@@ -758,11 +758,19 @@ def list_tree(repo: Path, treeish: str) -> list[TreeEntry]:
 
 
 def committed_head(repo: Path) -> str | None:
-    """`head_sha`, or `None` when the repository has no commit yet."""
+    """`head_sha`, or `None` when `HEAD` names a branch with no commit yet. Any other failure
+    (a corrupt repository, a timeout, a detached `HEAD` at a missing object) is raised, never
+    taken for an empty repository."""
     try:
         return head_sha(repo)
     except UsageError:
-        return None
+        ref = _run(repo, "symbolic-ref", "-q", "HEAD", max_output=4096)
+        name = ref.stdout.decode("utf-8", errors="replace").strip()
+        if ref.returncode == 0 and not ref.timed_out and name.startswith("refs/heads/"):
+            probe = _run(repo, "rev-parse", "--verify", "--quiet", name, max_output=4096)
+            if probe.returncode == 1 and not probe.timed_out and not probe.stdout.strip():
+                return None
+        raise
 
 
 def read_object(repo: Path, object_id: str, *, max_bytes: int) -> tuple[bytes, bool]:
