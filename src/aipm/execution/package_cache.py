@@ -60,8 +60,10 @@ def cache_args(program: str, cache: Path) -> tuple[str, ...]:
     not its own flags, so a repository's `packageImportMethod: hardlink` could make every task's
     `node_modules` share files with the run's store (security review of the v0.4 decisions,
     session 3). `copy`, not `clone-or-copy`: pnpm 10.34.9 ignored a `clone-or-copy` flag that
-    repeated the environment's value, and the file's setting won. Gates get none: after a
-    script name, pnpm hands options to the script."""
+    repeated the environment's value, and the file's setting won. pnpm 10.34.9 accepts them
+    before `install`, `fetch` and `test`, and refuses them ("Unknown options") before `run`,
+    `exec` and `rebuild`, so a prepare step of that kind fails closed and gates get none
+    (session 3 re-review)."""
     if program_name(program) != "pnpm":
         return ()
     return (f"--store-dir={cache / 'pnpm-store'}", "--package-import-method=copy")
