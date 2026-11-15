@@ -55,6 +55,65 @@ jobs:
       - name: Tests with coverage
         run: uv run --frozen pytest --cov --cov-report=term
 
+  # The run's package cache under the real srt (ADR-0031; red-team v0.3 rec 3). srt and pnpm
+  # come from .github/sandbox/package-lock.json at exact versions, installed with no scripts.
+  sandbox:
+    name: Real sandbox (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # hatch-vcs derives the version from tags and history
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.6"
+          python-version: "3.13"
+          enable-cache: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.15.0" # srt needs Node 22.12 or later
+          package-manager-cache: false
+
+      - name: Install srt and pnpm (locked, no install scripts)
+        working-directory: .github/sandbox
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Put srt and pnpm on PATH
+        run: echo "$GITHUB_WORKSPACE/.github/sandbox/node_modules/.bin" >> "$GITHUB_PATH"
+
+      # srt on Linux runs bubblewrap, and needs socat for its network proxy and ripgrep to find
+      # protected files. Ubuntu 24.04 lets AppArmor deny unprivileged user namespaces, which
+      # bubblewrap needs, so this throwaway runner turns that restriction off. It weakens only
+      # this runner's kernel hardening; on their own machines users can allow just bwrap with
+      # an AppArmor profile instead (README, "Install").
+      - name: Linux sandbox dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap socat ripgrep
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Install
+        run: uv sync --frozen --all-extras
+
+      - name: Tests under the real sandbox
+        env:
+          AIPM_REQUIRE_REAL_SRT: "1"
+        run: uv run --frozen pytest -q -rs tests/security/test_real_sandbox.py tests/security/test_gates.py
+
   commit-authorship:
     name: Commit authorship
     runs-on: ubuntu-latest

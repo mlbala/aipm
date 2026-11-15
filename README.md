@@ -150,7 +150,7 @@ In manual mode aipm cannot tell your edits from your agent's: anything changed a
 
 `aipm scan` runs gitleaks, semgrep, osv-scanner and trivy over the repository and fails (exit 3) on a finding at `--fail-on` (default `high`) or above; `--scanner NAME` runs one. Scanners never read scanner configuration from the repository. `aipm task show|reset|block|unblock|skip T-ID [--reason …]` changes a task's progress by hand; every change is recorded in `approvals.yaml`, and skipping a task or unblocking one blocked for a policy violation is also a security event.
 
-For full coverage install [`srt`](https://github.com/anthropic-experimental/sandbox-runtime) (`npm install -g @anthropic-ai/sandbox-runtime`; macOS also needs ripgrep, Linux bubblewrap, socat and ripgrep), gitleaks, semgrep, osv-scanner and, for `aipm scan`, trivy.
+For full coverage install [`srt`](https://github.com/anthropic-experimental/sandbox-runtime) (`npm install -g @anthropic-ai/sandbox-runtime`; macOS also needs ripgrep, Linux bubblewrap, socat and ripgrep; on Ubuntu 24.04 and later, AppArmor blocks the user namespaces bubblewrap needs unless you give `bwrap` an AppArmor profile that allows them), gitleaks, semgrep, osv-scanner and, for `aipm scan`, trivy.
 
 ### Building with an agent: `run`, `build` and `merge`
 
@@ -315,8 +315,10 @@ aipm dispatches Claude Code (from v0.3), Codex CLI and Gemini CLI (from v0.4). T
 | Codex CLI | 0.167.2 (documentation) | `codex exec --help`: `--sandbox workspace-write`, `--json`, `--ephemeral`, `--ignore-rules`, `--config`; `CODEX_HOME`; `CODEX_API_KEY`; `.agents/skills` |
 | Gemini CLI | 0.68.0 (documentation) | `gemini --help`: `--prompt`, `--approval-mode auto_edit`, `--allowed-tools`, `--output-format json`, `--extensions`, `--sandbox`; `GEMINI_CLI_HOME`; `GEMINI_API_KEY`; `GEMINI.md` with an `@./AGENTS.md` import |
 | GitHub Copilot CLI | 1.0.109 (documentation; render-only) | `AGENTS.md` and `.github/copilot-instructions.md`; dispatch off ([ADR-0025](docs/architecture/adr/0025-copilot-ships-render-only.md)) |
-| Go, gotestsum | not run by the tests | the `go` stack's commands pass the command policy (`tests/unit/test_config.py`) |
-| Rust (cargo, cargo-nextest) | not run by the tests | the `rust-cargo` stack's commands pass the command policy; the unit gate is judged on nextest's JUnit report, checked with a stub `cargo` ([ADR-0030](docs/architecture/adr/0030-rust-unit-gate-runs-nextest.md)) |
+| srt | 0.0.81 (CI: Ubuntu and macOS, `.github/sandbox/package-lock.json`) | the run's package cache under the real sandbox: what prepare and gates may write, pnpm's store and import method (`tests/security/test_real_sandbox.py`) |
+| pnpm | 10.34.9 (under srt only) | `npm_config_store_dir` and `npm_config_package_import_method` win over a repository `.npmrc` |
+| Go, gotestsum | the runner's Go, in CI's sandbox job | the `go` stack's commands pass the command policy (`tests/unit/test_config.py`); `go vet` with a read-only module cache under srt |
+| Rust (cargo, cargo-nextest) | the runner's Rust, in CI's sandbox job | the `rust-cargo` stack's commands pass the command policy; `cargo test --offline` with a read-only `CARGO_HOME` under srt; the unit gate is judged on nextest's JUnit report, checked with a stub `cargo` ([ADR-0030](docs/architecture/adr/0030-rust-unit-gate-runs-nextest.md)) |
 
 ## Verifying a release
 
