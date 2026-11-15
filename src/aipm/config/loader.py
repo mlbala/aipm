@@ -30,6 +30,7 @@ from typing import Any, get_args, get_origin
 import platformdirs
 from pydantic import BaseModel, ValidationError
 
+from aipm.config.locations import USER_CONFIG_ENV, git_root
 from aipm.config.schema import Config, KeyClass, Tighten, key_class, stricter
 from aipm.domain.errors import PolicyViolation, SchemaError
 from aipm.domain.models import SCHEMA_VERSION, ArtifactKind, NetworkProfile
@@ -37,7 +38,6 @@ from aipm.security.paths import is_within
 from aipm.state.store import open_store
 from aipm.state.yamlio import MAX_YAML_BYTES, load_yaml
 
-USER_CONFIG_ENV = "AIPM_CONFIG"
 _ENV_ALIASES: Mapping[str, tuple[str, ...]] = {"AIPM_LOG_LEVEL": ("logging", "level")}
 REPO_SOURCE = ".pm/config.yaml"
 ENV_SOURCE = "AIPM_* environment variables"
@@ -267,15 +267,6 @@ def _env_layer(env: Mapping[str, str]) -> dict[str, Any]:
     return _nested(items, "environment")
 
 
-def _git_root(start: Path) -> Path | None:
-    """The nearest directory from `start` upwards that holds `.git`, like `find_repo_root`."""
-    current = Path(os.path.realpath(start))
-    for candidate in (current, *current.parents):
-        if os.path.lexists(candidate / ".git"):
-            return candidate
-    return None
-
-
 def _check_user_path(path: Path, project: Path | None) -> None:
     """The user config must be absolute and outside the repository (ADR-0018).
 
@@ -289,7 +280,7 @@ def _check_user_path(path: Path, project: Path | None) -> None:
             hint="A relative path is read from the current directory, which may be a "
             "repository. Point AIPM_CONFIG at an absolute path, or `~/...`.",
         )
-    root = project if project is not None else _git_root(Path.cwd())
+    root = project if project is not None else git_root(Path.cwd())
     if root is not None and is_within(path, root):
         raise PolicyViolation(
             f"the user config {str(path)[:200]} is inside the repository; a repository can "

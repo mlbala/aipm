@@ -103,8 +103,7 @@ def main(
     )
     from aipm.app import session
 
-    warning = session.configure(project=project, plugins=not no_plugins, trace=trace)
-    if warning is not None:
+    for warning in session.configure(project=project, plugins=not no_plugins, trace=trace):
         print_untrusted(f"warning: {warning}", err=True)
     if ctx.invoked_subcommand is None:
         phase.show(ctx)

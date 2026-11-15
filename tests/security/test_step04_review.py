@@ -9,7 +9,6 @@
 - Config warnings are shown before G3; `--yes` never trusts; `--ack` takes only recorded IDs.
 """
 
-import os
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -19,6 +18,7 @@ from typing import Any
 import platformdirs
 import pytest
 
+from aipm.config.loader import user_config_path
 from aipm.domain.dag import IssueCode, PlanRules, is_serialized, owned_test_or_config, validate_plan
 from aipm.domain.errors import PolicyViolation, SchemaError
 from aipm.domain.models import (
@@ -211,7 +211,7 @@ def test_hand_edited_shared_ownership_is_refused_at_g3(planned: Path) -> None:
 
 def test_user_protected_paths_are_refused_at_g3(planned: Path) -> None:
     user_config = "security:\n  extra_protected_paths: [src/clinic/notify/**]\n"
-    Path(os.environ["AIPM_CONFIG"]).write_text(user_config, encoding="utf-8")
+    user_config_path().write_text(user_config, encoding="utf-8")
     result = aipm(planned, "approve", "plan", "--yes")
     assert result.exit_code == 2
     assert "T-005.owns_files[0]: not a safe repository-relative glob" in result.stderr

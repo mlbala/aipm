@@ -12,6 +12,9 @@ from pathlib import Path
 import platformdirs
 import pytest
 
+from aipm.config import locations
+from aipm.config.loader import user_config_path
+
 
 @dataclass(frozen=True)
 class UserDirs:
@@ -33,13 +36,18 @@ def user_dirs(
     home = base / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    # The temporary HOME is this test's account home: without this, every command would warn
+    # that HOME is not the account's home (v0.1 O-1). In-process only; no variable can do it.
+    monkeypatch.setattr(locations, "account_home", lambda: str(home))
     for name in ("XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"):
         monkeypatch.setenv(name, str(base / name.lower()))
-    config = base / "user-config.yaml"
-    # An empty user config: "no user settings". aipm refuses an AIPM_CONFIG that names a
-    # missing file (v0.1 O-2).
+    # An empty user config ("no user settings") at the default location under the temporary
+    # config directory. AIPM_CONFIG stays unset, as for most users: aipm warns on every run
+    # when it is set (v0.1 O-1).
+    monkeypatch.delenv("AIPM_CONFIG", raising=False)
+    config = user_config_path({})
+    config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text("", encoding="utf-8")
-    monkeypatch.setenv("AIPM_CONFIG", str(config))
     for name in ("AIPM_NON_INTERACTIVE", "AIPM_LOG_LEVEL"):
         monkeypatch.delenv(name, raising=False)
     # A command run without -C must never land in the aipm checkout itself.

@@ -74,6 +74,13 @@ The v0.4 red-team pass ([docs/security/reviews/v0.4.md](docs/security/reviews/v0
 - `install.sh` ran the first `uv` on PATH, which inside a cloned repository could be the repository's own (a relative PATH entry, or its active virtualenv); it now refuses to run with any relative or empty PATH entry or an active virtualenv. It ran uv's latest installer as served; it now fetches uv 0.13.6's, and a signal no longer leaves the download behind. It installs `v0.4.0` by default (it was `v0.2.0`).
 - `aipm status` showed the spend of whichever build sorted last by run ID, which names only the minute, so after two builds in one minute it could show the older one's. Builds are now ordered by their start time, as resume orders them.
 
+
+The owner's decisions on the v0.4 review's open items ([docs/security/reviews/v0.4.md](docs/security/reviews/v0.4.md) §6.3):
+
+- `aipm -C <repo> init` checks the user config against `<repo>`, not the repository around the working directory, before it writes anything (v0.1 O-4). `init --force` still repairs a broken `.pm/config.yaml`.
+- An `AIPM_CONFIG` that names a missing file exits 6 instead of silently running without the user config; a missing config at the default location is still fine (v0.1 O-2).
+- Every run warns when `AIPM_CONFIG` is set, when `HOME` is not your account's home directory, and when `AIPM_CONFIG`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME` or `XDG_CACHE_HOME` points inside a git work tree: a repository `.env` loaded by pipenv or direnv can move them, and the setting outlives a `cd` (v0.1 O-1; residual risk R-24).
+
 The v0.3 red-team pass ([docs/security/reviews/v0.3.md](docs/security/reviews/v0.3.md)) found ten problems (two medium, seven low, one info), all fixed, and settled O-3 of the v0.2 review (the last item):
 
 - A dispatched agent, and the gates and prepare step of a build, could read the main checkout's ignored `.env`, keys and data by absolute path: the sandbox denied only its `.pm/`. Every top-level entry of the main checkout except `.git` is now denied (ADR-0024).
