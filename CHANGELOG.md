@@ -41,6 +41,7 @@ All notable changes to aipm are recorded here. The format follows [Keep a Change
 
 ### Changed
 
+- The `node-pnpm` stack template's prepare step is `pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile`, so a `.pnpmfile.cjs` the repository already had no longer runs in prepare (v0.2 O-1). **Existing `node-pnpm` repositories must re-trust once:** copy the new prepare argv and allowed prefix into `.pm/config.yaml` (or run `aipm init --force`), then run `aipm trust`. A repository that needs its pnpmfile to install keeps the old argv in its config and accepts that it runs (R-13).
 - A `registries` network profile opens only the registries of the program the step runs (`uv`/`pip`: PyPI, `npm`/`pnpm`/`yarn`: npm, `go`: the Go proxy, `cargo`: crates.io).
 - The command policy refuses `go run|generate|tool|env|install`, `-exec`, `-toolexec`, `-vettool`, gotestsum's `--raw-command`, `--post-run-command` and `--watch`, and `cargo run|install`, `--config`, `-Z` and `+toolchain`; and the Codex flags `--full-auto`, `--approve-for-me`, `--not-so-yolo` and any approval policy but `never`, Copilot `--assisted-approval` and Gemini `--skip-trust`.
 - `aipm doctor` reports `CODEX_API_KEY` and `COPILOT_GITHUB_TOKEN` (set or not, never the values).

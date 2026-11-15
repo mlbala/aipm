@@ -15,9 +15,10 @@ from aipm.cli.main import app
 from aipm.config import locations
 from aipm.config.loader import load_config, user_redact_patterns
 from aipm.config.schema import Config
+from aipm.config.stacks import load_stack
 from aipm.domain.errors import PolicyViolation
 from aipm.observability import tracing
-from aipm.security.command_policy import CommandPolicy, Stage, check_argv
+from aipm.security.command_policy import CommandPolicy, Stage, check_argv, compile_prepare
 from aipm.security.env_policy import DENIED_NAMES, denied_pass_env
 
 runner = CliRunner()
@@ -377,3 +378,24 @@ def test_go_modfile_and_overlay_are_refused(argv: list[str], stage: Stage) -> No
 )
 def test_the_go_template_argv_still_passes(argv: list[str], stage: Stage) -> None:
     assert list(check_argv(argv, GO_POLICY, stage=stage)) == argv
+
+
+# ---------------------------------------------------------------- v0.2 O-1: --ignore-pnpmfile
+
+PNPM_PREPARE = ["pnpm", "install", "--frozen-lockfile", "--ignore-scripts", "--ignore-pnpmfile"]
+
+
+def test_node_pnpm_prepare_ignores_the_repository_pnpmfile() -> None:
+    """A `.pnpmfile.cjs` the repository already had would run in prepare (R-13)."""
+    stack = load_stack("node-pnpm")
+    assert stack.prepare is not None
+    assert list(stack.prepare.run) == PNPM_PREPARE
+    policy = Config.model_validate(stack.model_dump(mode="json")).command_policy()
+    assert list(compile_prepare(stack.prepare, policy=policy)) == PNPM_PREPARE
+
+
+def test_node_pnpm_policy_refuses_prepare_without_the_flag() -> None:
+    stack = load_stack("node-pnpm")
+    policy = Config.model_validate(stack.model_dump(mode="json")).command_policy()
+    with pytest.raises(PolicyViolation, match="allowed prefix"):
+        check_argv(PNPM_PREPARE[:-1], policy, stage="prepare")
