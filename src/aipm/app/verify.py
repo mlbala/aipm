@@ -319,7 +319,40 @@ class _Verify:
             for path in moved_since(self.root, scanned)
         ]
         result.violations = [*violations, *moved]
+        if gate_run.registry_unavailable is not None:
+            self._block_unavailable(tasks, task, result, gate_run)
         return self._finish(tasks, task, result, gate_run, changes, expected)
+
+    def _block_unavailable(
+        self, tasks: TasksDoc, task: Task, result: VerifyResult, gate_run: GateRun
+    ) -> None:
+        """Block the task (`registry_unavailable`) and exit 8: the new Go modules could not be
+        looked up before prepare, so another attempt cannot pass until the proxy answers
+        (red-team v0.4, N-1)."""
+        why = gate_run.registry_unavailable or "the Go module proxy could not be asked"
+        result.outcome = "blocked"
+        result.report = GateReport(
+            task=task.id, run_id=result.run_id, attempt=result.attempt, gates=gate_run.results[:32]
+        )
+        blocked = task.model_copy(
+            update={
+                "status": TaskStatus.BLOCKED,
+                "attempts": result.attempt,
+                "blocked": Blocked(reason=BlockedReason.REGISTRY_UNAVAILABLE, detail=why[:1000]),
+            }
+        )
+        events: Events = [
+            (JournalEventType.TASK_BLOCKED, {"reason": BlockedReason.REGISTRY_UNAVAILABLE.value})
+        ]
+        _save_run(self.store, result, gate_run.outputs, events)
+        _save_tasks(self.store, tasks, blocked)
+        raise _stop(
+            result,
+            MissingCapability,
+            f"{task.id} is blocked: {why[:300]}",
+            f"Check the network or the Go proxy, then `aipm task unblock {task.id}` and "
+            f"`aipm verify {task.id}`.",
+        )
 
     def _block(
         self,

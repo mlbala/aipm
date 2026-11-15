@@ -9,9 +9,12 @@
 A gate counts as required when the menu says so or the task names it. A gate the task names
 that is not in the menu is an error. `hold_prepare` stops the prepare step (and so every command
 gate) when the post-change checks found a dependency the policy refused: prepare would install
-it (red-team v0.2, RT02-4). The AC reviewer is not asked when a secrets gate of this run did not
-pass, or when a gate changed a file of the diff, so a diff that may hold a secret never goes to
-the LLM (RT02-5).
+it (red-team v0.2, RT02-4). Before `go mod download`, every new Go module is looked up
+first (`lookup_before_prepare`, red-team v0.4 N-1): one that fails the lookup fails the prepare
+step, and a lookup that got no answer holds prepare, runs no gate and sets
+`registry_unavailable`, so the caller blocks the task instead of retrying. The AC reviewer is
+not asked when a secrets gate of this run did not pass, or when a gate changed a file of the
+diff, so a diff that may hold a secret never goes to the LLM (RT02-5).
 
 `GateRun` holds the report, the full (redacted) output of each gate for the run directory, the
 gates whose scanner was missing, and what the AC reviewer reported.
@@ -23,7 +26,8 @@ from dataclasses import dataclass, field
 from aipm.domain.models import BuiltinGate, GateDef, GateReport, GateResult, GateStatus
 from aipm.gates.builtin import BuiltinOutcome, ac_review, ac_trace, deps, sast, secrets
 from aipm.gates.builtin.ac_review import Reviewer
-from aipm.gates.command_gate import run_command_gate, run_prepare
+from aipm.gates.builtin.deps import PrePrepare, check_before_prepare, new_go_modules
+from aipm.gates.command_gate import go_mod_download, run_command_gate, run_prepare
 from aipm.gates.context import GateContext, owned_paths
 from aipm.gates.reports import TestReport
 from aipm.observability import tracing
@@ -44,6 +48,9 @@ class GateRun:
     missing_tools: list[str] = field(default_factory=list[str])
     injection: tuple[str, ...] = ()
     overridden: tuple[str, ...] = ()
+    registry_unavailable: str | None = None
+    """Why the new Go modules could not be looked up before prepare: the caller blocks the
+    task (`registry_unavailable`) instead of retrying it (red-team v0.4, N-1)."""
 
     def report(self, task_id: str) -> GateReport:
         """The results as a gate report (run id and attempt are set by the caller)."""
@@ -154,6 +161,50 @@ def _failed_required(run: GateRun) -> str | None:
     return None
 
 
+def lookup_before_prepare(ctx: GateContext) -> PrePrepare | None:
+    """The lookup of the attempt's new Go modules, when prepare is `go mod download` (the only
+    prepare step that reaches the Go proxy, which fetches module paths from their origin);
+    `None` when there is nothing to look up."""
+    prepare = ctx.cfg.prepare
+    if prepare is None or not go_mod_download(prepare.run) or not new_go_modules(ctx):
+        return None
+    return check_before_prepare(ctx)
+
+
+def _prepare_step(ctx: GateContext, attempt: "_Attempt", hold: str | None) -> None:
+    """Run prepare, unless the checks hold it or new Go modules fail their lookup first."""
+    looked = None if hold else lookup_before_prepare(ctx)
+    if looked is not None and looked.unavailable:
+        why = "; ".join(looked.unavailable)
+        reason = f"the Go module proxy could not be asked about new modules: {why}"[:1000]
+        attempt.run.registry_unavailable = reason
+        attempt.run.results.append(_error("prepare", f"not run: {reason}", required=True))
+        attempt.prepare_ok = False
+        return
+    if looked is not None and looked.findings:
+        summary = f"not run: {len(looked.findings)} new Go module problem(s) found before download"
+        attempt.run.results.append(
+            GateResult(name="prepare", status=GateStatus.FAIL, required=True, summary=summary,
+                       findings=list(looked.findings))
+        )  # fmt: skip
+        attempt.prepare_ok = False
+        attempt.prepare_why = "the prepare step did not run"
+        return
+    if hold:
+        # No command gate runs either: one such as `uv run pytest` installs on its own.
+        attempt.prepare_ok = False
+        attempt.prepare_why = hold
+        if ctx.cfg.prepare is not None:
+            attempt.run.results.append(_error("prepare", f"not run: {hold}", required=True))
+            attempt.prepare_why = "the prepare step did not run"
+        return
+    prepare = run_prepare(ctx)
+    if prepare is not None:
+        attempt.run.results.append(prepare.result)
+        attempt.run.outputs["prepare"] = prepare.full_output
+        attempt.prepare_ok = prepare.result.status is GateStatus.PASS
+
+
 def run_gates(
     ctx: GateContext,
     *,
@@ -174,20 +225,9 @@ def run_gates(
     names = [only] if only is not None else gate_order([*menu, *named])
     attempt = _Attempt(ctx, reviewer, reviewer_unavailable, override_ac)
     if any(n in menu and menu[n].run is not None for n in names):
-        prepare = None if hold_prepare else run_prepare(ctx)
-        if hold_prepare:
-            # No command gate runs either: one such as `uv run pytest` installs on its own.
-            attempt.prepare_ok = False
-            attempt.prepare_why = hold_prepare
-            if ctx.cfg.prepare is not None:
-                attempt.run.results.append(
-                    _error("prepare", f"not run: {hold_prepare}", required=True)
-                )
-                attempt.prepare_why = "the prepare step did not run"
-        if prepare is not None:
-            attempt.run.results.append(prepare.result)
-            attempt.run.outputs["prepare"] = prepare.full_output
-            attempt.prepare_ok = prepare.result.status is GateStatus.PASS
+        _prepare_step(ctx, attempt, hold_prepare)
+        if attempt.run.registry_unavailable is not None:
+            return attempt.run  # the task is blocked; no gate would tell it anything
     paths = owned_paths(ctx.root, ctx.task, extra_protected=ctx.protected_extra())
     stopped = _failed_required(attempt.run) if fail_fast else None
     for name in names:

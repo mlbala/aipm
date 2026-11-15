@@ -14,21 +14,46 @@ import signal
 import stat
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from aipm.domain.errors import PolicyViolation, UsageError
-from aipm.domain.models import NetworkProfile, PrepareDef, TaskStatus
+from aipm.domain.models import (
+    BlockedReason,
+    ChangeSet,
+    ChangeStatus,
+    Ecosystem,
+    FileChange,
+    GateResult,
+    GateStatus,
+    NetworkProfile,
+    PrepareDef,
+    TaskStatus,
+)
 from aipm.execution import package_cache
 from aipm.execution.package_cache import cache_env, remove_tree, run_cache, seed_cargo
 from aipm.execution.process import running_groups
 from aipm.execution.sandbox import ProcessKind, ProfilePaths, profile_for
 from aipm.execution.worktree import cache_root
-from aipm.gates.command_gate import sandbox_for
+from aipm.gates import runner as runner_module
+from aipm.gates.builtin import deps
+from aipm.gates.builtin.deps import PrePrepare
+from aipm.gates.command_gate import CommandOutcome, sandbox_for
+from aipm.gates.context import GateContext
 from aipm.gates.runner import run_gates
 from aipm.llm.fake import FakeLLM
+from aipm.scanners import registry
+from aipm.scanners.registry import (
+    Fetch,
+    RegistryError,
+    RegistryUnavailable,
+    Response,
+    first_release,
+    go_escape,
+)
 from aipm.security.network import NetworkPolicy
 from aipm.state.layout import repo_id
 from tests.conftest import FakeSecrets, run_git
@@ -48,7 +73,7 @@ from tests.integration.conftest import (
     UserDirs,
     user_dirs,  # noqa: F401 - an autouse fixture
 )
-from tests.integration.flow import aipm, ok, trust
+from tests.integration.flow import aipm, ok, tasks, trust
 from tests.integration.test_verify_cli import PY, edit_config, install, verify
 from tests.security.test_gates import gate, make_ctx
 
@@ -62,7 +87,7 @@ def dirs(user_dirs: UserDirs) -> UserDirs:  # noqa: F811 - the imported fixture
 
 
 @pytest.fixture(autouse=True)
-def registry(monkeypatch: pytest.MonkeyPatch) -> None:
+def fake_registries(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_registry(monkeypatch)
 
 
@@ -341,3 +366,243 @@ def test_verify_gives_its_prepare_a_cache_of_its_own(project: Path, dirs: UserDi
     assert Path(seen).parent.name == "packages"
     assert Path(seen).parent.parent.name.startswith("aipm-verify-")
     assert not Path(seen).parent.parent.exists()
+
+
+# ---------------------------------------------------------------- N-1: Go modules looked up first
+
+GO_BEFORE = "module example.com/app\n\ngo 1.22\n"
+GO_PREPARE = PrepareDef(run=("go", "mod", "download"))
+
+
+def go_mod_adding(*modules: str) -> FileChange:
+    requires = "".join(f"\t{m} v1.0.0\n" for m in modules)
+    return FileChange(path="go.mod", status=ChangeStatus.MODIFIED, mode="100644",
+                      before=GO_BEFORE, after=f"{GO_BEFORE}\nrequire (\n{requires})\n")  # fmt: skip
+
+
+def go_proxy(answers: dict[str, object]) -> tuple[list[str], Fetch]:
+    """A fake Go proxy: each module answers 'ok', 'new', 'missing', 'tagless', an HTTP status,
+    or an exception to raise."""
+    asked: list[str] = []
+
+    def fetch(url: str, headers: Mapping[str, str]) -> Response:
+        assert headers.get("Disable-Module-Fetch") == "true"
+        asked.append(url)
+        module = next(m for m in answers if go_escape(m) in url)
+        answer = answers[module]
+        if isinstance(answer, BaseException):
+            raise answer
+        if isinstance(answer, int):
+            return Response(answer, b"")
+        if answer == "missing":
+            return Response(404, b"")
+        if url.endswith("/@v/list"):
+            return Response(200, b"" if answer == "tagless" else b"v1.0.0\n")
+        when = datetime.now(UTC) if answer == "new" else datetime(2015, 1, 1, tzinfo=UTC)
+        return Response(200, json.dumps({"Time": when.isoformat()}).encode())
+
+    return asked, fetch
+
+
+@pytest.fixture
+def prepared(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Stands in for the prepare step (no `go` here); records that it ran."""
+    ran: list[str] = []
+
+    def fake(ctx: object) -> CommandOutcome:
+        del ctx
+        ran.append("prepare")
+        result = GateResult(name="prepare", status=GateStatus.PASS, required=True, summary="ok")
+        return CommandOutcome(result, None, "")
+
+    monkeypatch.setattr(runner_module, "run_prepare", fake)
+    return ran
+
+
+def go_ctx(tmp_path: Path, fetch: Fetch, *modules: str, prepare: PrepareDef = GO_PREPARE
+           ) -> GateContext:  # fmt: skip
+    ctx = make_ctx(tmp_path, modules={"unitmod": "import sys; sys.exit(0)\n"},
+                   gates={"unit": gate("unitmod")})  # fmt: skip
+    changes = ChangeSet("a" * 40, files=(go_mod_adding(*modules),) if modules else ())
+    cfg = ctx.cfg.model_copy(update={"prepare": prepare})
+    return dataclasses.replace(ctx, cfg=cfg, changes=changes, fetch=fetch)
+
+
+@pytest.mark.parametrize(
+    ("answer", "rule"),
+    [("missing", "missing"), ("new", "too-new"), ("tagless", "unknown-age")],
+)
+def test_a_go_module_that_fails_the_lookup_fails_the_attempt_before_prepare(
+    tmp_path: Path, prepared: list[str], answer: str, rule: str
+) -> None:
+    asked, fetch = go_proxy({"example.com/newmod": answer})
+    run = run_gates(go_ctx(tmp_path, fetch, "example.com/newmod"))
+    assert prepared == [], "prepare must not fetch a module the lookup refused"
+    assert asked, "the module was looked up"
+    result = {r.name: r for r in run.results}
+    assert result["prepare"].status is GateStatus.FAIL
+    assert [f.rule for f in result["prepare"].findings] == [rule]
+    assert result["unit"].status is GateStatus.ERROR  # not run
+    assert run.registry_unavailable is None
+    assert not run.passed()
+
+
+def test_a_lookalike_go_module_fails_the_attempt_before_prepare(
+    tmp_path: Path, prepared: list[str]
+) -> None:
+    _, fetch = go_proxy({"github.com/stretchr-io/testify": "ok"})
+    run = run_gates(go_ctx(tmp_path, fetch, "github.com/stretchr-io/testify"))
+    assert prepared == []
+    prepare = next(r for r in run.results if r.name == "prepare")
+    assert prepare.status is GateStatus.FAIL
+    assert "typosquat" in [f.rule for f in prepare.findings]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        503,
+        500,
+        429,
+        RegistryUnavailable("cannot reach the registry (URLError)"),
+        RegistryUnavailable("the registry took too long to answer (over 60 s)"),
+    ],
+    ids=["503", "500", "429", "unreachable", "deadline"],
+)
+def test_a_lookup_that_cannot_be_made_holds_prepare_and_asks_to_block(
+    tmp_path: Path, prepared: list[str], answer: object
+) -> None:
+    _, fetch = go_proxy({"example.com/ok": "ok", "example.com/newmod": answer})
+    run = run_gates(go_ctx(tmp_path, fetch, "example.com/ok", "example.com/newmod"))
+    assert prepared == []
+    assert run.registry_unavailable is not None
+    assert "example.com/newmod" in run.registry_unavailable
+    prepare = next(r for r in run.results if r.name == "prepare")
+    assert prepare.status is GateStatus.ERROR
+    assert not run.passed()
+
+
+def test_modules_that_pass_the_lookup_let_prepare_run(tmp_path: Path, prepared: list[str]) -> None:
+    asked, fetch = go_proxy({"example.com/newmod": "ok"})
+    run = run_gates(go_ctx(tmp_path, fetch, "example.com/newmod"))
+    assert prepared == ["prepare"]
+    assert len(asked) == 2  # the version list and the oldest tag's info
+    assert run.registry_unavailable is None
+
+
+def test_no_lookup_without_a_new_go_module(tmp_path: Path, prepared: list[str]) -> None:
+    asked, fetch = go_proxy({})
+    run_gates(go_ctx(tmp_path, fetch))
+    assert (asked, prepared) == ([], ["prepare"])
+
+
+def test_no_lookup_for_a_prepare_step_that_is_not_go_mod_download(
+    tmp_path: Path, prepared: list[str]
+) -> None:
+    """Only `go mod download` gets the Go proxy, which fetches module paths from their origin."""
+    asked, fetch = go_proxy({"example.com/newmod": "missing"})
+    uv = PrepareDef(run=("uv", "sync", "--frozen"))
+    run_gates(go_ctx(tmp_path, fetch, "example.com/newmod", prepare=uv))
+    assert (asked, prepared) == ([], ["prepare"])
+
+
+def test_no_lookup_when_the_checks_already_hold_prepare(
+    tmp_path: Path, prepared: list[str]
+) -> None:
+    asked, fetch = go_proxy({"example.com/newmod": "ok"})
+    run = run_gates(go_ctx(tmp_path, fetch, "example.com/newmod"), hold_prepare="refused")
+    assert (asked, prepared, run.registry_unavailable) == ([], [], None)
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 504, 429, 403, 418])
+def test_a_status_that_is_no_answer_means_the_registry_is_unavailable(status: int) -> None:
+    with pytest.raises(RegistryUnavailable):
+        registry._status(Response(status, b""))  # pyright: ignore[reportPrivateUsage]
+
+
+def test_an_unreadable_answer_means_the_registry_is_unavailable() -> None:
+    with pytest.raises(RegistryUnavailable):
+        registry._json_object(Response(200, b"<html>proxy login</html>"))  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_tagless_module_is_an_answer_not_an_outage() -> None:
+    _, fetch = go_proxy({"example.com/newmod": "tagless"})
+    with pytest.raises(RegistryError) as info:
+        first_release(Ecosystem.GO, "example.com/newmod", fetch=fetch)
+    assert not isinstance(info.value, RegistryUnavailable)
+
+
+def test_the_deadline_and_a_failed_connection_mean_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(registry, "DEADLINE_S", 0.05)
+
+    def slow(url: str, headers: Mapping[str, str]) -> Response:
+        del url, headers
+        time.sleep(1)
+        return Response(200, b"")
+
+    with pytest.raises(RegistryUnavailable, match="too long"):
+        registry._bounded(slow, "https://proxy.golang.org/x", {})  # pyright: ignore[reportPrivateUsage]
+
+    class Refusing:
+        def open(self, *_: object, **__: object) -> None:
+            raise OSError("connection refused")
+
+    monkeypatch.setattr(registry.urllib.request, "build_opener", lambda *_: Refusing())
+    with pytest.raises(RegistryUnavailable, match="cannot reach"):
+        registry._get("https://proxy.golang.org/x", {})  # pyright: ignore[reportPrivateUsage]
+
+
+def test_the_deps_gate_still_reports_an_outage_as_an_error(tmp_path: Path) -> None:
+    _, fetch = go_proxy({"example.com/newmod": 503})
+    ctx = go_ctx(tmp_path, fetch, "example.com/newmod")
+    findings, errors = deps.check_new(ctx, ctx.now)
+    assert findings == []
+    assert len(errors) == 1 and "example.com/newmod" in errors[0]
+
+
+# --- through `aipm build` and `aipm verify`
+
+
+@pytest.fixture
+def proxy_down(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every attempt's lookup before prepare finds the Go proxy unreachable (the clinic project
+    is Python, so the decision is replaced, not reached)."""
+
+    def unavailable(ctx: object) -> PrePrepare:
+        del ctx
+        return PrePrepare(unavailable=("go example.com/newmod: cannot reach the registry",))
+
+    monkeypatch.setattr(runner_module, "lookup_before_prepare", unavailable)
+
+
+def test_a_build_blocks_the_task_when_the_proxy_cannot_be_asked(
+    project: Path, dirs: UserDirs, proxy_down: None
+) -> None:
+    """No retry, so no budget is spent on attempts that cannot pass."""
+    scenario(dirs.home, {"T-002": [{"steps": copy_t002()}, {"steps": copy_t002()}]})
+    result = aipm(project, "build", "--only", "T-002", flags=["--json"])
+    assert result.exit_code == 3, result.stdout
+    (outcome,) = json.loads(result.stdout)["data"]["tasks"]
+    assert (outcome["status"], outcome["reason"]) == ("blocked", "registry_unavailable")
+    assert len(calls(dirs.home)) == 1
+    assert recorded(dirs.home) == [], "prepare never ran"
+    task = next(t for t in tasks(project).tasks if t.id == "T-002")
+    assert task.blocked is not None
+    assert task.blocked.reason is BlockedReason.REGISTRY_UNAVAILABLE
+    assert task.attempts == 1
+
+
+def test_verify_blocks_the_task_and_exits_8_when_the_proxy_cannot_be_asked(
+    project: Path, dirs: UserDirs, proxy_down: None
+) -> None:
+    ok(aipm(project, "prompt", "T-002"))
+    install(FIXTURE / "T-002", project)
+    code, envelope = verify(project)
+    assert code == 8, envelope
+    assert recorded(dirs.home) == []
+    task = next(t for t in tasks(project).tasks if t.id == "T-002")
+    assert task.status is TaskStatus.BLOCKED
+    assert task.blocked is not None
+    assert task.blocked.reason is BlockedReason.REGISTRY_UNAVAILABLE

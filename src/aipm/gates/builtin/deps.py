@@ -11,6 +11,7 @@ registry lookup that fails is an error.
 """
 
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from aipm.domain.errors import PolicyViolation
@@ -19,7 +20,7 @@ from aipm.gates.builtin import BuiltinOutcome, outcome, to_findings, tool_missin
 from aipm.gates.context import GateContext
 from aipm.scanners import osv
 from aipm.scanners.base import ScanStatus
-from aipm.scanners.registry import RegistryError, first_release
+from aipm.scanners.registry import RegistryError, RegistryUnavailable, first_release
 from aipm.security.diff_checks import LOCKFILES, is_manifest, new_dependencies, new_lock_packages
 from aipm.security.supply_chain import age_ok, edit_distance, normalize_name, typosquat_of
 
@@ -56,21 +57,63 @@ def _to_check(ctx: GateContext) -> list[tuple[str, Ecosystem, str, bool]]:
     return found
 
 
+def new_go_modules(ctx: GateContext) -> bool:
+    """Whether the attempt adds a Go module (to `go.mod` or `go.sum`)."""
+    return any(eco is Ecosystem.GO for _, eco, _, _ in _to_check(ctx))
+
+
+@dataclass(slots=True)
+class _Checked:
+    findings: list[GateFinding] = field(default_factory=list[GateFinding])
+    errors: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
+    """(path, why) for each package whose lookup gave an answer aipm cannot judge."""
+    unavailable: list[str] = field(default_factory=list[str])
+    """Why each lookup that got no answer at all failed (`RegistryUnavailable`)."""
+
+
 def check_new(ctx: GateContext, now: datetime) -> tuple[list[GateFinding], list[str]]:
     """Registry existence and first-release age of every new package, and typosquats of every
-    new direct dependency."""
-    findings: list[GateFinding] = []
-    errors: list[str] = []
+    new direct dependency. A lookup that fails is an error, whatever the reason."""
+    checked = _check(ctx, now, only=None)
+    return checked.findings, [why for _, why in checked.errors] + checked.unavailable
+
+
+@dataclass(frozen=True, slots=True)
+class PrePrepare:
+    """The lookup of the attempt's new Go modules before `go mod download` (N-1): the modules
+    that failed it, or why the proxy could not be asked."""
+
+    findings: tuple[GateFinding, ...] = ()
+    unavailable: tuple[str, ...] = ()
+
+
+def check_before_prepare(ctx: GateContext) -> PrePrepare:
+    """Look up every new Go module before `go mod download` sends its path to the proxy, which
+    fetches it from its origin (red-team v0.4, N-1; R-20). The lookups ask the proxy's cache
+    only (`Disable-Module-Fetch`). A missing, too new, lookalike or invalid module, or one whose
+    age the proxy cannot tell, is a finding; a lookup that got no answer is `unavailable`."""
+    checked = _check(ctx, ctx.now, only=Ecosystem.GO)
+    unknown = [_finding(path, "unknown-age", why) for path, why in checked.errors]
+    return PrePrepare(tuple(checked.findings + unknown)[:100], tuple(checked.unavailable))
+
+
+def _check(ctx: GateContext, now: datetime, *, only: Ecosystem | None) -> _Checked:
+    checked = _Checked()
+    findings, errors = checked.findings, checked.errors
     min_days = ctx.cfg.security.min_dependency_age_days
-    packages = _to_check(ctx)
+    packages = [p for p in _to_check(ctx) if only is None or p[1] is only]
     if len(packages) > MAX_LOOKUPS:
-        errors.append(f"{len(packages)} new packages, more than the {MAX_LOOKUPS} aipm looks up")
+        errors.append((packages[0][0], f"{len(packages)} new packages, more than the "
+                       f"{MAX_LOOKUPS} aipm looks up"))  # fmt: skip
         packages = packages[:MAX_LOOKUPS]
     began = _clock()
     for index, (path, eco, name, direct) in enumerate(packages):
         if _clock() - began > DEPS_BUDGET_S:
-            errors.append(f"registry lookups took over {DEPS_BUDGET_S:.0f} s; "
-                          f"{len(packages) - index} package(s) were not checked")  # fmt: skip
+            left = len(packages) - index
+            checked.unavailable.append(
+                f"registry lookups took over {DEPS_BUDGET_S:.0f} s; "
+                f"{left} package(s) were not checked"
+            )
             break
         squat = typosquat_of(eco, name) if direct else None
         if squat is not None:
@@ -82,8 +125,11 @@ def check_new(ctx: GateContext, now: datetime) -> tuple[list[GateFinding], list[
         except PolicyViolation:
             findings.append(_finding(path, "invalid-name", f"{name!r} is not a valid package name"))
             continue
+        except RegistryUnavailable as exc:
+            checked.unavailable.append(f"{eco.value} {name}: {exc}")
+            continue
         except RegistryError as exc:
-            errors.append(f"{eco.value} {name}: {exc}")
+            errors.append((path, f"{eco.value} {name}: {exc}"))
             continue
         if not info.exists:
             findings.append(_finding(path, "missing", f"{name} does not exist on {_REGISTRY[eco]}"))
@@ -93,7 +139,7 @@ def check_new(ctx: GateContext, now: datetime) -> tuple[list[GateFinding], list[
             first = info.first_release.date().isoformat()
             message = f"{name} was first released on {first}, less than {min_days} days ago"
             findings.append(_finding(path, "too-new", message))
-    return findings, errors
+    return checked
 
 
 def run(ctx: GateContext, gate: GateDef, *, name: str = NAME, required: bool) -> BuiltinOutcome:

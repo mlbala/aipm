@@ -1045,6 +1045,16 @@ class BuildLoop:
         if late:
             self._severe(task_id, task.attempts + 1, [*minor, *late], gate_run)
             return None
+        if gate_run.registry_unavailable is not None:
+            # Retrying cannot help until the proxy answers, and each retry costs an agent run.
+            self._count(task_id, task.attempts + 1)
+            self._block(
+                task_id,
+                BlockedReason.REGISTRY_UNAVAILABLE,
+                f"{gate_run.registry_unavailable}; check the network or the Go proxy, then "
+                f"`aipm task unblock {task_id}`",
+            )
+            return None
         if gate_run.injection:
             self.store.append_event(
                 SecurityEventKind.INJECTION_SIGNAL,

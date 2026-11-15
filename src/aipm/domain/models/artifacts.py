@@ -427,6 +427,8 @@ class BlockedReason(StrEnum):
     TIMEOUT = "timeout"
     INTERRUPTED = "interrupted"
     MANUAL = "manual"
+    REGISTRY_UNAVAILABLE = "registry_unavailable"
+    """The new Go modules could not be looked up before prepare (red-team v0.4, N-1)."""
 
 
 _PACKAGE_NAMES = {
