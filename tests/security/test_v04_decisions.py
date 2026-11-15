@@ -17,6 +17,7 @@ from aipm.config.loader import load_config, user_redact_patterns
 from aipm.config.schema import Config
 from aipm.domain.errors import PolicyViolation
 from aipm.observability import tracing
+from aipm.security.command_policy import CommandPolicy, Stage, check_argv
 from aipm.security.env_policy import DENIED_NAMES, denied_pass_env
 
 runner = CliRunner()
@@ -335,3 +336,44 @@ def test_the_cli_prints_the_trace_host_on_stderr(
     assert "warning: --trace sends spans" in result.stderr
     assert "collector.example:4318" in result.stderr
     assert "pw" not in result.stderr
+
+
+# ---------------------------------------------------------------- N-6: go -modfile and -overlay
+
+GO_POLICY = CommandPolicy(
+    allowed_prefixes=(("go", "mod", "download"), ("go", "vet"), ("go", "test"), ("gotestsum",))
+)
+
+
+@pytest.mark.parametrize("stage", ["gate", "prepare"])
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["go", "vet", "-modfile=other.mod", "./..."],
+        ["go", "vet", "-modfile", "other.mod", "./..."],
+        ["go", "vet", "--modfile=other.mod", "./..."],
+        ["go", "vet", "--modfile", "other.mod", "./..."],
+        ["go", "test", "-overlay=overlay.json", "./..."],
+        ["go", "test", "-overlay", "overlay.json", "./..."],
+        ["go", "test", "--overlay=overlay.json", "./..."],
+        ["go", "mod", "download", "-modfile=other.mod"],
+        ["gotestsum", "--junitfile", "r.xml", "--", "-modfile=other.mod", "./..."],
+        ["gotestsum", "--junitfile", "r.xml", "--", "-overlay", "o.json", "./..."],
+        ["gotestsum", "--junitfile", "r.xml", "--", "--overlay=o.json", "./..."],
+    ],
+)
+def test_go_modfile_and_overlay_are_refused(argv: list[str], stage: Stage) -> None:
+    with pytest.raises(PolicyViolation, match=r"-modfile|-overlay"):
+        check_argv(argv, GO_POLICY, stage=stage)
+
+
+@pytest.mark.parametrize(
+    ("argv", "stage"),
+    [
+        (["go", "vet", "-mod=readonly", "./..."], "gate"),
+        (["go", "mod", "download"], "prepare"),
+        (["gotestsum", "--junitfile", "r.xml", "--", "-mod=readonly", "./..."], "gate"),
+    ],
+)
+def test_the_go_template_argv_still_passes(argv: list[str], stage: Stage) -> None:
+    assert list(check_argv(argv, GO_POLICY, stage=stage)) == argv

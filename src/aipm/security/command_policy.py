@@ -156,6 +156,9 @@ _GO_DENIED_WORDS = frozenset({"run", "generate", "tool", "env", "install"})
 tool, `env -w` rewrites the toolchain's settings and `install` puts programs on PATH."""
 _GO_EXEC_FLAGS = ("-exec", "-toolexec", "-vettool")
 """Each names a program `go` starts in place of, or around, its own."""
+_GO_FILE_FLAGS = ("-modfile", "-overlay")
+"""`-modfile` reads another `go.mod` (and its `go.sum`), which the dependency checks do not know;
+`-overlay` builds files named in a JSON file in place of the ones the diff shows (N-6)."""
 _GOTESTSUM_FLAGS = ("--raw-command", "--post-run-command", "--watch")
 _CARGO_DENIED_WORDS = frozenset({"run", "install"})
 _CARGO_FLAGS = ("--config",)
@@ -423,6 +426,9 @@ def _check_toolchains(argv: Argv) -> None:
                 flag = _flag_named(later, _GO_EXEC_FLAGS)
                 if flag is not None:
                     raise _deny(f"{flag} starts another program; it is refused")
+                flag = _flag_named(later, _GO_FILE_FLAGS)
+                if flag is not None:
+                    raise _deny(f"{flag} reads files the checks do not see; it is refused")
         if program == "go":
             for later in rest:
                 if later.casefold() in _GO_DENIED_WORDS:

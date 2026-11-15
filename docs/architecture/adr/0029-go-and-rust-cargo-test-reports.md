@@ -23,7 +23,7 @@ Option 2.
 
 - **go:** the unit gate is `gotestsum --junitfile {report_file} -- -mod=readonly ./...` (gotestsum is an allowed executable of the template). `ac_trace` counts `pkg/x/y_test.go` as run when a passed or failed case has the classname `<module>/pkg/x` (`<module>` for a file at the root), with `<module>` read from the worktree's `go.mod`. Without a readable `module` line, no Go file counts as run, so the gate fails closed.
 - **rust-cargo:** the unit gate is `cargo test --locked --offline`, with no report, and the template marks `ac_trace` `required: false`. The gate still runs and still reports which criteria it could not trace; `ac_review` (the reviewer veto) still applies.
-- The command policy refuses the routes that run another program: `go run|generate|tool|env|install`, `-exec`, `-toolexec`, `-vettool`, gotestsum's `--raw-command`, `--post-run-command` and `--watch`, and `cargo run|install`, `--config`, `-Z` and `+toolchain`.
+- The command policy refuses the routes that run another program: `go run|generate|tool|env|install`, `-exec`, `-toolexec`, `-vettool`, gotestsum's `--raw-command`, `--post-run-command` and `--watch`, and `cargo run|install`, `--config`, `-Z` and `+toolchain`. Since the v0.4 decisions (N-6) it also refuses `-modfile` and `-overlay` for `go` and `gotestsum`, in every spelling, at every stage: they make the build read a `go.mod` or source files the dependency checks and the diff do not show. They are not on the global hard-deny list.
 
 ## Consequences
 
