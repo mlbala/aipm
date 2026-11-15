@@ -54,6 +54,19 @@ agent and the gates may make, would change the run's cache for the next task (se
 of the v0.4 decisions)."""
 
 
+def cache_args(program: str, cache: Path) -> tuple[str, ...]:
+    """Options that prepare puts right after `program`, before its subcommand. pnpm 10 lets a
+    committed `pnpm-workspace.yaml` override the store and import method `cache_env` sets, but
+    not its own flags, so a repository's `packageImportMethod: hardlink` could make every task's
+    `node_modules` share files with the run's store (security review of the v0.4 decisions,
+    session 3). `copy`, not `clone-or-copy`: pnpm 10.34.9 ignored a `clone-or-copy` flag that
+    repeated the environment's value, and the file's setting won. Gates get none: after a
+    script name, pnpm hands options to the script."""
+    if program_name(program) != "pnpm":
+        return ()
+    return (f"--store-dir={cache / 'pnpm-store'}", "--package-import-method=copy")
+
+
 def cache_env(program: str, cache: Path, temp: Path) -> dict[str, str]:
     """The variables that point `program` (an argv[0]) at the run's cache. Go also gets its build
     cache in the attempt's `temp` dir, which no other attempt shares."""

@@ -218,13 +218,15 @@ def repo_agent_config(root: Path, cfg: Config) -> dict[str, Any] | None:
 TOOLCHAIN_FILES: tuple[str, ...] = (
     ".cargo/config.toml", ".cargo/config", "rust-toolchain.toml", "rust-toolchain", "go.work",
     ".npmrc", ".yarnrc.yml", ".yarnrc", "uv.toml", ".python-version", ".tool-versions",
+    "pnpm-workspace.yaml",
 )  # fmt: skip
 """Repository-root files that change where code or a toolchain comes from (red-team v0.4, N-4;
 ADR-0032): Cargo's settings (`rustc-wrapper`, test `runner`, aliases, source replacement), the
 toolchain rustup installs, Go's workspace (`replace` for any module), the npm, pnpm and Yarn
-registries and `yarnPath`, uv's indexes, the interpreter uv installs, and the versions asdf or
-mise shims run. `pyproject.toml` joins with its `[tool.uv]` table only. `conftest.py` is project
-code like any test and is not hashed (R-9)."""
+registries and `yarnPath`, pnpm 10's settings (store, import method, overrides), uv's indexes,
+the interpreter uv installs, and the versions asdf or mise shims run. `pyproject.toml` joins
+with its `[tool.uv]` table only. `conftest.py` is project code like any test and is not hashed
+(R-9)."""
 MAX_TOOLCHAIN_BYTES = 1_048_576
 PYPROJECT = "pyproject.toml"
 CARGO_DIR = ".cargo"

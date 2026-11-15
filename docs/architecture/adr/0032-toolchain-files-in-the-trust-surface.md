@@ -28,6 +28,7 @@ Option 1. The surface gains a `toolchain_files` key, holding the SHA-256 of each
 | `pyproject.toml`, the `[tool.uv]` table only | the same settings as `uv.toml`. It is hashed as sorted JSON of the parsed table, so a dependency change alone needs no new trust. A file that does not parse as TOML is pinned whole |
 | `.python-version` | picks the interpreter uv installs and runs |
 | `.tool-versions` | picks the toolchain version that asdf or mise shims on PATH run |
+| `pnpm-workspace.yaml` | pnpm 10's settings: `storeDir`, `packageImportMethod`, `overrides`, `onlyBuiltDependencies` and more. Added in session 3 of the v0.4 decisions, when the real `srt` showed its settings win over the environment; aipm also passes the store and import method as flags (ADR-0031). Members and catalogs change with it, so a pull that touches them asks for trust again |
 
 **Committed, not the working tree.** The files are read from `HEAD` with `git ls-tree` and `git cat-file`, which read objects only, so no repository filter or hook runs. A clone or a pull changes `HEAD`, and those changes are the ones this decision is about. An agent's change to the working tree is judged by the post-change checks as a dependency violation, and prepare does not run. Hashing the working tree would have turned an agent's change in manual mode into an "untrusted surface" error before `verify` could report the violation. That error would ask the user to trust the agent's change, and no violation would be recorded.
 
@@ -40,7 +41,6 @@ Names are compared casefolded, because a macOS or Windows checkout opens a commi
 - `pip.conf`: pip never reads one from the project directory, only the user's, the global one and the active virtualenv's.
 - `go.work.sum`: checksums only; it cannot redirect anything.
 - `conftest.py`: project code, like every test the gates run. Hashing it would ask for trust on most test changes (the owner's decision; R-9).
-- `pnpm-workspace.yaml`: mostly workspace members and catalogs, which change often. Its pnpm 10 settings remain residual (R-9).
 - `bunfig.toml`: aipm has no bun stack.
 - Files below the root, such as `sub/.cargo/config.toml`: gates and prepare run at the worktree root, so the tools do not read them. Directories above the worktrees are refused (RT04-11) or residual (R-22).
 
@@ -48,4 +48,5 @@ Names are compared casefolded, because a macOS or Windows checkout opens a commi
 
 - A `git pull` that changes one of these files makes the repository untrusted until the user reviews it with `aipm trust --show` and trusts it again. A repository that already holds one re-trusts once after upgrading.
 - A file the user changes without committing it (or never commits, such as an untracked `.python-version`) is not hashed: it is the user's own, not something a pull brought. A build's worktrees use the committed files, and an agent's change to one is a violation.
-- `conftest.py`, `pnpm-workspace.yaml` settings, and repository scripts the gates run stay residual (R-9).
+- `conftest.py` and repository scripts the gates run stay residual (R-9).
+- A repository that commits `pnpm-workspace.yaml` re-trusts once after upgrading to the version that hashes it, and after any pull that changes it, including a new workspace member or catalog entry.

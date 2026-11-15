@@ -9,14 +9,18 @@ dependencies.
 Each test builds a profile with `profile_for`, as the build does, and runs through `run_safe`.
 """
 
+import dataclasses
 import json
 import os
 import shutil
 import sys
+import tarfile
 from pathlib import Path
 
 import pytest
 
+from aipm.config.schema import Config
+from aipm.domain.models import GateStatus
 from aipm.domain.models.gates import NetworkProfile
 from aipm.execution import package_cache
 from aipm.execution.package_cache import cache_env, run_cache
@@ -29,8 +33,10 @@ from aipm.execution.sandbox import (
     launcher_for,
     profile_for,
 )
+from aipm.gates.command_gate import run_prepare
 from aipm.security.network import NetworkPolicy
 from tests.conftest import REPO_ROOT
+from tests.security.test_gates import make_ctx
 
 STUB_BIN = REPO_ROOT / "tests" / "fakes" / "bin"
 REQUIRED = os.environ.get("AIPM_REQUIRE_REAL_SRT") == "1"
@@ -169,31 +175,64 @@ def test_pnpm_reads_the_store_and_import_method_from_the_environment(
     assert method.stdout.decode().strip() == "clone-or-copy"
 
 
-def test_a_committed_pnpm_workspace_file_cannot_move_the_store_or_link_from_it(
-    tmp_path: Path, cache: Path, request: pytest.FixtureRequest
+DEP_PACKAGE = {"name": "dep", "version": "1.0.0", "main": "index.js"}
+
+
+def tarball(directory: Path) -> str:
+    """A local npm package tarball, so pnpm installs through its store without the network."""
+    source = directory.parent / "dep-src" / "package"
+    source.mkdir(parents=True)
+    (source / "package.json").write_text(json.dumps(DEP_PACKAGE), encoding="utf-8")
+    (source / "index.js").write_text("module.exports = 1;\n", encoding="utf-8")
+    with tarfile.open(directory / "dep-1.0.0.tgz", "w:gz") as archive:
+        archive.add(source, arcname="package")
+    return "file:dep-1.0.0.tgz"
+
+
+@pytest.mark.parametrize(
+    ("name", "text"),
+    [
+        ("pnpm-workspace.yaml", "storeDir: {elsewhere}\npackageImportMethod: hardlink\n"),
+        ("pnpm-workspace.yaml", "packageImportMethod: hardlink\n"),
+        (".npmrc", "store-dir={elsewhere}\npackage-import-method=hardlink\n"),
+    ],
+    ids=["workspace-store-and-hardlink", "workspace-hardlink", "npmrc-store-and-hardlink"],
+)
+def test_a_committed_pnpm_setting_cannot_share_files_with_the_run_store(
+    tmp_path: Path, cache: Path, name: str, text: str
 ) -> None:
-    """Open (ADR-0031, for the owner): pnpm 10 lets a committed `pnpm-workspace.yaml` override
-    `npm_config_store_dir` and `npm_config_package_import_method`. With `hardlink`, a write to
-    one worktree's `node_modules` changes the run's store for the next task (M-2 again). The
-    agent cannot add the file (it is package config, which holds prepare), but a repository
-    may commit it. Strict xfail until aipm passes the flags, which win over the file; the
-    marker is applied only once the tools are found, so a missing tool still fails in CI."""
+    """Session 3: pnpm 10 let a committed `pnpm-workspace.yaml` override the run cache's store
+    and import method. With `hardlink`, each task's `node_modules` shared inodes with the run's
+    store, so a write in one worktree changed what a later task's gates ran (M-2 again). aipm
+    now passes `--store-dir` and `--package-import-method=copy`, which win over the file; an
+    `.npmrc` is covered the same way. Runs aipm's own prepare under the real srt."""
     pnpm = need("pnpm")
-    need("srt")
-    request.applymarker(pytest.mark.xfail(strict=True, reason="open: pnpm-workspace.yaml wins"))
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    (workspace / "package.json").write_text('{"name": "x", "version": "1.0.0"}\n', "utf-8")
-    (workspace / "pnpm-workspace.yaml").write_text(
-        f"storeDir: {tmp_path / 'elsewhere'}\npackageImportMethod: hardlink\n", "utf-8"
+    srt = need("srt")
+    ctx = make_ctx(tmp_path, runtime=srt)
+    elsewhere = tmp_path / "elsewhere"
+    (ctx.root / "package.json").write_text(
+        json.dumps({"name": "app", "version": "1.0.0", "dependencies": {"dep": tarball(ctx.root)}}),
+        encoding="utf-8",
     )
-    extra = cache_env(pnpm, cache, tmp_path)
-    store = run(ProcessKind.PREPARE, [pnpm, "store", "path"], workspace=workspace, cache=cache,
-                extra=extra)  # fmt: skip
-    method = run(ProcessKind.PREPARE, [pnpm, "config", "get", "package-import-method"],
-                 workspace=workspace, cache=cache, extra=extra)  # fmt: skip
-    assert Path(store.stdout.decode().strip()).parent == cache / "pnpm-store"
-    assert method.stdout.decode().strip() == "clone-or-copy"
+    (ctx.root / name).write_text(text.format(elsewhere=elsewhere), encoding="utf-8")
+    cfg = Config.model_validate(
+        {
+            "allowed_executables": [[pnpm, "install"]],
+            "prepare": {"run": [pnpm, "install", "--offline", "--ignore-scripts"]},
+        }
+    )
+    ctx = dataclasses.replace(ctx, cfg=cfg, package_cache=cache)
+    outcome = run_prepare(ctx)
+    assert outcome is not None and outcome.result.status is GateStatus.PASS, outcome.full_output
+    installed = sorted((ctx.root / "node_modules" / ".pnpm").rglob("index.js"))
+    assert installed
+    store = cache / "pnpm-store"
+    stored = {f.stat().st_ino for f in store.rglob("*") if f.is_file()}
+    assert stored, "pnpm did not use the run's store"
+    for path in installed:
+        assert path.stat().st_nlink == 1, path
+        assert path.stat().st_ino not in stored, path
+    assert not elsewhere.exists()
 
 
 def test_go_vet_runs_with_a_read_only_module_cache(tmp_path: Path, cache: Path) -> None:

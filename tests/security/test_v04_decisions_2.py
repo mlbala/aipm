@@ -775,6 +775,7 @@ def test_verify_blocks_the_task_and_exits_8_when_the_proxy_cannot_be_asked(
 TOOLCHAIN_FILES = [
     ".cargo/config.toml", ".cargo/config", "rust-toolchain.toml", "rust-toolchain", "go.work",
     ".npmrc", ".yarnrc.yml", ".yarnrc", "uv.toml", ".python-version", ".tool-versions",
+    "pnpm-workspace.yaml",
 ]  # fmt: skip
 
 
@@ -860,7 +861,7 @@ def test_a_deeply_nested_tool_uv_is_pinned_not_a_crash(tmp_repo: Path) -> None:
 def test_conftest_and_other_project_files_are_not_hashed(tmp_repo: Path) -> None:
     before = hash_of(tmp_repo)
     for rel in ("conftest.py", "tests/conftest.py", "pip.conf", "go.work.sum",
-                "pnpm-workspace.yaml", "src/.npmrc", "sub/go.work",
+                "src/.npmrc", "sub/go.work",
                 ".cargo/credentials.toml"):  # fmt: skip
         put(tmp_repo, rel, "x = 1\n")
     commit(tmp_repo)

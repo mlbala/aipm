@@ -1,12 +1,14 @@
 """The owner's v0.4 decisions, session 3 (docs/security/reviews/v0.4-decisions-progress.md):
-the nightly `ci-long` workflow (v0.3 rec 6), the real `srt` in CI (v0.3 rec 3) and `install.sh`
-installing the attested wheel (N-7).
+the nightly `ci-long` workflow (v0.3 rec 6), the real `srt` in CI (v0.3 rec 3), `install.sh`
+installing the attested wheel (N-7), and pnpm's flags for the run's store (the medium the real
+`srt` showed).
 
 The workflows are read with the safe YAML loader and checked as written; nothing here runs on
 GitHub. `tests/security/test_release_supply_chain.py` checks every workflow's triggers,
 permissions and action pins; the tests here check what each new job is for.
 """
 
+import dataclasses
 import json
 import re
 import shlex
@@ -15,6 +17,11 @@ from typing import Any
 
 import pytest
 
+from aipm.config.schema import Config
+from aipm.domain.models import GateStatus
+from aipm.execution.package_cache import cache_args
+from aipm.gates.command_gate import run_command_gate, run_prepare
+from aipm.gates.context import GateContext
 from tests.conftest import REPO_ROOT
 from tests.integration.test_install_sh import (
     SCRIPT,
@@ -30,6 +37,7 @@ from tests.integration.test_install_sh import (
     without_gh,
 )
 from tests.integration.test_install_sh import env as env  # noqa: PLC0414 - the fixture
+from tests.security.test_gates import make_ctx
 from tests.security.test_release_supply_chain import (
     README,
     WORKFLOWS,
@@ -387,3 +395,70 @@ def test_install_sh_refuses_a_tag_with_other_characters(
     assert "uv tool install git+" not in err
     assert not curl_log.exists()
     assert not uv_log.exists()
+
+
+# ------------------------------------------------------------------ pnpm and the run's store
+
+ARGV_RECORDER = '#!/bin/sh\nprintf "%s\\n" "$@" > "{log}"\n'
+
+
+def pnpm_ctx(tmp_path: Path, program: str, *, gate_run: tuple[str, ...] = ()) -> GateContext:
+    """A gate context whose prepare is `<program> install --frozen-lockfile`, with its own run
+    cache, and one gate `unit` when `gate_run` is given."""
+    ctx = make_ctx(tmp_path)
+    cfg = Config.model_validate(
+        {
+            "allowed_executables": [[program, "install"], [program, "test"]],
+            "prepare": {"run": [program, "install", "--frozen-lockfile"]},
+            "gates": {"unit": {"run": list(gate_run)}} if gate_run else {},
+        }
+    )
+    return dataclasses.replace(ctx, cfg=cfg, package_cache=tmp_path / "run-cache")
+
+
+def recording_pnpm(tmp_path: Path) -> tuple[str, Path]:
+    log = tmp_path / "argv.log"
+    bin_dir = tmp_path / "pnpm-bin"
+    bin_dir.mkdir()
+    program = bin_dir / "pnpm"
+    program.write_text(ARGV_RECORDER.format(log=log), encoding="utf-8")
+    program.chmod(0o755)
+    return str(program), log
+
+
+def test_pnpm_gets_the_run_store_and_copying_as_flags(tmp_path: Path) -> None:
+    """Session 3 (the owner's fix): pnpm 10 lets a committed `pnpm-workspace.yaml` override
+    the environment, but not its own flags. `copy`, not `clone-or-copy`: pnpm 10.34.9 dropped a
+    `clone-or-copy` flag that repeated the environment's value, and the file's `hardlink` won."""
+    cache = tmp_path / "cache"
+    assert cache_args("/opt/bin/pnpm", cache) == (
+        f"--store-dir={cache / 'pnpm-store'}",
+        "--package-import-method=copy",
+    )
+    for other in ("npm", "uv", "go", "cargo", "/usr/bin/python3", "pnpx"):
+        assert cache_args(other, cache) == ()
+
+
+def test_prepare_puts_the_pnpm_flags_before_the_subcommand(tmp_path: Path) -> None:
+    """Before the subcommand they are pnpm's own options whatever the trusted prepare argv
+    runs; the argv the command policy checked is otherwise unchanged."""
+    program, log = recording_pnpm(tmp_path)
+    ctx = pnpm_ctx(tmp_path, program)
+    outcome = run_prepare(ctx)
+    assert outcome is not None and outcome.result.status is GateStatus.PASS, outcome
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        f"--store-dir={ctx.package_dir / 'pnpm-store'}",
+        "--package-import-method=copy",
+        "install",
+        "--frozen-lockfile",
+    ]
+
+
+def test_gates_running_pnpm_get_no_extra_flags(tmp_path: Path) -> None:
+    """A gate's `pnpm test` (or `pnpm run x`) would pass flags after the script name to the
+    script; gates install nothing, so they keep their argv."""
+    program, log = recording_pnpm(tmp_path)
+    ctx = pnpm_ctx(tmp_path, program, gate_run=(program, "test"))
+    outcome = run_command_gate("unit", ctx.cfg.gates["unit"], ctx, paths=[], required=True)
+    assert outcome.result.status is GateStatus.PASS, outcome.result.summary
+    assert log.read_text(encoding="utf-8").splitlines() == ["test"]
