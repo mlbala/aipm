@@ -38,7 +38,7 @@ from aipm.domain.models import (
 from aipm.execution import package_cache
 from aipm.execution.package_cache import cache_env, remove_tree, run_cache, seed_cargo
 from aipm.execution.process import running_groups
-from aipm.execution.sandbox import ProcessKind, ProfilePaths, profile_for
+from aipm.execution.sandbox import PREPARE_WRITABLE, ProcessKind, ProfilePaths, profile_for
 from aipm.execution.worktree import cache_root
 from aipm.gates import runner as runner_module
 from aipm.gates.builtin import deps
@@ -121,7 +121,12 @@ def test_each_package_manager_is_pointed_at_the_run_cache(
     cache, temp = tmp_path / "cache", tmp_path / "temp"
     env = cache_env(program, cache, temp)
     go_build = {"GOCACHE": str(temp / "go-build")} if "GOMODCACHE" in expected else {}
-    assert env == {k: str(cache / v) for k, v in expected.items()} | go_build
+    copies = {
+        "UV_CACHE_DIR": {"UV_LINK_MODE": "copy"},
+        "npm_config_store_dir": {"npm_config_package_import_method": "clone-or-copy"},
+    }
+    extra = {k: v for var in expected for k, v in copies.get(var, {}).items()}
+    assert env == {k: str(cache / v) for k, v in expected.items()} | go_build | extra
 
 
 ENV_RECORDER = """
@@ -148,10 +153,12 @@ def test_prepare_and_the_gates_get_the_same_cache(tmp_path: Path) -> None:
 
 
 def test_without_a_run_cache_the_attempt_gets_its_own(tmp_path: Path) -> None:
-    """Never a fall back to the user's caches: a context with no run cache (verify) uses one
-    inside the attempt's temp dir."""
+    """Never a fall back to the user's caches: a context with no run cache (only tests have
+    none) uses one beside the attempt's temp dir, which gates may write."""
     ctx = make_ctx(tmp_path)
-    assert ctx.package_dir == ctx.ws.temp_dir / "packages"
+    temp = ctx.ws.temp_dir
+    assert ctx.package_dir == temp.with_name(f"{temp.name}-packages")
+    assert not ctx.package_dir.is_relative_to(temp), "gates may write the temp dir"
     assert dataclasses.replace(ctx, package_cache=tmp_path / "c").package_dir == tmp_path / "c"
 
 
@@ -160,9 +167,13 @@ def test_prepare_may_write_only_the_run_cache(tmp_path: Path) -> None:
     paths = ProfilePaths(workspace=tmp_path / "w", temp_dir=tmp_path / "t", home=home,
                          package_cache=cache)  # fmt: skip
     prepare = profile_for(ProcessKind.PREPARE, NONE, paths, runtime="/bin/srt")
-    assert prepare.allow_write == (tmp_path / "w", tmp_path / "t", cache)
+    writable = tuple(cache / rel for rel in PREPARE_WRITABLE)
+    assert prepare.allow_write == (tmp_path / "w", tmp_path / "t", *writable)
+    for never in (cache, cache / "cargo", cache / "cargo" / "config.toml", cache / "cargo" / "bin"):
+        assert never not in prepare.allow_write
     for kind in (ProcessKind.GATE, ProcessKind.AGENT, ProcessKind.SCANNER):
-        assert cache not in profile_for(kind, NONE, paths, runtime="/bin/srt").allow_write
+        allowed = profile_for(kind, NONE, paths, runtime="/bin/srt").allow_write
+        assert not any(p.is_relative_to(cache) for p in allowed)
 
 
 @pytest.mark.parametrize("kind", list(ProcessKind))
@@ -181,12 +192,13 @@ def test_no_process_may_write_cargo_settings_or_programs_in_the_cache(
 
 def test_the_srt_profile_of_prepare_names_the_contexts_cache(tmp_path: Path) -> None:
     ctx = dataclasses.replace(make_ctx(tmp_path), runtime="/bin/srt")
-    for cache, expected in ((None, ctx.ws.temp_dir / "packages"),
+    temp = ctx.ws.temp_dir
+    for cache, expected in ((None, temp.with_name(f"{temp.name}-packages")),
                             (tmp_path / "c", tmp_path / "c")):  # fmt: skip
         profile = sandbox_for(dataclasses.replace(ctx, package_cache=cache), ProcessKind.PREPARE,
                               ctx.cfg.security.network.prepare)  # fmt: skip
         assert profile is not None
-        assert expected in profile.allow_write
+        assert expected / "uv" in profile.allow_write
         assert not any(str(p).startswith(str(ctx.home)) for p in profile.allow_write)
 
 
@@ -196,6 +208,9 @@ def test_the_run_cache_is_private_and_outside_the_repository(
     path = run_cache(tmp_repo, "r-20261115-1200-abcd", home=dirs.home)
     assert path == cache_root() / "packages" / repo_id(tmp_repo) / "r-20261115-1200-abcd"
     assert stat.S_IMODE(path.stat().st_mode) == 0o700
+    for rel in PREPARE_WRITABLE:  # made first, so srt's allowlist names paths that exist
+        assert (path / rel).exists(), rel
+    assert not (path / "cargo" / "config.toml").exists()  # this user has none
     other = run_cache(tmp_repo, "r-20261115-1200-ef01", home=dirs.home)
     assert other != path
 
@@ -236,6 +251,38 @@ def test_removal_clears_read_only_directories_without_following_links(tmp_path: 
         assert stat.S_IMODE(outside.stat().st_mode) == 0o555
     finally:
         outside.chmod(0o755)
+
+
+def test_a_cache_left_by_a_killed_run_is_emptied(tmp_repo: Path, dirs: UserDirs) -> None:
+    """`_finish` never ran after SIGKILL; a resumed run must not reuse what prepare wrote."""
+    path = run_cache(tmp_repo, "r-20261115-1200-abcd", home=dirs.home)
+    (path / "uv" / "poisoned").write_text("x", encoding="utf-8")
+    again = run_cache(tmp_repo, "r-20261115-1200-abcd", home=dirs.home)
+    assert again == path
+    assert not (path / "uv" / "poisoned").exists()
+
+
+def test_removal_clears_an_unreadable_directory(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    locked = cache / "go-mod" / "locked"
+    locked.mkdir(parents=True)
+    (locked / "f").write_text("x", encoding="utf-8")
+    locked.chmod(0o000)
+    remove_tree(cache)
+    assert not cache.exists()
+
+
+def test_seeding_never_writes_through_a_planted_link(tmp_path: Path) -> None:
+    home, cache = tmp_path / "home", tmp_path / "cache"
+    (home / ".cargo").mkdir(parents=True)
+    (home / ".cargo" / "config.toml").write_text("[net]\n", encoding="utf-8")
+    victim = tmp_path / "victim.toml"
+    victim.write_text("mine\n", encoding="utf-8")
+    (cache / "cargo").mkdir(parents=True)
+    (cache / "cargo" / "config.toml").symlink_to(victim)
+    with pytest.raises(OSError):
+        seed_cargo(cache, home)
+    assert victim.read_text() == "mine\n"
 
 
 def test_removing_a_missing_cache_is_fine(tmp_path: Path) -> None:
@@ -281,7 +328,9 @@ given = os.environ.get("PIP_CACHE_DIR", "unset")
 out = Path.home() / ".stub-claude" / "prepare"
 out.mkdir(parents=True, exist_ok=True)
 seen = "exists" if Path(given).is_dir() or not Path(given).exists() else "not a directory"
-(out / uuid.uuid4().hex).write_text(given + "\\n" + seen, encoding="utf-8")
+cargo = (Path(given).parent / "cargo" / "config.toml")
+seeded = cargo.read_text() if cargo.exists() else "none"
+(out / uuid.uuid4().hex).write_text(given + "\\n" + seen + "\\n" + seeded, encoding="utf-8")
 '''
 
 
@@ -360,16 +409,21 @@ def test_an_interrupted_build_removes_its_cache(project: Path, dirs: UserDirs) -
     assert not any(runs.iterdir())
 
 
-def test_verify_gives_its_prepare_a_cache_of_its_own(project: Path, dirs: UserDirs) -> None:
+def test_verify_gives_its_prepare_a_seeded_cache_of_its_own(project: Path, dirs: UserDirs) -> None:
+    """Outside the temp dir its gates may write, and with the user's Cargo source replacement
+    (security review of the v0.4 decisions)."""
+    (dirs.home / ".cargo").mkdir(exist_ok=True)
+    (dirs.home / ".cargo" / "config.toml").write_text("[net]\nretry = 7\n", encoding="utf-8")
     ok(aipm(project, "prompt", "T-002"))
     install(FIXTURE / "T-002", project)
     code, envelope = verify(project)
     assert code == 0, envelope
-    (seen,) = recorded(dirs.home)
+    (record,) = (p.read_text() for p in (dirs.home / ".stub-claude" / "prepare").iterdir())
+    seen, _, seeded = record.split("\n", 2)
     assert Path(seen).name == "pip"
-    assert Path(seen).parent.name == "packages"
-    assert Path(seen).parent.parent.name.startswith("aipm-verify-")
-    assert not Path(seen).parent.parent.exists()
+    assert Path(seen).parent.parent == cache_root() / "packages" / repo_id(project)
+    assert seeded == "[net]\nretry = 7\n"
+    assert not Path(seen).parent.exists()
 
 
 # ---------------------------------------------------------------- N-1: Go modules looked up first

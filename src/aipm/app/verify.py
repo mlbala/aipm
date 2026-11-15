@@ -80,7 +80,7 @@ from aipm.domain.models import (
 from aipm.domain.models.snapshot import StateSnapshot
 from aipm.domain.phase import prompt_inputs
 from aipm.execution import git
-from aipm.execution.package_cache import remove_tree
+from aipm.execution.package_cache import remove_tree, run_cache
 from aipm.execution.sandbox import Runtime, resolve_sandbox
 from aipm.gates.context import GateContext
 from aipm.gates.runner import GateRun, run_gates
@@ -246,6 +246,8 @@ class _Verify:
     temp: Path
     sandbox: Runtime | None
     warnings: list[str]
+    packages: Path | None = None
+    """This verify's package cache (ADR-0031): outside the temp dir, which gates may write."""
 
     def _task(self) -> tuple[TasksDoc, Task, AttemptSnapshot, StateSnapshot]:
         state, _ = read_snapshot(
@@ -297,6 +299,7 @@ class _Verify:
             home=Path.home(), now=datetime.now(UTC), runtime=self.sandbox,
             withheld=ignore_spec(self.root, also=base_ignores(self.root, base)).match_file,
             changed_during_gates=lambda: moved_since(self.root, scanned),
+            package_cache=self.packages,
         )  # fmt: skip
         review, unavailable = reviewer(self.cfg, self.store, no_cache=self.options.no_cache)
         commit_paths = [c.path for c in changes.files if not c.path.startswith(".pm/")]
@@ -537,7 +540,9 @@ def run(project: Path | None, options: VerifyOptions) -> VerifyResult:
     require_trusted(root, loaded, command="verify")
     store = runtime.open_repo_store(root)
     temp = attempt_dir(root)
+    packages: Path | None = None
     try:
+        packages = run_cache(root, new_run_id(), home=Path.home())
         sandbox = resolve_sandbox(
             mode=cfg.dispatch.sandbox.value,
             require=cfg.security.require_sandbox,
@@ -546,6 +551,10 @@ def run(project: Path | None, options: VerifyOptions) -> VerifyResult:
         )
         warnings = [*loaded.warnings, *([sandbox.warning] if sandbox.warning else [])]
         with store.lock():
-            return _Verify(root, cfg, store, options, temp, sandbox.launcher, warnings).run()
+            return _Verify(
+                root, cfg, store, options, temp, sandbox.launcher, warnings, packages
+            ).run()
     finally:
-        remove_tree(temp)  # Go leaves its module cache read-only (ADR-0031)
+        remove_tree(temp)
+        if packages is not None:
+            remove_tree(packages)  # Go leaves its module cache read-only (ADR-0031)

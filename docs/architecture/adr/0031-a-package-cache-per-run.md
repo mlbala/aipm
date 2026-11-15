@@ -20,7 +20,7 @@ Part 2 of the review also found that gates had no Go build cache they could writ
 
 Option 2, the owner's choice.
 
-- **Where.** `<user_cache_dir>/aipm/packages/<repo_id>/<run_id>/`, mode 0700, refused inside the repository (exit 6). `verify` gets one inside its own temp dir, which already lives for exactly one run. A gate context without a run cache never falls back to the user's caches: it uses the attempt's temp dir.
+- **Where.** `<user_cache_dir>/aipm/packages/<repo_id>/<run_id>/`, mode 0700, refused inside the repository (exit 6). `verify` gets one of its own the same way, removed when it ends. Neither lives in the attempt's temp dir, which gates may write. A gate context without a run cache (only tests have none) uses a directory beside the temp dir, never the user's caches.
 - **How.** Each package manager is pointed at its own subdirectory through its own variable, chosen by the program prepare or the gate runs:
 
   | Program | Variables |
@@ -32,16 +32,16 @@ Option 2, the owner's choice.
   | `go`, `gotestsum` | `GOMODCACHE`; `GOCACHE` in the attempt's temp dir |
   | `cargo` | `CARGO_HOME` |
 
-  Gates get the same variables, so `go vet -mod=readonly`, `cargo --offline` and `uv run --offline` find what prepare fetched.
-- **Who writes it.** Under `srt` only prepare may write the run's cache; it may no longer write the user's caches. Gates and agents may read it but never write it. Go's build cache is per attempt, so gates never share one.
+  Gates get the same variables, so `go vet -mod=readonly`, `cargo --offline` and `uv run --offline` find what prepare fetched. uv installs with `UV_LINK_MODE=copy` and pnpm with `package-import-method=clone-or-copy`. On Linux both would otherwise hard-link from the cache, so a write to the worktree's `.venv` or `node_modules`, which the agent and the gates may make, would change the cache for the next task.
+- **Who writes it.** Under `srt` only prepare may write the run's cache, and only an allowlist of paths in it: each package manager's directory, Cargo's `registry/` and `git/`, and Cargo's lock files. All of them are created when the cache is, so the allowlist names paths that exist. The cache root and Cargo's `config*`, `bin/` and credentials are not on it. Prepare may no longer write the user's caches. Gates and agents may read the cache but never write it. Go's build cache is per attempt, so gates never share one.
 - **Cargo.** Moving `CARGO_HOME` would make Cargo stop reading the user's `~/.cargo/config.toml` (mirrors, source replacement), so that file is copied into the run's `CARGO_HOME` when the run starts, if it is a regular file of at most 1 MiB. Credentials are never copied. Cargo runs `$CARGO_HOME/bin/cargo-<cmd>` before anything on PATH and reads `$CARGO_HOME/config.toml` as settings, so these are write-denied to every process: `config.toml`, `config`, `bin`, `credentials.toml` and `credentials`.
-- **When it goes.** A build creates the cache when it starts or resumes, and deletes it when it ends, finished or interrupted. A resumed run starts with an empty cache. Go leaves its module cache read-only, so deletion first makes every directory writable, opening each without following links.
+- **When it goes.** A build creates the cache when it starts or resumes, and deletes it when it ends, finished or interrupted. A cache that a killed run left behind is emptied first, so a resumed run always starts empty. Go leaves its module cache read-only, and repository code can make a directory unreadable, so deletion first makes every directory accessible. It walks each directory relative to its parent's descriptor, without following links.
 
 ## Consequences
 
 - The user's caches are no longer written by aipm's prepare step: R-13's cross-project path is closed.
-- Within one run, tasks share the cache: one task's prepare (repository build code) can change what a later task's prepare installs. This is accepted with option 2. Option 1 would close it at the cost of downloading everything again on every attempt.
+- Within one run, tasks share the cache, and this is accepted with option 2. One task's prepare (repository build code) can change what a later task's prepare installs. It can also change the sources a later task's gates compile directly from the cache: Cargo's `registry/src` and `git/checkouts`, and Go's module cache. A planted `build.rs` there runs in the later task's gates, and so can fake their result. Option 1 would close this, at the cost of downloading everything again on every attempt. Checking the cache against the lockfiles before gates (`go mod verify`; Cargo has no equivalent for extracted sources) is left for v0.5. Settings and subcommands are not shared, because prepare cannot write them.
 - Every run downloads its packages once. A resumed run downloads them again.
 - A private registry that needs credentials in `~/.cargo/credentials.toml` no longer works for Cargo prepare steps.
-- Not yet checked under the real `srt`: whether `go vet` works with a read-only `GOMODCACHE`, whether `cargo --offline` works with a read-only `CARGO_HOME` (Cargo takes a lock in `$CARGO_HOME/.package-cache`), and whether pnpm reads `npm_config_store_dir`. Checking them is part of running the real `srt` in CI (v0.3 rec 3).
-- Without `srt`, the variables still steer the package managers, but nothing stops repository code from writing the user's caches anyway (as before; §9.1 "No sandbox available").
+- Not yet checked under the real `srt`: whether `go vet` works with a read-only `GOMODCACHE`; whether `cargo --offline` works with a read-only `CARGO_HOME` (Cargo takes a lock in `$CARGO_HOME/.package-cache`); whether `cargo fetch` copes when it cannot create SQLite sidecar files beside `.global-cache`; whether a symlinked path in the allowlist behaves as expected; and whether pnpm reads `npm_config_store_dir`. Checking them is part of running the real `srt` in CI (v0.3 rec 3).
+- Without `srt`, the variables still steer the package managers, but nothing stops repository code from writing the user's caches, or the run cache's Cargo settings, which a build does not watch (as before; §9.1 "No sandbox available").

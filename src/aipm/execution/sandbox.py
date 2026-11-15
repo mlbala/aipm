@@ -110,8 +110,9 @@ TOOLCHAIN_CONFIG: tuple[str, ...] = (
 reads `$CARGO_HOME/config.toml` (a `rustc-wrapper` or test `runner` is any program), rustup's
 settings can override the toolchain for a directory, and `go env -w` writes Go's env file
 (`os.UserConfigDir()/go/env`), where `GOFLAGS=-toolexec=…` would wrap every later build. Gates get
-no `CARGO_HOME`, `RUSTUP_HOME` or `GOENV`, so these are the files they read. No process aipm
-starts may write them, and a build watches them."""
+no `RUSTUP_HOME` or `GOENV`, so these are the files they read; their `CARGO_HOME` is the run's
+package cache, seeded from `~/.cargo/config.toml` (ADR-0031). No process aipm starts may write
+them, and a build watches them."""
 
 CONFIG_HOME_PROTECTED: tuple[str, ...] = (
     "settings.json", "settings.local.json", "CLAUDE.md", "hooks", "agents", "skills",
@@ -129,6 +130,19 @@ PROTECTED_CARGO: tuple[str, ...] = (
 """In the run's `CARGO_HOME`: what Cargo reads as settings, or runs as `cargo <cmd>` before
 anything on PATH. No process aipm starts may write them, so one task's prepare cannot plant them
 for the next task's gates (SECURITY.md §9.1)."""
+
+
+CARGO_LOCK_FILES: tuple[str, ...] = (".package-cache", ".package-cache-mutate", ".global-cache")
+"""Files Cargo writes at the root of `CARGO_HOME` while it fetches; aipm creates them first."""
+PREPARE_WRITABLE: tuple[str, ...] = (
+    "uv", "pip", "npm", "pnpm-store", "pnpm-cache", "go-mod",
+    f"{CARGO_DIR}/registry", f"{CARGO_DIR}/git",
+    *(f"{CARGO_DIR}/{name}" for name in CARGO_LOCK_FILES),
+)  # fmt: skip
+"""What prepare may write in the run's package cache: each package manager's own directory and
+Cargo's downloads and locks, never the cache root or Cargo's settings and `bin/`. Being an
+allowlist, it holds even for a path that does not exist yet (security review of the v0.4
+decisions)."""
 
 
 def protected_cache_paths(cache: Path) -> tuple[Path, ...]:
@@ -234,7 +248,8 @@ def profile_for(
             deny_read += [home / rel for rel in AGENT_HOMES]
     elif kind is ProcessKind.PREPARE:
         allow = [paths.workspace, paths.temp_dir]
-        allow += [] if paths.package_cache is None else [paths.package_cache]
+        cache = paths.package_cache
+        allow += [] if cache is None else [cache / rel for rel in PREPARE_WRITABLE]
     else:
         allow = [paths.output_dir if paths.output_dir is not None else paths.temp_dir]
     deny_write = [paths.workspace / rel for rel in _PROTECTED_LITERALS]

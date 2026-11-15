@@ -18,10 +18,11 @@ import os
 import re
 import shutil
 import stat
+from contextlib import suppress
 from pathlib import Path
 
 from aipm.domain.errors import UsageError
-from aipm.execution.sandbox import CARGO_DIR
+from aipm.execution.sandbox import CARGO_DIR, CARGO_LOCK_FILES, PREPARE_WRITABLE
 from aipm.execution.worktree import cache_root, outside_repo
 from aipm.security.command_policy import program_name
 from aipm.state.layout import repo_id
@@ -43,6 +44,15 @@ _CACHE_ENV: dict[str, tuple[tuple[str, str], ...]] = {
 """For each program: the variable that moves its package cache, and the directory in the run's
 cache it moves to."""
 
+_COPY_ENV: dict[str, dict[str, str]] = {
+    "uv": {"UV_LINK_MODE": "copy"},
+    "pnpm": {"npm_config_package_import_method": "clone-or-copy"},
+}
+"""Install copies (or copy-on-write clones), never hard links: on Linux uv and pnpm hard-link
+from their cache by default, so a write to the worktree's `.venv` or `node_modules`, which the
+agent and the gates may make, would change the run's cache for the next task (security review
+of the v0.4 decisions)."""
+
 
 def cache_env(program: str, cache: Path, temp: Path) -> dict[str, str]:
     """The variables that point `program` (an argv[0]) at the run's cache. Go also gets its build
@@ -51,20 +61,31 @@ def cache_env(program: str, cache: Path, temp: Path) -> dict[str, str]:
     env = {var: str(cache / sub) for var, sub in _CACHE_ENV.get(name, ())}
     if "GOMODCACHE" in env:
         env["GOCACHE"] = str(temp / "go-build")
+    env.update(_COPY_ENV.get(name, {}))
     return env
 
 
 def run_cache(repo: Path, run_id: str, *, home: Path) -> Path:
     """Create the cache of run `run_id` (mode 0700), outside the repository (exit 6 inside), with
-    the user's Cargo settings seeded into its `CARGO_HOME`."""
+    the user's Cargo settings seeded into its `CARGO_HOME` and every directory and lock file
+    prepare may write already there (`PREPARE_WRITABLE`). One left behind by a run that was
+    killed is removed first: a resumed run starts empty."""
     if not _RUN_ID.fullmatch(run_id):
         raise UsageError(f"not a run ID: {run_id[:40]!r}")
     real = Path(os.path.realpath(repo))
     base = cache_root() / PACKAGES_DIR / repo_id(real)
     path = outside_repo(base / run_id, real, "the run's package cache")
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path.chmod(0o700)
+    remove_tree(path)
+    base.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.mkdir(mode=0o700)
+    (path / CARGO_DIR).mkdir(mode=0o700)
     seed_cargo(path, home)
+    for rel in PREPARE_WRITABLE:
+        if rel.rsplit("/", 1)[-1] in CARGO_LOCK_FILES:
+            os.close(os.open(path / rel, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600))  # fmt: skip
+        else:
+            (path / rel).mkdir(mode=0o700)
     return path
 
 
@@ -80,7 +101,9 @@ def seed_cargo(cache: Path, home: Path) -> None:
             continue
         target = cache / CARGO_DIR
         target.mkdir(mode=0o700, parents=True, exist_ok=True)
-        (target / name).write_bytes(data)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        with os.fdopen(os.open(target / name, flags, 0o600), "wb") as handle:
+            handle.write(data)
         return
 
 
@@ -98,21 +121,36 @@ def _small_regular_file(path: Path) -> bytes | None:
 
 
 def remove_tree(path: Path) -> None:
-    """Delete `path` and everything in it. Go leaves its module cache read-only, so every
-    directory is made writable first; each is opened without following links, so a link planted
-    in the cache never changes anything outside it."""
+    """Delete `path` and everything in it. Go leaves its module cache read-only, and repository
+    code may have made a directory unreadable, so every directory is made accessible before it
+    is entered. Each is opened relative to its parent's descriptor without following links, so
+    neither a link planted in the cache nor a directory swapped for one changes anything
+    outside it."""
     if not path.is_dir() or path.is_symlink():
         path.unlink(missing_ok=True)
         return
-    for directory, _, _ in os.walk(path, followlinks=False):
-        _make_writable(directory)
+    _make_writable(None, str(path))
+    for _, dirnames, _, dirfd in os.fwalk(path, follow_symlinks=False):
+        for name in dirnames:
+            _make_writable(dirfd, name)
     shutil.rmtree(path, ignore_errors=True)
 
 
-def _make_writable(directory: str) -> None:
+def _make_writable(dirfd: int | None, name: str) -> None:
+    """`chmod 0700` the directory `name` (relative to `dirfd`), never through a link."""
+    try:  # macOS: fchmodat with AT_SYMLINK_NOFOLLOW
+        os.chmod(name, 0o700, dir_fd=dirfd, follow_symlinks=False)
+        return
+    except (NotImplementedError, OSError):
+        pass
     try:
-        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dirfd)
     except OSError:
+        # An unreadable directory gives no descriptor: change it by name, once it is known to be
+        # a directory and not a link.
+        with suppress(OSError):
+            if stat.S_ISDIR(os.stat(name, dir_fd=dirfd, follow_symlinks=False).st_mode):
+                os.chmod(name, 0o700, dir_fd=dirfd)
         return
     try:
         os.fchmod(fd, 0o700)

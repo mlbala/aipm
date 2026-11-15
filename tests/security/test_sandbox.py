@@ -201,8 +201,9 @@ def test_only_prepare_may_write_package_caches(tmp_path: Path) -> None:
     paths = _paths(tmp_path, package_cache=tmp_path / "run-cache")
     prepare = profile_for(ProcessKind.PREPARE, NONE, paths, runtime="/bin/srt")
     gate = profile_for(ProcessKind.GATE, NONE, paths, runtime="/bin/srt")
-    assert tmp_path / "run-cache" in prepare.allow_write
-    assert tmp_path / "run-cache" not in gate.allow_write
+    assert tmp_path / "run-cache" / "uv" in prepare.allow_write
+    assert tmp_path / "run-cache" not in prepare.allow_write  # only its listed paths
+    assert not any(p.is_relative_to(tmp_path / "run-cache") for p in gate.allow_write)
     assert paths.home / ".cache" / "uv" not in prepare.allow_write
     assert paths.home / ".cache" / "uv" not in gate.allow_write
 
