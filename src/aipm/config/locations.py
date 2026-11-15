@@ -39,7 +39,18 @@ def git_root(start: Path) -> Path | None:
 
 
 def _show(value: str) -> str:
-    return value[:_SHOWN]
+    """At most 200 characters, cut in the middle: the end of a path says where it leads."""
+    if len(value) <= _SHOWN:
+        return value
+    return f"{value[:60]}…{value[-(_SHOWN - 61) :]}"
+
+
+def _real(value: str) -> str:
+    """`value` with `~` expanded and links and `..` resolved; as given when it cannot be."""
+    try:
+        return os.path.realpath(Path(value).expanduser())
+    except (RuntimeError, OSError, ValueError):  # `~nosuchuser`, a NUL byte
+        return value
 
 
 def location_warnings(env: Mapping[str, str] | None = None) -> list[str]:
@@ -55,9 +66,9 @@ def location_warnings(env: Mapping[str, str] | None = None) -> list[str]:
     config = environ.get(USER_CONFIG_ENV)
     if config:
         found.append(
-            f"{USER_CONFIG_ENV} is set, so your user config is read from {_show(config)}; a "
-            "repository .env loaded by a tool such as pipenv can set it. Unset it unless you "
-            "set it yourself."
+            f"{USER_CONFIG_ENV} is set, so your user config is read from "
+            f"{_show(_real(config))}; a repository .env loaded by a tool such as pipenv can set "
+            "it. Unset it unless you set it yourself."
         )
     home = environ.get("HOME")
     if home:
@@ -67,20 +78,20 @@ def location_warnings(env: Mapping[str, str] | None = None) -> list[str]:
                 "aipm cannot look up your account's home directory to check HOME "
                 f"({_show(home)}); your config, trust store and logs follow HOME."
             )
-        elif os.path.realpath(home) != os.path.realpath(account):
+        elif _real(home) != os.path.realpath(account):
             found.append(
-                f"HOME is {_show(home)}, not your account's home {_show(account)}; your config, "
-                "trust store and logs follow HOME, which a repository .env loaded by a tool "
-                "such as pipenv can set."
+                f"HOME is {_show(_real(home))}, not your account's home {_show(account)}; your "
+                "config, trust store and logs follow HOME, which a repository .env loaded by a "
+                "tool such as pipenv can set."
             )
     for name in WATCHED_DIRS:
         value = environ.get(name)
         if not value:
             continue
-        root = git_root(Path(value).expanduser())
+        root = git_root(Path(_real(value)))
         if root is not None:
             found.append(
                 f"{name} points inside the git work tree {_show(str(root))} "
-                f"({_show(value)}); a repository's files there would act as your own."
+                f"({_show(_real(value))}); a repository's files there would act as your own."
             )
     return found

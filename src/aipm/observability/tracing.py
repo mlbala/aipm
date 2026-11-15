@@ -17,13 +17,20 @@ import re
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from typing import Any, Protocol
-from urllib.parse import urlsplit
 
 from aipm import __version__
 
 ENDPOINT_ENV = "OTEL_EXPORTER_OTLP_ENDPOINT"
 TRACES_ENDPOINT_ENV = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
 _NO_HOST = "(no host)"
+_ENDPOINT = re.compile(
+    r"(?P<scheme>https?)://(?:[^@/?#\[\]]*@)?"
+    r"(?P<host>\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252}[A-Za-z0-9])?)"
+    r"(?::(?P<port>[0-9]{1,5}))?(?:[/?#][!-~]*)?"
+)
+"""The only endpoint form aipm sends spans to: plain ASCII, no spaces, backslashes or second `@`,
+so the host aipm prints is the host `requests` connects to whatever parser reads it (urllib3
+ends the host at a backslash, Python's `urlsplit` does not; security review of N-5)."""
 SPAN_NAMES = frozenset({"aipm.command", "aipm.llm", "aipm.dispatch", "aipm.gate"})
 ATTRIBUTES = frozenset(
     {
@@ -80,23 +87,33 @@ def traces_endpoint(environ: Mapping[str, str]) -> str:
 
 
 def endpoint_host(url: str) -> str:
-    """`host[:port]` of `url`, without any user name or password; `(no host)` when it has none."""
-    try:
-        parts = urlsplit(url)
-        host = parts.hostname
-    except ValueError:  # an unbalanced IPv6 bracket
+    """`host[:port]` of `url`, never a user name or password; `(no host)` when `url` is not of
+    the one unambiguous form aipm sends to (`_ENDPOINT`)."""
+    printable = url.isascii() and all("!" <= ch <= "~" for ch in url)
+    match = _ENDPOINT.fullmatch(url) if printable and "\\" not in url else None
+    if match is None:
         return _NO_HOST
-    try:
-        port = parts.port
-    except ValueError:  # a port out of range or not a number
-        port = None
-    if not host:
+    port = match["port"]
+    if port is not None and not 0 < int(port) < 65536:
         return _NO_HOST
+    host = match["host"].lower()
     return host if port is None else f"{host}:{port}"
 
 
+def _proxy(environ: Mapping[str, str], url: str) -> str | None:
+    """The proxy the exporter's `requests` session would take from the environment, if any."""
+    scheme = url.split(":", 1)[0].lower()
+    for name in (f"{scheme}_proxy", f"{scheme.upper()}_PROXY", "all_proxy", "ALL_PROXY"):
+        value = environ.get(name)
+        if value:
+            shown = endpoint_host(value if "://" in value else f"http://{value}")
+            return f"{shown} ({name})"
+    return None
+
+
 def destination() -> str | None:
-    """The host spans go to, while tracing sends them to an OTLP endpoint; else `None`."""
+    """Where spans go, while tracing sends them to an OTLP endpoint: the host, and the proxy
+    from the environment when one is set (unless `NO_PROXY` excludes the host); else `None`."""
     return _state.get("host")
 
 
@@ -109,8 +126,13 @@ def configure_tracing(
     if not enabled:
         return None
     env = os.environ if environ is None else environ
-    if exporter is None and not env.get(ENDPOINT_ENV):
+    if exporter is None and not (env.get(ENDPOINT_ENV) or env.get(TRACES_ENDPOINT_ENV)):
         return f"--trace needs {ENDPOINT_ENV}; no spans are sent"
+    if exporter is None and endpoint_host(traces_endpoint(env)) == _NO_HOST:
+        return (
+            "--trace needs a plain http(s)://host[:port]/path endpoint (ASCII, no spaces, "
+            "backslashes or second @); no spans are sent"
+        )
     try:
         from opentelemetry.sdk.resources import Resource  # noqa: PLC0415
         from opentelemetry.sdk.trace import TracerProvider  # noqa: PLC0415
@@ -132,7 +154,9 @@ def configure_tracing(
         endpoint = traces_endpoint(env)
         provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
         atexit.register(provider.shutdown)
-        _state["host"] = endpoint_host(endpoint)
+        proxy = _proxy(env, endpoint)
+        host = endpoint_host(endpoint)
+        _state["host"] = host if proxy is None else f"{host} through the proxy {proxy}"
     else:
         provider.add_span_processor(SimpleSpanProcessor(exporter))  # type: ignore[arg-type]
     _state["provider"] = provider

@@ -277,7 +277,16 @@ def test_every_variable_aipm_sets_for_an_agent_is_denied() -> None:
         ),
         ({tracing.ENDPOINT_ENV: "not a url"}, "(no host)"),
         ({tracing.ENDPOINT_ENV: "http://[::1"}, "(no host)"),
-        ({tracing.ENDPOINT_ENV: "https://collector.example:99999"}, "collector.example"),
+        ({tracing.ENDPOINT_ENV: "https://collector.example:99999"}, "(no host)"),
+        # urllib3, which sends the spans, ends the host at a backslash; Python's urlsplit does
+        # not, so such an endpoint has no one host to print (security review of N-5).
+        ({tracing.ENDPOINT_ENV: "http://evil.example\\@localhost:4318"}, "(no host)"),
+        ({tracing.ENDPOINT_ENV: "http://a@evil.example@localhost:4318"}, "(no host)"),
+        ({tracing.ENDPOINT_ENV: "http://collector.example :4318"}, "(no host)"),
+        ({tracing.ENDPOINT_ENV: "http://coll\u0435ctor.example:4318"}, "(no host)"),  # a Cyrillic e
+        ({tracing.ENDPOINT_ENV: "ftp://collector.example"}, "(no host)"),
+        ({tracing.ENDPOINT_ENV: "http://[::1]:4318"}, "[::1]:4318"),
+        ({tracing.ENDPOINT_ENV: "HTTPS://Collector.Example"}, "(no host)"),
     ],
 )
 def test_the_trace_endpoint_host_is_what_the_exporter_uses(
@@ -399,3 +408,47 @@ def test_node_pnpm_policy_refuses_prepare_without_the_flag() -> None:
     policy = Config.model_validate(stack.model_dump(mode="json")).command_policy()
     with pytest.raises(PolicyViolation, match="allowed prefix"):
         check_argv(PNPM_PREPARE[:-1], policy, stage="prepare")
+
+
+# ---------------------------------------------------------------- the security review's findings
+
+
+def test_an_ambiguous_trace_endpoint_sends_nothing() -> None:
+    environ = {tracing.ENDPOINT_ENV: "http://evil.example\\@localhost:4318"}
+    warning = tracing.configure_tracing(enabled=True, environ=environ)
+    assert warning is not None and "no spans are sent" in warning
+    assert not tracing.enabled()
+    assert tracing.destination() is None
+
+
+@pytest.mark.usefixtures("no_export")
+@pytest.mark.parametrize(
+    ("proxy", "shown"),
+    [
+        ({"HTTPS_PROXY": "http://proxy.example:8080"}, "proxy.example:8080 (HTTPS_PROXY)"),
+        ({"https_proxy": "proxy.example:3128"}, "proxy.example:3128 (https_proxy)"),
+        ({"ALL_PROXY": "http://all.example:1080"}, "all.example:1080 (ALL_PROXY)"),
+    ],
+)
+def test_the_trace_warning_names_a_proxy_from_the_environment(
+    proxy: dict[str, str], shown: str
+) -> None:
+    environ = {tracing.ENDPOINT_ENV: "https://collector.example", **proxy}
+    try:
+        assert tracing.configure_tracing(enabled=True, environ=environ) is None
+        assert tracing.destination() == f"collector.example through the proxy {shown}"
+    finally:
+        tracing.shutdown()
+
+
+def test_an_unexpandable_variable_does_not_crash_the_run(isolated: Path) -> None:
+    found = locations.location_warnings(_env(isolated, XDG_CACHE_HOME="~nosuchuser_zz/c"))
+    assert found == []
+
+
+def test_a_long_path_keeps_its_end_and_is_resolved(isolated: Path, tmp_path: Path) -> None:
+    target = tmp_path / "evilhome"
+    target.mkdir()
+    padded = str(isolated) + "/." * 150 + "/../" + "evilhome"
+    (found,) = locations.location_warnings(_env(Path(padded)))
+    assert str(target) in found
