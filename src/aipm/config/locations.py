@@ -78,9 +78,11 @@ def location_warnings(env: Mapping[str, str] | None = None) -> list[str]:
                 "aipm cannot look up your account's home directory to check HOME "
                 f"({_show(home)}); your config, trust store and logs follow HOME."
             )
-        elif _real(home) != os.path.realpath(account):
+        elif not Path(home).is_absolute() or os.path.realpath(home) != os.path.realpath(account):
+            # Nothing expands `~` in HOME: a relative or `~user` value is never the account home.
+            shown = os.path.realpath(home) if Path(home).is_absolute() else home
             found.append(
-                f"HOME is {_show(_real(home))}, not your account's home {_show(account)}; your "
+                f"HOME is {_show(shown)}, not your account's home {_show(account)}; your "
                 "config, trust store and logs follow HOME, which a repository .env loaded by a "
                 "tool such as pipenv can set."
             )

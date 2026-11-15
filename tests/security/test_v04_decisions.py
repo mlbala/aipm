@@ -428,6 +428,12 @@ def test_an_ambiguous_trace_endpoint_sends_nothing() -> None:
         ({"HTTPS_PROXY": "http://proxy.example:8080"}, "proxy.example:8080 (HTTPS_PROXY)"),
         ({"https_proxy": "proxy.example:3128"}, "proxy.example:3128 (https_proxy)"),
         ({"ALL_PROXY": "http://all.example:1080"}, "all.example:1080 (ALL_PROXY)"),
+        # requests takes any *_proxy name in any case, keyed by scheme or scheme://host.
+        ({"Https_Proxy": "http://evil.example:8080"}, "evil.example:8080 (Https_Proxy)"),
+        (
+            {"https://collector.example_proxy": "http://evil.example:8080"},
+            "evil.example:8080 (https://collector.example_proxy)",
+        ),
     ],
 )
 def test_the_trace_warning_names_a_proxy_from_the_environment(
@@ -436,7 +442,7 @@ def test_the_trace_warning_names_a_proxy_from_the_environment(
     environ = {tracing.ENDPOINT_ENV: "https://collector.example", **proxy}
     try:
         assert tracing.configure_tracing(enabled=True, environ=environ) is None
-        assert tracing.destination() == f"collector.example through the proxy {shown}"
+        assert tracing.destination() == f"collector.example, through a proxy: {shown}"
     finally:
         tracing.shutdown()
 
@@ -452,3 +458,32 @@ def test_a_long_path_keeps_its_end_and_is_resolved(isolated: Path, tmp_path: Pat
     padded = str(isolated) + "/." * 150 + "/../" + "evilhome"
     (found,) = locations.location_warnings(_env(Path(padded)))
     assert str(target) in found
+
+
+@pytest.mark.usefixtures("no_export")
+def test_no_proxy_alone_names_no_proxy() -> None:
+    environ = {tracing.ENDPOINT_ENV: "https://collector.example", "NO_PROXY": "*"}
+    try:
+        assert tracing.configure_tracing(enabled=True, environ=environ) is None
+        assert tracing.destination() == "collector.example"
+    finally:
+        tracing.shutdown()
+
+
+def test_an_exporter_that_cannot_be_built_sends_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OTEL_PYTHON_EXPORTER_OTLP_HTTP_CREDENTIAL_PROVIDER", "nope")
+    environ = {tracing.ENDPOINT_ENV: "https://collector.example"}
+    warning = tracing.configure_tracing(enabled=True, environ=environ)
+    assert warning is not None and "no spans are sent" in warning
+    assert not tracing.enabled()
+
+
+@pytest.mark.parametrize("value", ["~{user}", "~", "relative/home"])
+def test_a_home_nothing_expands_is_warned(isolated: Path, value: str) -> None:
+    """Child processes get HOME as written; `~user` is not the account home for them."""
+    import getpass  # noqa: PLC0415
+
+    home = value.format(user=getpass.getuser())
+    (found,) = locations.location_warnings({"HOME": home})
+    assert "not your account's home" in found
+    assert str(isolated) in found
