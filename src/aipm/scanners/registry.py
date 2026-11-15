@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
 
+from aipm.domain.errors import PolicyViolation
 from aipm.domain.models import Ecosystem
 from aipm.security.json_limits import loads_bounded
 from aipm.security.supply_chain import check_package_name, normalize_name
@@ -245,6 +246,21 @@ def _go_first(name: str, ask: Fetch) -> PackageInfo:
     if first is None:
         raise RegistryError("the registry gave no first-release time")
     return PackageInfo(exists=True, first_release=first)
+
+
+def go_version_cached(module: str, version: str, *, fetch: Fetch | None = None) -> bool:
+    """Whether the Go proxy already holds `module` at `version`, asked with
+    `Disable-Module-Fetch`, so an uncached version is never fetched from its origin, where the
+    version string itself could carry data out (security review of the v0.4 decisions, N-1).
+    Exit 6 (`PolicyViolation`) for a name or version that is not well formed."""
+    check_package_name(Ecosystem.GO.value, module)
+    if not _GO_VERSION.fullmatch(version):
+        raise PolicyViolation(f"{version[:80]!r} is not a Go module version")
+    ask = fetch if fetch is not None else _fetch
+    what = f"{urllib.parse.quote(go_escape(version), safe='!')}.info"
+    response = ask(GO_PROXY.format(module=go_escape(module), what=what),
+                   {"Accept": _ACCEPT[Ecosystem.GO], **GO_NO_FETCH})  # fmt: skip
+    return _status(response, gone=(404, 410))
 
 
 def first_release(ecosystem: Ecosystem, name: str, *, fetch: Fetch | None = None) -> PackageInfo:

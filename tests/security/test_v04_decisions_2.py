@@ -490,7 +490,7 @@ def test_modules_that_pass_the_lookup_let_prepare_run(tmp_path: Path, prepared: 
     asked, fetch = go_proxy({"example.com/newmod": "ok"})
     run = run_gates(go_ctx(tmp_path, fetch, "example.com/newmod"))
     assert prepared == ["prepare"]
-    assert len(asked) == 2  # the version list and the oldest tag's info
+    assert len(asked) == 3  # the version list, the oldest tag's info, the required version's info
     assert run.registry_unavailable is None
 
 
@@ -516,6 +516,75 @@ def test_no_lookup_when_the_checks_already_hold_prepare(
     asked, fetch = go_proxy({"example.com/newmod": "ok"})
     run = run_gates(go_ctx(tmp_path, fetch, "example.com/newmod"), hold_prepare="refused")
     assert (asked, prepared, run.registry_unavailable) == ([], [], None)
+
+
+def go_mod_bumping(module: str, old: str, new: str) -> FileChange:
+    def text(version: str) -> str:
+        return f"{GO_BEFORE}\nrequire {module} {version}\n"
+
+    return FileChange(path="go.mod", status=ChangeStatus.MODIFIED, mode="100644",
+                      before=text(old), after=text(new))  # fmt: skip
+
+
+def version_proxy(answer: object) -> tuple[list[str], Fetch]:
+    """Answers every `.info` request with `answer` (an HTTP status or an exception)."""
+    asked: list[str] = []
+
+    def fetch(url: str, headers: Mapping[str, str]) -> Response:
+        assert headers.get("Disable-Module-Fetch") == "true"
+        asked.append(url)
+        if isinstance(answer, BaseException):
+            raise answer
+        assert isinstance(answer, int)
+        body = json.dumps({"Time": "2015-01-01T00:00:00Z"}).encode() if answer == 200 else b""
+        return Response(answer, body)
+
+    return asked, fetch
+
+
+def bump_ctx(tmp_path: Path, fetch: Fetch, new: str) -> GateContext:
+    ctx = go_ctx(tmp_path, fetch)
+    changes = ChangeSet("a" * 40, files=(go_mod_bumping("example.com/old", "v1.0.0", new),))
+    return dataclasses.replace(ctx, changes=changes)
+
+
+def test_a_new_version_the_proxy_has_not_cached_fails_before_prepare(
+    tmp_path: Path, prepared: list[str]
+) -> None:
+    """Security review of N-1: the version string reaches the origin as well as the path does.
+    A version bump of a module already required is looked up too."""
+    carrier = "v1.0.1-0.20261115000000-6162636465666768"  # data hex-encoded in a pseudo-version
+    asked, fetch = version_proxy(404)
+    run = run_gates(bump_ctx(tmp_path, fetch, carrier))
+    assert prepared == []
+    assert asked == [f"https://proxy.golang.org/example.com/old/@v/{carrier}.info"]
+    prepare = next(r for r in run.results if r.name == "prepare")
+    assert prepare.status is GateStatus.FAIL
+    assert [f.rule for f in prepare.findings] == ["uncached-version"]
+
+
+def test_a_cached_new_version_lets_prepare_run(tmp_path: Path, prepared: list[str]) -> None:
+    _, fetch = version_proxy(200)
+    run = run_gates(bump_ctx(tmp_path, fetch, "v1.2.0"))
+    assert prepared == ["prepare"]
+    assert run.registry_unavailable is None
+
+
+def test_a_version_lookup_without_an_answer_blocks(tmp_path: Path, prepared: list[str]) -> None:
+    _, fetch = version_proxy(503)
+    run = run_gates(bump_ctx(tmp_path, fetch, "v1.2.0"))
+    assert prepared == []
+    assert run.registry_unavailable is not None and "example.com/old" in run.registry_unavailable
+
+
+def test_a_version_that_is_not_one_fails_before_prepare(
+    tmp_path: Path, prepared: list[str]
+) -> None:
+    asked, fetch = version_proxy(200)
+    run = run_gates(bump_ctx(tmp_path, fetch, "latest"))
+    assert (prepared, asked) == ([], [])
+    prepare = next(r for r in run.results if r.name == "prepare")
+    assert [f.rule for f in prepare.findings] == ["invalid-version"]
 
 
 @pytest.mark.parametrize("status", [500, 502, 503, 504, 429, 403, 418])

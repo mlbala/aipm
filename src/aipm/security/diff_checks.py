@@ -692,6 +692,56 @@ def _go_mod_deps(text: str) -> Deps | None:
     return Deps(frozenset((Ecosystem.GO, n) for n in names), frozenset(off))
 
 
+def go_requirements(text: str | None) -> frozenset[tuple[str, str]] | None:
+    """(module, version) of every `require` in a `go.mod`, as written; empty for no file, `None`
+    for one `_go_mod_deps` cannot read (the post-change checks refuse that file)."""
+    if text is None:
+        return frozenset()
+    if _go_mod_deps(text) is None:
+        return None
+    found: set[tuple[str, str]] = set()
+    block: str | None = None
+    for raw in text.split("\n"):
+        line = raw.split("//", 1)[0].strip()
+        if not line:
+            continue
+        entry: str | None = None
+        if block is None:
+            verb = _GO_VERB.match(line)
+            word = verb.group(1) if verb is not None else ""
+            rest = line[verb.end() :].strip() if verb is not None else ""
+            if rest == "(":
+                block = word
+            elif word == "require":
+                entry = rest
+        elif line == ")":
+            block = None
+        elif block == "require":
+            entry = line
+        if entry is not None:
+            module, version = entry.split()
+            found.add((module.strip('"'), version.strip('"')))
+    return frozenset(found)
+
+
+def new_go_requirements(changes: ChangeSet) -> list[tuple[str, str, str]]:
+    """Every (module, version) a changed `go.mod` requires that it did not before: (path,
+    module, version). A new version of a module already required counts: `go mod download`
+    asks the Go proxy for it, which fetches an uncached version from its origin (security
+    review of the v0.4 decisions, N-1)."""
+    found: list[tuple[str, str, str]] = []
+    for change in changes.files:
+        if _fname(change.path) != "go.mod" or change.status is ChangeStatus.DELETED:
+            continue
+        if change.truncated:
+            continue
+        before = go_requirements(change.before) or frozenset()
+        after = go_requirements(change.after)
+        if after is not None:
+            found += [(change.path, m, v) for m, v in sorted(after - before)]
+    return found
+
+
 _CARGO_TABLES = (
     "dependencies", "dev-dependencies", "build-dependencies", "dev_dependencies",
     "build_dependencies",
