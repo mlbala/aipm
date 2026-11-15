@@ -209,7 +209,27 @@ DENIED = [
     "SHELLOPTS", "BASHOPTS", "IFS", "PS4", "PROMPT_COMMAND", "ZDOTDIR",
 ]  # fmt: skip
 
-ALLOWED = ["GITHUB_TOKEN", "MY_API_TOKEN", "LANG", "UVICORN_PORT", "NODE_ENV", "GOPATH_X", "path"]
+# Session 2: the names the security review found in the owner's classes (open item 1), one case
+# per entry; families with the members the review named.
+DENIED_V2 = [
+    # Go
+    "GOENV", "GOSUMDB", "GOPRIVATE", "GONOPROXY", "GOWORK", "GOROOT", "GOMODCACHE", "CC", "CXX",
+    "CGO_CFLAGS", "CGO_LDFLAGS", "CGO_ENABLED",
+    # Rust
+    "RUSTC", "RUSTC_WORKSPACE_WRAPPER", "RUSTDOC", "RUSTDOCFLAGS",
+    "RUSTUP_TOOLCHAIN", "RUSTUP_HOME",
+    # Perl and Python
+    "PERLLIB", "PERL5DB", "PYTHONUSERBASE",
+    # git
+    "XDG_CONFIG_HOME",
+    # the agents
+    "SHELL", "CLAUDE_CODE_SHELL_PREFIX", "CLAUDE_ENV_FILE",
+    "GEMINI_CLI_SYSTEM_SETTINGS_PATH", "GEMINI_CLI_SYSTEM_DEFAULTS_PATH",
+    "YARN_YARN_PATH", "YARN_RC_FILENAME", "yarn_npm_registry_server", "Yarn_Npm_Auth_Token",
+]  # fmt: skip
+
+ALLOWED = ["GITHUB_TOKEN", "MY_API_TOKEN", "LANG", "UVICORN_PORT", "NODE_ENV", "GOPATH_X", "path",
+           "CCACHE_DIR", "SHELLCHECK_OPTS", "RUSTY_TOKEN", "YARNISH"]  # fmt: skip
 
 
 def _user_config(tmp_path: Path, tool: str, names: list[str]) -> dict[str, str]:
@@ -222,6 +242,17 @@ def _user_config(tmp_path: Path, tool: str, names: list[str]) -> dict[str, str]:
 
 @pytest.mark.parametrize("name", DENIED)
 def test_a_denied_name_in_pass_env_exits_6(isolated: Path, tmp_path: Path, name: str) -> None:
+    del isolated
+    assert denied_pass_env(name)
+    with pytest.raises(PolicyViolation, match="pass_env") as info:
+        load_config(None, env=_user_config(tmp_path, "claude", ["MY_TOKEN", name]))
+    assert name in info.value.message
+
+
+@pytest.mark.parametrize("name", DENIED_V2)
+def test_a_name_the_review_found_in_pass_env_exits_6(
+    isolated: Path, tmp_path: Path, name: str
+) -> None:
     del isolated
     assert denied_pass_env(name)
     with pytest.raises(PolicyViolation, match="pass_env") as info:
