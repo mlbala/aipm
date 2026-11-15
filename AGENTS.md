@@ -16,6 +16,9 @@ If you need to deviate from the design, stop and explain why, and propose an ADR
 uv sync --all-extras                 # install
 uv run aipm --help                   # run the CLI from source
 uv run pytest -q                     # all tests (network is disabled)
+uv run pytest -q -n auto             # the same in parallel, for local runs; CI runs serially
+                                     # (the wall-clock bound in test_status_timing.py can fail
+                                     # under parallel load: rerun that file alone)
 uv run pytest tests/security -q      # security regression suite
 uv run ruff check . && uv run ruff format --check .
 uv run pyright                       # strict type checking for src/aipm
