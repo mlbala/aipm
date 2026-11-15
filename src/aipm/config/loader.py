@@ -362,6 +362,7 @@ def load_config(
     *,
     env: Mapping[str, str] | None = None,
     flags: Mapping[str, object] | None = None,
+    read_repo: bool = True,
 ) -> LoadedConfig:
     """Merge every layer; ignore repo relaxations and user-only repo keys, with warnings.
 
@@ -369,7 +370,9 @@ def load_config(
     inside the repository.
 
     `project` is the repository root (None outside a repository). `flags` maps dotted keys,
-    such as `dispatch.default_tool`, to values given on the command line.
+    such as `dispatch.default_tool`, to values given on the command line. With `read_repo`
+    false, the user config is still checked against `project`, but `.pm/config.yaml` is not
+    read (`aipm init --force` rewrites it, so a broken one must not stop the repair).
     """
     environ = os.environ if env is None else env
     warnings: list[str] = []
@@ -384,7 +387,7 @@ def load_config(
     user_layer = _validate(user_raw, str(user_path))
     config = _merge(config, user_layer, path="", limits=_OWN, warnings=[])
 
-    if project is not None:
+    if project is not None and read_repo:
         repo_text = open_store(project).read_text(ArtifactKind.CONFIG)
         if repo_text is not None:
             sources.append(REPO_SOURCE)

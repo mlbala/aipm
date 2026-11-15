@@ -105,7 +105,9 @@ def run(
             f"{store.root} already exists", hint="Use `aipm init --force` to re-initialize."
         )
 
-    defaults = load_config(None).config
+    # The user config is checked against this repository, not the one around the working
+    # directory (v0.1 O-4); `.pm/config.yaml` is about to be rewritten, so it is not read.
+    defaults = load_config(root, read_repo=False).config
     scan = scan_repo(root, max_input_bytes=defaults.security.max_input_kib * 1024)
     detected = detect_stack(scan.manifests)
     template_name = stack
