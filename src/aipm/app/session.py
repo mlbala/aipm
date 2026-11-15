@@ -19,7 +19,8 @@ from aipm.plugins import loader
 def configure(*, project: Path | None, plugins: bool, trace: bool) -> list[str]:
     """Record whether plugins may load and the repository they may never come from, and turn
     spans on with `--trace` (ADR-0027). Returns the warnings to print on every run: a moved
-    config or state directory (v0.1 O-1), and `--trace` that cannot take effect."""
+    config or state directory (v0.1 O-1), the host `--trace` sends spans to (N-5), and
+    `--trace` that cannot take effect."""
     try:
         root: Path | None = find_repo_root(project)
     except AipmError:
@@ -29,6 +30,14 @@ def configure(*, project: Path | None, plugins: bool, trace: bool) -> list[str]:
     trace_warning = tracing.configure_tracing(enabled=trace)
     if trace_warning is not None:
         warnings.append(trace_warning)
+    host = tracing.destination()
+    if host is not None:
+        # Every --trace run names the receiving host: a repository .env can set the endpoint,
+        # and the user's OTEL_EXPORTER_OTLP_HEADERS token goes with the spans (N-5, R-8).
+        warnings.append(
+            f"--trace sends spans, with your OTEL_EXPORTER_OTLP_HEADERS, to {host}; check that "
+            "it is yours"
+        )
     return warnings
 
 

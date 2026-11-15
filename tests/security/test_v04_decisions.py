@@ -16,6 +16,7 @@ from aipm.config import locations
 from aipm.config.loader import load_config, user_redact_patterns
 from aipm.config.schema import Config
 from aipm.domain.errors import PolicyViolation
+from aipm.observability import tracing
 from aipm.security.env_policy import DENIED_NAMES, denied_pass_env
 
 runner = CliRunner()
@@ -254,3 +255,83 @@ def test_every_variable_aipm_sets_for_an_agent_is_denied() -> None:
     homes = {m.CONFIG_HOME.env_var for m in (claude_code, codex, copilot, gemini)}
     agent = {*claude_code.AGENT_ENV, *dict(gemini.GeminiAdapter.agent_env)}
     assert homes | agent <= DENIED_NAMES
+
+
+# ---------------------------------------------------------------- N-5: the trace endpoint's host
+
+
+@pytest.mark.parametrize(
+    ("environ", "host"),
+    [
+        ({tracing.ENDPOINT_ENV: "https://collector.example:4318"}, "collector.example:4318"),
+        ({tracing.ENDPOINT_ENV: "http://127.0.0.1:4318/"}, "127.0.0.1:4318"),
+        ({tracing.ENDPOINT_ENV: "https://user:pw@collector.example/x"}, "collector.example"),
+        (
+            {
+                tracing.ENDPOINT_ENV: "https://collector.example",
+                tracing.TRACES_ENDPOINT_ENV: "https://other.example/v1/traces",
+            },
+            "other.example",
+        ),
+        ({tracing.ENDPOINT_ENV: "not a url"}, "(no host)"),
+        ({tracing.ENDPOINT_ENV: "http://[::1"}, "(no host)"),
+        ({tracing.ENDPOINT_ENV: "https://collector.example:99999"}, "collector.example"),
+    ],
+)
+def test_the_trace_endpoint_host_is_what_the_exporter_uses(
+    environ: dict[str, str], host: str
+) -> None:
+    assert tracing.endpoint_host(tracing.traces_endpoint(environ)) == host
+
+
+def test_the_traces_endpoint_follows_the_otlp_rules() -> None:
+    assert tracing.traces_endpoint({tracing.ENDPOINT_ENV: "https://c.example"}) == (
+        "https://c.example/v1/traces"
+    )
+    assert tracing.traces_endpoint({tracing.ENDPOINT_ENV: "https://c.example/"}) == (
+        "https://c.example/v1/traces"
+    )
+    traces = {tracing.ENDPOINT_ENV: "https://c.example", tracing.TRACES_ENDPOINT_ENV: "https://t"}
+    assert tracing.traces_endpoint(traces) == "https://t"
+
+
+@pytest.fixture
+def no_export(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real OTLP exporter, with sending replaced: tests never open a socket."""
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import (  # noqa: PLC0415
+        OTLPSpanExporter,
+    )
+    from opentelemetry.sdk.trace.export import SpanExportResult  # noqa: PLC0415
+
+    monkeypatch.setattr(OTLPSpanExporter, "export", lambda *_: SpanExportResult.SUCCESS)
+
+
+@pytest.mark.usefixtures("no_export")
+def test_every_trace_run_names_the_host_the_spans_go_to() -> None:
+    environ = {tracing.ENDPOINT_ENV: "https://user:pw@collector.example:4318"}
+    try:
+        assert tracing.configure_tracing(enabled=True, environ=environ) is None
+        assert tracing.destination() == "collector.example:4318"
+        # The SDK's exporter sends to the URL whose host was printed.
+        processor = tracing._state["provider"]._active_span_processor._span_processors[0]  # pyright: ignore[reportPrivateUsage]
+        assert processor._batch_processor._exporter._endpoint == (
+            "https://user:pw@collector.example:4318/v1/traces"
+        )
+    finally:
+        tracing.shutdown()
+    assert tracing.destination() is None
+
+
+@pytest.mark.usefixtures("no_export")
+def test_the_cli_prints_the_trace_host_on_stderr(
+    isolated: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del isolated
+    monkeypatch.setenv(tracing.ENDPOINT_ENV, "https://user:pw@collector.example:4318")
+    try:
+        result = runner.invoke(app, ["--trace", "-C", str(tmp_path / "outside"), "doctor"])
+    finally:
+        tracing.shutdown()
+    assert "warning: --trace sends spans" in result.stderr
+    assert "collector.example:4318" in result.stderr
+    assert "pw" not in result.stderr

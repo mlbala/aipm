@@ -17,10 +17,13 @@ import re
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 from aipm import __version__
 
 ENDPOINT_ENV = "OTEL_EXPORTER_OTLP_ENDPOINT"
+TRACES_ENDPOINT_ENV = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
+_NO_HOST = "(no host)"
 SPAN_NAMES = frozenset({"aipm.command", "aipm.llm", "aipm.dispatch", "aipm.gate"})
 ATTRIBUTES = frozenset(
     {
@@ -66,6 +69,37 @@ def clean_attributes(attrs: Mapping[str, object]) -> dict[str, bool | int | floa
     return out
 
 
+def traces_endpoint(environ: Mapping[str, str]) -> str:
+    """The URL spans are sent to, by the OTLP/HTTP rules: the traces endpoint when set, else the
+    base endpoint plus `/v1/traces`. aipm hands this URL to the exporter itself, so the host it
+    prints is the host that receives the spans (N-5)."""
+    traces = environ.get(TRACES_ENDPOINT_ENV)
+    if traces:
+        return traces
+    return f"{environ.get(ENDPOINT_ENV, '').removesuffix('/')}/v1/traces"
+
+
+def endpoint_host(url: str) -> str:
+    """`host[:port]` of `url`, without any user name or password; `(no host)` when it has none."""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+    except ValueError:  # an unbalanced IPv6 bracket
+        return _NO_HOST
+    try:
+        port = parts.port
+    except ValueError:  # a port out of range or not a number
+        port = None
+    if not host:
+        return _NO_HOST
+    return host if port is None else f"{host}:{port}"
+
+
+def destination() -> str | None:
+    """The host spans go to, while tracing sends them to an OTLP endpoint; else `None`."""
+    return _state.get("host")
+
+
 def configure_tracing(
     *, enabled: bool, environ: Mapping[str, str] | None = None, exporter: object | None = None
 ) -> str | None:
@@ -95,8 +129,10 @@ def configure_tracing(
             )
         except ImportError:
             return "--trace needs the otel extra (aipm[otel]); no spans are sent"
-        provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+        endpoint = traces_endpoint(env)
+        provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
         atexit.register(provider.shutdown)
+        _state["host"] = endpoint_host(endpoint)
     else:
         provider.add_span_processor(SimpleSpanProcessor(exporter))  # type: ignore[arg-type]
     _state["provider"] = provider
