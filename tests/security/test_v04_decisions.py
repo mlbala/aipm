@@ -101,6 +101,46 @@ def test_the_cli_exits_6_for_a_missing_aipm_config(
     assert not (tmp_repo / ".pm").exists()
 
 
+def _pm_files(repo: Path) -> dict[str, bytes]:
+    return {str(p.relative_to(repo)): p.read_bytes() for p in (repo / ".pm").rglob("*")
+            if p.is_file()}  # fmt: skip
+
+
+@pytest.fixture
+def initialized(isolated: Path, tmp_repo: Path) -> Path:
+    del isolated
+    result = runner.invoke(app, ["-C", str(tmp_repo), "init"])
+    assert result.exit_code == 0, result.output
+    return tmp_repo
+
+
+def test_the_phase_report_exits_6_for_a_missing_aipm_config(
+    isolated: Path, tmp_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Session 1 open item 2: in a repository without `.pm/`, bare `aipm` loads no
+    configuration (an initialized one already refused, through `load_state`), and its redactor
+    fell back to the built-in patterns for a user config it could not read."""
+    del isolated
+    monkeypatch.setenv("AIPM_CONFIG", str(tmp_path / "missing.yaml"))
+    result = runner.invoke(app, ["-C", str(tmp_repo)])
+    assert result.exit_code == 6, result.output
+    assert "AIPM_CONFIG" in result.stderr
+    assert not (tmp_repo / ".pm").exists()
+
+
+def test_aipm_task_exits_6_for_a_missing_aipm_config(
+    initialized: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = _pm_files(initialized)
+    monkeypatch.setenv("AIPM_CONFIG", str(tmp_path / "missing.yaml"))
+    result = runner.invoke(
+        app, ["-C", str(initialized), "task", "block", "T-001", "--reason", "waiting"]
+    )
+    assert result.exit_code == 6, result.output
+    assert "AIPM_CONFIG" in result.stderr
+    assert _pm_files(initialized) == before
+
+
 def test_a_missing_default_user_config_is_still_fine(isolated: Path) -> None:
     """A new user has no config file; only an explicit `AIPM_CONFIG` must exist."""
     del isolated

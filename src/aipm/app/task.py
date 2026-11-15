@@ -140,7 +140,7 @@ def run(project: Path | None, *, action: str, task_id: str, reason: str | None) 
         raise UsageError("`aipm task block` needs --reason")
     if act is Action.SHOW and reason is not None:
         raise UsageError("`aipm task show` takes no --reason")
-    store = runtime.open_repo_store(root)
+    store = runtime.open_repo_store(root, redactor=runtime.checked_user_redactor(root))
     if act is Action.SHOW:
         _, task = _load(store, task_id)
         return TaskResult(task, act, task.status, load_snapshot(root, task.id) is not None)

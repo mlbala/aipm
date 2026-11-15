@@ -58,6 +58,14 @@ def user_redactor(root: Path | None = None) -> Redactor:
     return process_redactor(patterns)
 
 
+def checked_user_redactor(root: Path) -> Redactor:
+    """`user_redactor`, but a user config that cannot be used is the command's error (exit 6
+    for an `AIPM_CONFIG` that names a missing file), not a fall back to the built-in patterns.
+    For the commands that load no configuration of their own: the phase report outside an
+    initialized repository, and `aipm task` (v0.1 O-2)."""
+    return process_redactor(user_redact_patterns(root))
+
+
 def open_repo_store(root: Path, *, redactor: Redactor | None = None) -> FileStateStore:
     """The repository's `.pm/` store for a command: the user's redactor, and the write ledger
     that lets `verify` tell aipm's own `.pm/` writes from anyone else's (ADR-0021)."""

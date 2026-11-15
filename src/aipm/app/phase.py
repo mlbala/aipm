@@ -39,5 +39,5 @@ class PhaseView:
 def run(project: Path | None) -> PhaseView:
     """Derive the phase of the repository at (or above) `project`."""
     root = find_repo_root(project)
-    state = load_state(runtime.open_repo_store(root))
+    state = load_state(runtime.open_repo_store(root, redactor=runtime.checked_user_redactor(root)))
     return PhaseView(str(root), derive_phase(state.snapshot), state.warnings)
