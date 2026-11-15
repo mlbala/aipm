@@ -57,7 +57,7 @@ from aipm.scanners.registry import (
     first_release,
     go_escape,
 )
-from aipm.security.diff_checks import is_package_config
+from aipm.security.diff_checks import go_requirements, is_package_config, new_go_requirements
 from aipm.security.network import NetworkPolicy
 from aipm.state.layout import repo_id
 from aipm.state.trust_store import FileTrustStore, hash_surface
@@ -989,3 +989,70 @@ def test_doctor_never_reports_trust_without_the_toolchain_files(
     assert report["trusted"] is False
     assert "toolchain" in str(report["error"])
     assert isinstance(report["surface_hash"], str) and len(report["surface_hash"]) == 64
+
+
+# ------------------------------------------------------------------ N-1: go.mod requirements
+
+GO_MOD = """module example.com/m
+
+go 1.21
+
+require example.com/a v1.0.0 // indirect
+require (
+\t"example.com/b" v1.2.0
+\t// a comment
+
+\texample.com/c v0.1.0
+)
+exclude (
+\texample.com/x v0.0.1
+)
+"""
+
+
+def go_change(
+    before: str | None, after: str | None, *, status: ChangeStatus = ChangeStatus.MODIFIED,
+    truncated: bool = False, path: str = "go.mod",
+) -> FileChange:  # fmt: skip
+    return FileChange(path=path, status=status, before=before, after=after, truncated=truncated)
+
+
+def test_go_requirements_reads_single_lines_and_blocks_only_from_require() -> None:
+    """The (module, version) pairs the N-1 lookup checks (security review of session 2, M-1):
+    single-line and block `require`, quotes and comments removed; `exclude` lists none."""
+    assert go_requirements(GO_MOD) == {
+        ("example.com/a", "v1.0.0"),
+        ("example.com/b", "v1.2.0"),
+        ("example.com/c", "v0.1.0"),
+    }
+    assert go_requirements(None) == frozenset()
+    assert go_requirements("module m\nrequire (\n\texample.com/a v1.0.0\n") is None  # unclosed
+
+
+def test_new_go_requirements_lists_new_modules_and_new_versions() -> None:
+    before = "module m\n\nrequire example.com/a v1.0.0\n"
+    after = "module m\n\nrequire (\n\texample.com/a v1.0.1\n\texample.com/b v0.1.0\n)\n"
+    changes = ChangeSet("a" * 40, files=(go_change(before, after), go_change(None, after,
+                        status=ChangeStatus.ADDED, path="sub/go.mod")))  # fmt: skip
+    assert new_go_requirements(changes) == [
+        ("go.mod", "example.com/a", "v1.0.1"),
+        ("go.mod", "example.com/b", "v0.1.0"),
+        ("sub/go.mod", "example.com/a", "v1.0.1"),
+        ("sub/go.mod", "example.com/b", "v0.1.0"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        go_change("module m\nrequire example.com/a v1.0.0\n", None, status=ChangeStatus.DELETED),
+        go_change(None, "module m\nrequire example.com/a v1.0.0\n", truncated=True),
+        go_change(None, "module m\nrequire (\n"),  # unreadable: the post-change checks refuse it
+        go_change(None, "module m\nrequire example.com/a v1.0.0\n", path="go.sum"),
+    ],
+    ids=["deleted", "truncated", "unreadable", "not-go-mod"],
+)
+def test_new_go_requirements_skips_what_the_other_checks_handle(change: FileChange) -> None:
+    """A deleted `go.mod` requires nothing new; a truncated or unreadable one is a severe or
+    dependency violation in the post-change checks, which hold prepare before any lookup."""
+    assert new_go_requirements(ChangeSet("a" * 40, files=(change,))) == []
