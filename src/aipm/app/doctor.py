@@ -20,7 +20,7 @@ from aipm.app import trust as trust_use_case
 from aipm.app.workspace import find_repo_root
 from aipm.config.loader import load_config
 from aipm.config.schema import Config
-from aipm.domain.errors import AipmError, LockHeld
+from aipm.domain.errors import AipmError, LockHeld, UsageError
 from aipm.domain.models import ArtifactKind
 from aipm.execution.git import version_problem
 from aipm.execution.process import build_env, run_safe
@@ -118,13 +118,22 @@ def _lock(root: Path) -> dict[str, object]:
 
 
 def _trust(root: Path, config: Config) -> dict[str, object]:
+    note: str | None = None
     try:
         store = default_trust_store(root)
-        digest = hash_surface(trust_use_case.repository_surface(store, config, root))
-        trusted = store.is_trusted(repo_id(root), digest)
+        try:
+            surface = trust_use_case.repository_surface(store, config, root)
+        except UsageError as exc:
+            # git cannot read HEAD: show the rest of the surface, never as trusted.
+            surface = store.surface(config, root=root)
+            note = (f"the committed toolchain files could not be read ({exc.message}); "
+                    "this hash leaves them out")  # fmt: skip
+        digest = hash_surface(surface)
+        trusted = note is None and store.is_trusted(repo_id(root), digest)
     except AipmError as exc:
         return {"trusted": False, "surface_hash": None, "error": _clean(exc.message, 500)}
-    return {"trusted": trusted, "surface_hash": digest, "error": None}
+    return {"trusted": trusted, "surface_hash": digest,
+            "error": None if note is None else _clean(note, 500)}  # fmt: skip
 
 
 def _plugins() -> dict[str, object]:

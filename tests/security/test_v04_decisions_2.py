@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from aipm.app import doctor as doctor_use_case
 from aipm.app import trust as trust_use_case
 from aipm.config.schema import Config
 from aipm.domain.errors import PolicyViolation, UsageError
@@ -935,3 +936,22 @@ def test_a_pulled_package_setting_needs_trust_again_end_to_end(
 @pytest.mark.parametrize("path", [".python-version", "sub/.tool-versions", ".TOOL-VERSIONS"])
 def test_an_agent_changing_a_toolchain_version_file_is_a_dependency_change(path: str) -> None:
     assert is_package_config(path)
+
+
+def test_doctor_never_reports_trust_without_the_toolchain_files(
+    tmp_repo: Path, dirs: UserDirs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When git cannot read HEAD, doctor shows the rest of the surface with a note, and never
+    as trusted, even if that partial hash was once trusted."""
+    del dirs
+    ok(aipm(tmp_repo, "init"))
+    trust(tmp_repo)
+
+    def unreadable(*_: object) -> dict[str, object]:
+        raise UsageError("cannot resolve HEAD")
+
+    monkeypatch.setattr(trust_use_case, "repository_surface", unreadable)
+    report = doctor_use_case._trust(tmp_repo, Config())  # pyright: ignore[reportPrivateUsage]
+    assert report["trusted"] is False
+    assert "toolchain" in str(report["error"])
+    assert isinstance(report["surface_hash"], str) and len(report["surface_hash"]) == 64
