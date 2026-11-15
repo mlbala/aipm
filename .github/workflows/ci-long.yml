@@ -1,0 +1,44 @@
+name: CI (long)
+
+# Every property and the security suite at the ci-long Hypothesis profile (at least 2,000
+# examples per property that sets none of its own; tests/conftest.py). About 25 minutes, too
+# long for every push, so it runs nightly on main and by hand (red-team v0.3 rec 6; RT03-10
+# was found only by this run). Scheduled runs use the workflow file on the default branch.
+
+on:
+  schedule:
+    - cron: "41 2 * * *" # nightly, 02:41 UTC
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ci-long
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    name: Properties and security suite (ci-long)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # hatch-vcs derives the version from tags and history
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.6"
+          python-version: "3.13"
+          enable-cache: false
+
+      - name: Install
+        run: uv sync --frozen --all-extras
+
+      - name: Properties and security suite, long profile
+        run: uv run --frozen pytest --hypothesis-profile=ci-long tests/property tests/security
