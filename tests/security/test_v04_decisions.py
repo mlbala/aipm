@@ -11,6 +11,9 @@ import pytest
 from typer.testing import CliRunner
 
 from aipm.cli.main import app
+from aipm.config.loader import load_config, user_redact_patterns
+from aipm.config.schema import Config
+from aipm.domain.errors import PolicyViolation
 
 runner = CliRunner()
 
@@ -58,3 +61,41 @@ def test_init_force_still_repairs_a_broken_repo_config(isolated: Path, tmp_repo:
     result = runner.invoke(app, ["-C", str(tmp_repo), "init", "--force"])
     assert result.exit_code == 0, result.output
     assert "bogus" not in (tmp_repo / ".pm" / "config.yaml").read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------- v0.1 O-2: a missing AIPM_CONFIG
+
+
+def test_aipm_config_naming_a_missing_file_exits_6(isolated: Path, tmp_path: Path) -> None:
+    del isolated
+    missing = tmp_path / "nowhere" / "config.yaml"
+    with pytest.raises(PolicyViolation, match="does not exist"):
+        load_config(None, env={"AIPM_CONFIG": str(missing)})
+    with pytest.raises(PolicyViolation, match="does not exist"):
+        user_redact_patterns(None, env={"AIPM_CONFIG": str(missing)})
+
+
+def test_aipm_config_naming_a_dangling_link_exits_6(isolated: Path, tmp_path: Path) -> None:
+    del isolated
+    link = tmp_path / "config.yaml"
+    link.symlink_to(tmp_path / "gone.yaml")
+    with pytest.raises(PolicyViolation, match="does not exist"):
+        load_config(None, env={"AIPM_CONFIG": str(link)})
+
+
+def test_the_cli_exits_6_for_a_missing_aipm_config(
+    isolated: Path, tmp_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del isolated
+    monkeypatch.setenv("AIPM_CONFIG", str(tmp_path / "missing.yaml"))
+    result = runner.invoke(app, ["-C", str(tmp_repo), "init"])
+    assert result.exit_code == 6, result.output
+    assert "AIPM_CONFIG" in result.stderr
+    assert not (tmp_repo / ".pm").exists()
+
+
+def test_a_missing_default_user_config_is_still_fine(isolated: Path) -> None:
+    """A new user has no config file; only an explicit `AIPM_CONFIG` must exist."""
+    del isolated
+    assert load_config(None, env={}).config == Config()
+    assert load_config(None, env={"AIPM_CONFIG": ""}).config == Config()

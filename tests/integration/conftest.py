@@ -36,6 +36,9 @@ def user_dirs(
     for name in ("XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"):
         monkeypatch.setenv(name, str(base / name.lower()))
     config = base / "user-config.yaml"
+    # An empty user config: "no user settings". aipm refuses an AIPM_CONFIG that names a
+    # missing file (v0.1 O-2).
+    config.write_text("", encoding="utf-8")
     monkeypatch.setenv("AIPM_CONFIG", str(config))
     for name in ("AIPM_NON_INTERACTIVE", "AIPM_LOG_LEVEL"):
         monkeypatch.delenv(name, raising=False)

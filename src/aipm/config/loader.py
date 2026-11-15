@@ -11,7 +11,9 @@ always the user's own (ADR-0018, SECURITY.md §6 rule 5):
 - an `AIPM_*` variable may relax a tighten-only key, with a warning naming the key;
 - the user config file, wherever `AIPM_CONFIG`, `HOME` or `XDG_CONFIG_HOME` puts it, must be an
   absolute path outside the repository (compared by inode, so firmlinks and case variants count)
-  and a regular file (exit 6 otherwise).
+  and a regular file (exit 6 otherwise);
+- a missing user config is an empty one at the default location, but exit 6 when `AIPM_CONFIG`
+  names it (v0.1 O-2).
 
 Each ignored key, and each tighten-only value that ends up looser than the built-in default,
 becomes a warning that the CLI prints on every run.
@@ -297,12 +299,28 @@ def _check_user_path(path: Path, project: Path | None) -> None:
         )
 
 
-def _read_user_layer(path: Path) -> object:
-    """Read the user config: a regular file (links followed), never a FIFO or a device."""
+def _explicit(env: Mapping[str, str]) -> bool:
+    """Whether `AIPM_CONFIG` names the user config (an empty value means the default)."""
+    return bool(env.get(USER_CONFIG_ENV))
+
+
+def _read_user_layer(path: Path, *, explicit: bool) -> object:
+    """Read the user config: a regular file (links followed), never a FIFO or a device.
+
+    A missing file at the default location is an empty config (a new user has none). A missing
+    file that `AIPM_CONFIG` names is refused (exit 6): running without the settings the user
+    pointed at, such as a stricter network profile, would be a silent fallback (v0.1 O-2).
+    """
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     except FileNotFoundError:
-        return {}
+        if not explicit:
+            return {}
+        raise PolicyViolation(
+            f"{USER_CONFIG_ENV} names {str(path)[:200]}, which does not exist",
+            hint=f"Create the file (it may be empty), or unset {USER_CONFIG_ENV} to use "
+            f"{user_config_path({})}. aipm does not run without the user config you named.",
+        ) from None
     except OSError as exc:
         raise SchemaError(f"cannot read user config {path} ({exc.strerror})") from None
     mode = os.fstat(fd).st_mode
@@ -322,9 +340,9 @@ def _read_user_layer(path: Path) -> object:
     return load_yaml(text, source=str(path))
 
 
-def _user_layer(path: Path, project: Path | None) -> Config:
+def _user_layer(path: Path, project: Path | None, *, explicit: bool) -> Config:
     _check_user_path(path, project)
-    return _validate(_read_user_layer(path), str(path))
+    return _validate(_read_user_layer(path, explicit=explicit), str(path))
 
 
 def user_redact_patterns(
@@ -336,8 +354,10 @@ def user_redact_patterns(
     without end would hang every redaction, and one that matches aipm's own sentences would erase
     them from prompts (red-team v0.1 review).
     """
-    path = user_config_path(os.environ if env is None else env)
-    return list(_user_layer(path, project).security.extra_redact_patterns)
+    environ = os.environ if env is None else env
+    path = user_config_path(environ)
+    layer = _user_layer(path, project, explicit=_explicit(environ))
+    return list(layer.security.extra_redact_patterns)
 
 
 def _check_open_network(final: Config, user: Config) -> None:
@@ -366,8 +386,8 @@ def load_config(
 ) -> LoadedConfig:
     """Merge every layer; ignore repo relaxations and user-only repo keys, with warnings.
 
-    Exit 6 when the environment sets a user-only key, or when the user config is relative or
-    inside the repository.
+    Exit 6 when the environment sets a user-only key, when the user config is relative or
+    inside the repository, or when `AIPM_CONFIG` names a file that does not exist.
 
     `project` is the repository root (None outside a repository). `flags` maps dotted keys,
     such as `dispatch.default_tool`, to values given on the command line. With `read_repo`
@@ -381,7 +401,7 @@ def load_config(
 
     user_path = user_config_path(environ)
     _check_user_path(user_path, project)
-    user_raw = _read_user_layer(user_path)
+    user_raw = _read_user_layer(user_path, explicit=_explicit(environ))
     if user_raw != {}:
         sources.append(str(user_path))
     user_layer = _validate(user_raw, str(user_path))

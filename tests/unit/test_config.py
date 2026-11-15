@@ -37,8 +37,9 @@ def write(path: Path, text: str) -> Path:
 
 @pytest.fixture
 def env(tmp_path: Path) -> dict[str, str]:
-    """An environment whose user config file does not exist yet."""
-    return {"AIPM_CONFIG": str(tmp_path / "user" / "config.yaml")}
+    """An environment whose user config file is empty (an AIPM_CONFIG that names a missing file
+    is refused, v0.1 O-2)."""
+    return {"AIPM_CONFIG": str(write(tmp_path / "user" / "config.yaml", ""))}
 
 
 # ---------------------------------------------------------------- defaults and schema
