@@ -169,6 +169,33 @@ def test_pnpm_reads_the_store_and_import_method_from_the_environment(
     assert method.stdout.decode().strip() == "clone-or-copy"
 
 
+def test_a_committed_pnpm_workspace_file_cannot_move_the_store_or_link_from_it(
+    tmp_path: Path, cache: Path, request: pytest.FixtureRequest
+) -> None:
+    """Open (ADR-0031, for the owner): pnpm 10 lets a committed `pnpm-workspace.yaml` override
+    `npm_config_store_dir` and `npm_config_package_import_method`. With `hardlink`, a write to
+    one worktree's `node_modules` changes the run's store for the next task (M-2 again). The
+    agent cannot add the file (it is package config, which holds prepare), but a repository
+    may commit it. Strict xfail until aipm passes the flags, which win over the file; the
+    marker is applied only once the tools are found, so a missing tool still fails in CI."""
+    pnpm = need("pnpm")
+    need("srt")
+    request.applymarker(pytest.mark.xfail(strict=True, reason="open: pnpm-workspace.yaml wins"))
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "package.json").write_text('{"name": "x", "version": "1.0.0"}\n', "utf-8")
+    (workspace / "pnpm-workspace.yaml").write_text(
+        f"storeDir: {tmp_path / 'elsewhere'}\npackageImportMethod: hardlink\n", "utf-8"
+    )
+    extra = cache_env(pnpm, cache, tmp_path)
+    store = run(ProcessKind.PREPARE, [pnpm, "store", "path"], workspace=workspace, cache=cache,
+                extra=extra)  # fmt: skip
+    method = run(ProcessKind.PREPARE, [pnpm, "config", "get", "package-import-method"],
+                 workspace=workspace, cache=cache, extra=extra)  # fmt: skip
+    assert Path(store.stdout.decode().strip()).parent == cache / "pnpm-store"
+    assert method.stdout.decode().strip() == "clone-or-copy"
+
+
 def test_go_vet_runs_with_a_read_only_module_cache(tmp_path: Path, cache: Path) -> None:
     """ADR-0031, unverified until now: a gate's `GOMODCACHE` is the run's, which gates cannot
     write; `go vet` must still work, with its build cache in the attempt's temp dir."""
