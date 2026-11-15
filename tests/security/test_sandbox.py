@@ -196,10 +196,14 @@ def test_agent_profile_without_the_optional_paths(tmp_path: Path) -> None:
 
 
 def test_only_prepare_may_write_package_caches(tmp_path: Path) -> None:
-    paths = _paths(tmp_path)
+    # The run's own package cache since the v0.4 decisions (v0.2 O-2, ADR-0031; owner-approved
+    # change): prepare never writes the user's caches.
+    paths = _paths(tmp_path, package_cache=tmp_path / "run-cache")
     prepare = profile_for(ProcessKind.PREPARE, NONE, paths, runtime="/bin/srt")
     gate = profile_for(ProcessKind.GATE, NONE, paths, runtime="/bin/srt")
-    assert paths.home / ".cache" / "uv" in prepare.allow_write
+    assert tmp_path / "run-cache" in prepare.allow_write
+    assert tmp_path / "run-cache" not in gate.allow_write
+    assert paths.home / ".cache" / "uv" not in prepare.allow_write
     assert paths.home / ".cache" / "uv" not in gate.allow_write
 
 

@@ -827,7 +827,7 @@ Each placeholder must be a whole argv element, and each expanded value is its ow
 
 ### 13.2 Execution
 
-- Gates run in the worktree (or the working tree in manual mode), in the sandbox, with the `gates` network profile (none). The `prepare` step uses the `registries` profile.
+- Gates run in the worktree (or the working tree in manual mode), in the sandbox, with the `gates` network profile (none). The `prepare` step uses the `registries` profile. Prepare installs into a package cache of the run, which gates read and only prepare writes; `verify` gets one of its own ([ADR-0031](adr/0031-a-package-cache-per-run.md)).
 - **Order:** cheap gates first (`secrets` → `lint` → `format` → `types` → `unit` → `ac_trace` → `sast` → `deps`), then `ac_review` last.
 - **Short-circuit:** with `dispatch.fail_fast: true` (the default during build), aipm stops at the first required failure. `verify` runs all gates.
 - **Results:** each gate produces `{name, status: pass|fail|error|skipped, duration_ms, summary, findings[], output_ref}`. Full output is stored in the run directory and redacted.

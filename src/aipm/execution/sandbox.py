@@ -121,11 +121,20 @@ CONFIG_HOME_PROTECTED: tuple[str, ...] = (
 settings on the next `--resume`. The agent may write its sessions there, never these
 (ADR-0023). Other tools name theirs in their adapter's `ConfigHomeSpec` (ADR-0026)."""
 
-PACKAGE_CACHES: tuple[str, ...] = (
-    ".cache/uv", ".cache/pip", "Library/Caches/uv", "Library/Caches/pip",
-    ".npm", ".cache/pnpm", ".local/share/pnpm", "Library/pnpm", "Library/Caches/pnpm",
+CARGO_DIR = "cargo"
+"""The run's `CARGO_HOME`, inside its package cache (ADR-0031)."""
+PROTECTED_CARGO: tuple[str, ...] = (
+    "config.toml", "config", "bin", "credentials.toml", "credentials",
 )  # fmt: skip
-"""Where package managers keep their caches, relative to home; only `prepare` may write there."""
+"""In the run's `CARGO_HOME`: what Cargo reads as settings, or runs as `cargo <cmd>` before
+anything on PATH. No process aipm starts may write them, so one task's prepare cannot plant them
+for the next task's gates (SECURITY.md §9.1)."""
+
+
+def protected_cache_paths(cache: Path) -> tuple[Path, ...]:
+    """The paths in the run's package cache no process may write (`PROTECTED_CARGO`)."""
+    return tuple(cache / CARGO_DIR / name for name in PROTECTED_CARGO)
+
 
 _PROTECTED_LITERALS: tuple[str, ...] = (
     ".pm", ".git", ".github", ".gitlab-ci.yml", "AGENTS.md", "CLAUDE.md", "GEMINI.md", ".claude",
@@ -166,6 +175,9 @@ class ProfilePaths:
     config_home_protected: tuple[str, ...] = CONFIG_HOME_PROTECTED
     """What in `config_home` the agent may not write: its tool's settings, hooks and skills
     (`ConfigHomeSpec.protected`)."""
+    package_cache: Path | None = None
+    """The run's package cache (ADR-0031): only `prepare` may write it, and no process may
+    write the Cargo settings and programs in it. Prepare never writes the user's own caches."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,13 +233,17 @@ def profile_for(
         else:
             deny_read += [home / rel for rel in AGENT_HOMES]
     elif kind is ProcessKind.PREPARE:
-        allow = [paths.workspace, paths.temp_dir, *(home / rel for rel in PACKAGE_CACHES)]
+        allow = [paths.workspace, paths.temp_dir]
+        allow += [] if paths.package_cache is None else [paths.package_cache]
     else:
         allow = [paths.output_dir if paths.output_dir is not None else paths.temp_dir]
     deny_write = [paths.workspace / rel for rel in _PROTECTED_LITERALS]
     deny_write += [home / rel for rel in AGENT_GLOBAL_CONFIG]
     deny_write += [home / rel for rel in TOOLCHAIN_CONFIG]
     deny_write += agent_config
+    deny_write += (
+        [] if paths.package_cache is None else list(protected_cache_paths(paths.package_cache))
+    )
     workspace = str(paths.workspace)
     patterns = () if _GLOB_CHARS & set(workspace) else (f"{workspace}/{ENV_PATTERN}",)
     return SandboxProfile(

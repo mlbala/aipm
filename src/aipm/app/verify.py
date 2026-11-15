@@ -24,7 +24,6 @@ suspected prompt injection and `--accept-risk` was not given. Manual verify neve
 anything in your tree.
 """
 
-import shutil
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -81,6 +80,7 @@ from aipm.domain.models import (
 from aipm.domain.models.snapshot import StateSnapshot
 from aipm.domain.phase import prompt_inputs
 from aipm.execution import git
+from aipm.execution.package_cache import remove_tree
 from aipm.execution.sandbox import Runtime, resolve_sandbox
 from aipm.gates.context import GateContext
 from aipm.gates.runner import GateRun, run_gates
@@ -515,4 +515,4 @@ def run(project: Path | None, options: VerifyOptions) -> VerifyResult:
         with store.lock():
             return _Verify(root, cfg, store, options, temp, sandbox.launcher, warnings).run()
     finally:
-        shutil.rmtree(temp, ignore_errors=True)
+        remove_tree(temp)  # Go leaves its module cache read-only (ADR-0031)

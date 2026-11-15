@@ -27,6 +27,7 @@ from pathlib import Path
 
 from aipm.domain.errors import PolicyViolation
 from aipm.domain.models import Ecosystem, GateDef, GateResult, GateStatus, NetworkProfile
+from aipm.execution.package_cache import cache_env
 from aipm.execution.process import BASE_ENV_ALLOWLIST, ProcessResult, build_env, run_safe
 from aipm.execution.sandbox import ProcessKind, ProfilePaths, SandboxProfile, profile_for
 from aipm.gates.context import GateContext
@@ -137,8 +138,9 @@ def sandbox_for(
     if ctx.runtime is None:
         return None
     paths = ProfilePaths(
-        workspace=ctx.root, temp_dir=ctx.ws.temp_dir, home=ctx.home, extra_deny_read=ctx.deny_read
-    )
+        workspace=ctx.root, temp_dir=ctx.ws.temp_dir, home=ctx.home,
+        extra_deny_read=ctx.deny_read, package_cache=ctx.package_dir,
+    )  # fmt: skip
     return profile_for(kind, _network(profile, argv, kind), paths, runtime=ctx.runtime)
 
 
@@ -224,7 +226,7 @@ def run_command_gate(
     result = run_safe(
         argv,
         cwd=ctx.root,
-        env=gate_env(ctx),
+        env=gate_env(ctx) | cache_env(argv[0], ctx.package_dir, ctx.ws.temp_dir),
         timeout_s=GATE_TIMEOUT_S,
         max_output_bytes=MAX_OUTPUT_BYTES,
         sandbox=profile,
@@ -256,7 +258,11 @@ def run_prepare(ctx: GateContext) -> CommandOutcome | None:
     profile = sandbox_for(ctx, ProcessKind.PREPARE, min_network(prepare.network, ctx), argv)
     started = time.monotonic()
     env = build_env(
-        extra={"TMPDIR": str(ctx.ws.temp_dir), **toolchain_env(ctx.root)},
+        extra={
+            "TMPDIR": str(ctx.ws.temp_dir),
+            **toolchain_env(ctx.root),
+            **cache_env(argv[0], ctx.package_dir, ctx.ws.temp_dir),
+        },
         base_allowlist=(*BASE_ENV_ALLOWLIST, *PREPARE_ENV),
     )
     result = run_safe(
