@@ -152,12 +152,15 @@ def remove_tree(path: Path) -> None:
 
 
 def _make_writable(dirfd: int | None, name: str) -> None:
-    """`chmod 0700` the directory `name` (relative to `dirfd`), never through a link."""
+    """`chmod 0700` the directory `name` (relative to `dirfd`), never through a link. semgrep's
+    insecure-file-permissions rule flags any mode with an execute bit; 0700 is owner-only, and a
+    directory needs `x` to be entered and emptied."""
     try:  # macOS: fchmodat with AT_SYMLINK_NOFOLLOW
+        # nosemgrep: insecure-file-permissions
         os.chmod(name, 0o700, dir_fd=dirfd, follow_symlinks=False)
         return
-    except (NotImplementedError, OSError):
-        pass
+    except (NotImplementedError, ValueError, OSError):
+        pass  # Linux refuses the pair: ValueError with dir_fd, NotImplementedError without
     try:
         fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dirfd)
     except OSError:
@@ -165,9 +168,11 @@ def _make_writable(dirfd: int | None, name: str) -> None:
         # a directory and not a link.
         with suppress(OSError):
             if stat.S_ISDIR(os.stat(name, dir_fd=dirfd, follow_symlinks=False).st_mode):
+                # nosemgrep: insecure-file-permissions
                 os.chmod(name, 0o700, dir_fd=dirfd)
         return
     try:
+        # nosemgrep: insecure-file-permissions
         os.fchmod(fd, 0o700)
     finally:
         os.close(fd)

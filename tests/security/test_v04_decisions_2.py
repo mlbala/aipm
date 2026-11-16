@@ -254,6 +254,41 @@ def test_removal_clears_read_only_directories_without_following_links(tmp_path: 
         outside.chmod(0o755)
 
 
+def test_removal_works_where_chmod_cannot_skip_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Linux's `os.chmod` refuses `dir_fd` with `follow_symlinks=False` (ValueError) and
+    `follow_symlinks=False` alone (NotImplementedError); removal must fall back, not crash."""
+    real_chmod = os.chmod
+
+    def linux_chmod(
+        path: str, mode: int, *, dir_fd: int | None = None, follow_symlinks: bool = True
+    ) -> None:
+        if not follow_symlinks:
+            if dir_fd is not None:
+                raise ValueError("chmod: cannot use dir_fd and follow_symlinks together")
+            raise NotImplementedError("chmod: follow_symlinks unavailable on this platform")
+        real_chmod(path, mode, dir_fd=dir_fd)
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside.chmod(0o555)
+    cache = tmp_path / "cache"
+    module = cache / "go-mod" / "example.com" / "m@v1.0.0"
+    module.mkdir(parents=True)
+    (module / "link").symlink_to(outside, target_is_directory=True)
+    for directory in (module, module.parent, module.parent.parent, cache):
+        directory.chmod(0o555)
+    monkeypatch.setattr(os, "chmod", linux_chmod)
+    try:
+        remove_tree(cache)
+        assert not cache.exists()
+        assert stat.S_IMODE(outside.stat().st_mode) == 0o555
+    finally:
+        monkeypatch.undo()
+        outside.chmod(0o755)
+
+
 def test_a_cache_left_by_a_killed_run_is_emptied(tmp_repo: Path, dirs: UserDirs) -> None:
     """`_finish` never ran after SIGKILL; a resumed run must not reuse what prepare wrote."""
     path = run_cache(tmp_repo, "r-20261115-1200-abcd", home=dirs.home)
