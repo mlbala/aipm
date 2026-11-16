@@ -112,13 +112,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends bubblewrap socat ripgrep
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          # Ubuntu's bwrap-userns-restrict profile confines bwrap's children, so srt's seccomp
-          # helper cannot set up its nested user namespace ("nested userns is
-          # capability-restricted"). Unload it on this runner only.
+          # Ubuntu's bwrap-userns-restrict file loads the profiles `bwrap` and `unpriv_bwrap`,
+          # which confine bwrap's children, so srt's seccomp helper cannot set up its nested
+          # user namespace ("nested userns is capability-restricted"). Unload them on this
+          # runner only.
+          for profile in bwrap unpriv_bwrap; do
+            if sudo aa-status 2>/dev/null | grep -qxE "[[:space:]]*$profile"; then
+              printf '%s' "$profile" | sudo tee /sys/kernel/security/apparmor/.remove >/dev/null
+              echo "unloaded AppArmor profile $profile"
+            fi
+          done
           sudo aa-status 2>/dev/null | grep -i bwrap || true
-          if sudo aa-status 2>/dev/null | grep -q bwrap-userns-restrict; then
-            sudo apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict
-          fi
 
       - name: Install
         run: uv sync --frozen --all-extras
