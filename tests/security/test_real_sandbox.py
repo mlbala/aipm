@@ -123,6 +123,27 @@ def failure(result: ProcessResult) -> str:
 # ------------------------------------------------------------------ the write rules
 
 
+def test_the_command_gets_its_own_writable_temp_dir(tmp_path: Path, cache: Path) -> None:
+    """Without CLAUDE_CODE_TMPDIR srt sets TMPDIR to /tmp/claude, which it never creates, and
+    Go and pnpm failed on Linux ("stat /tmp/claude: no such file or directory")."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    script = tmp_path / "temp_file.py"
+    script.write_text(
+        "import json, os, tempfile\n"
+        "with tempfile.NamedTemporaryFile() as handle:\n"
+        "    print(json.dumps([os.environ['TMPDIR'], handle.name]))\n",
+        encoding="utf-8",
+    )
+    for kind in (ProcessKind.GATE, ProcessKind.PREPARE):
+        result = run(kind, [sys.executable, str(script)], workspace=workspace, cache=cache)
+        assert result.returncode == 0, failure(result)
+        tmpdir, made = json.loads(result.stdout)
+        temp = Path(os.path.realpath(tmp_path / "ws-temp"))
+        assert Path(os.path.realpath(tmpdir)) == temp
+        assert Path(os.path.realpath(made)).parent == temp
+
+
 def test_prepare_writes_only_the_listed_cache_paths(tmp_path: Path, cache: Path) -> None:
     """ADR-0031: prepare may write each package manager's directory, never the cache root or
     Cargo's settings and `bin/`, which every later task's gates would read or run."""

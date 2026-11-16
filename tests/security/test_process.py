@@ -5,6 +5,7 @@ process behind on purpose record its PID in a file and kill it afterwards.
 """
 
 import asyncio
+import dataclasses
 import json
 import math
 import os
@@ -253,6 +254,80 @@ def test_a_sandbox_profile_without_a_runtime_is_refused(runner: Runner, tmp_path
     with pytest.raises(MissingCapability, match="cannot be run") as info:
         runner(PY, "-c", "pass", cwd=tmp_path, sandbox=profile)
     assert info.value.exit_code is ExitCode.MISSING_TOOL
+
+
+STUB_SRT = Path(__file__).resolve().parents[1] / "fakes" / "bin" / "srt"
+
+
+def _show_env(tmp_path: Path) -> Path:
+    """A script that prints srt's two temp-dir variables; a sandboxed argv takes no quotes."""
+    script = tmp_path / "show_env.py"
+    script.write_text(
+        "import json, os\n"
+        "names = ('CLAUDE_CODE_TMPDIR', 'CLAUDE_TMPDIR')\n"
+        "print(json.dumps({name: os.environ.get(name) for name in names}))\n",
+        encoding="utf-8",
+    )
+    return script
+
+
+@BOTH
+def test_srt_is_given_the_profile_temp_dir_and_the_callers_value_is_ignored(
+    runner: Runner, tmp_path: Path
+) -> None:
+    """srt sets the command's TMPDIR from CLAUDE_CODE_TMPDIR, else to /tmp/claude, which it
+    never creates (Go and pnpm failed on Linux). It also makes that directory writable, so the
+    caller's value, and the older CLAUDE_TMPDIR, never reach it."""
+    temp = tmp_path / "attempt-temp"
+    temp.mkdir(mode=0o700)
+    profile = SandboxProfile(
+        ProcessKind.GATE, NetworkPolicy(NetworkProfile.NONE), runtime=str(STUB_SRT),
+        settings_dir=tmp_path, temp_dir=temp, allow_write=(temp,),
+    )  # fmt: skip
+    env = build_env(extra={"CLAUDE_CODE_TMPDIR": "/", "CLAUDE_TMPDIR": "/"})
+    script = _show_env(tmp_path)
+    result = runner(PY, str(script), cwd=tmp_path, env=env, sandbox=profile)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"CLAUDE_CODE_TMPDIR": str(temp), "CLAUDE_TMPDIR": None}
+
+
+@BOTH
+def test_srt_falls_back_to_the_settings_dir_for_its_temp_dir(
+    runner: Runner, tmp_path: Path
+) -> None:
+    profile = SandboxProfile(
+        ProcessKind.GATE, NetworkPolicy(NetworkProfile.NONE), runtime=str(STUB_SRT),
+        settings_dir=tmp_path, allow_write=(tmp_path,),
+    )  # fmt: skip
+    result = runner(PY, str(_show_env(tmp_path)), cwd=tmp_path, sandbox=profile)
+    assert json.loads(result.stdout)["CLAUDE_CODE_TMPDIR"] == str(tmp_path)
+
+
+@BOTH
+@pytest.mark.parametrize("temp", ["outside", "relative"])
+def test_a_temp_dir_the_profile_may_not_write_is_refused(
+    runner: Runner, tmp_path: Path, temp: str
+) -> None:
+    """srt would make the dir writable: one outside the profile's allowlist never reaches it."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    named = tmp_path / "elsewhere" if temp == "outside" else Path("ws")
+    profile = SandboxProfile(
+        ProcessKind.GATE, NetworkPolicy(NetworkProfile.NONE), runtime=str(STUB_SRT),
+        settings_dir=tmp_path, allow_write=(workspace, named), temp_dir=named,
+    )  # fmt: skip
+    if temp == "outside":
+        profile = dataclasses.replace(profile, allow_write=(workspace,))
+    with pytest.raises(PolicyViolation, match="temp dir") as info:
+        runner(PY, str(_show_env(tmp_path)), cwd=tmp_path, sandbox=profile)
+    assert info.value.exit_code is ExitCode.SECURITY_VIOLATION
+
+
+@BOTH
+def test_an_unsandboxed_call_gets_no_srt_temp_dir(runner: Runner, tmp_path: Path) -> None:
+    code = "import os; print(os.environ.get('CLAUDE_CODE_TMPDIR'))"
+    result = runner(PY, "-c", code, cwd=tmp_path)
+    assert result.stdout == b"None\n"
 
 
 # ---------------------------------------------------------------- timeouts and process groups

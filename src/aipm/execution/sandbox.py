@@ -212,6 +212,26 @@ class SandboxProfile:
     deny_read: tuple[Path, ...] = ()
     deny_write: tuple[Path, ...] = field(default_factory=tuple[Path, ...])
     deny_write_patterns: tuple[str, ...] = ()
+    temp_dir: Path | None = None
+    """The process's own writable temp dir; `settings_dir` when not given (`temp_env`)."""
+
+
+TEMP_ENV = "CLAUDE_CODE_TMPDIR"
+"""srt sets the sandboxed command's `TMPDIR` to this variable's value, read from its own
+environment, and to `/tmp/claude` without it, which srt does not create: Go and pnpm then fail
+on Linux ("stat /tmp/claude: no such file or directory"). srt also makes the directory it names
+writable, so aipm always sets it, and `pass_env` may never (`security/env_policy.py`)."""
+LEGACY_TEMP_ENV = "CLAUDE_TMPDIR"
+"""The older name srt still reads when `TEMP_ENV` is unset."""
+
+
+def temp_env(profile: SandboxProfile) -> dict[str, str]:
+    """What `srt`'s environment needs so that the command's `TMPDIR` is its own temp dir. srt
+    makes that dir writable, so one the profile does not already allow is refused (exit 6)."""
+    temp = profile.temp_dir if profile.temp_dir is not None else profile.settings_dir
+    if not temp.is_absolute() or temp not in profile.allow_write:
+        raise PolicyViolation(f"the sandbox temp dir {temp} is not a path the profile may write")
+    return {TEMP_ENV: str(temp)}
 
 
 type Runtime = str | tuple[str, ...]
@@ -252,6 +272,8 @@ def profile_for(
         allow += [] if cache is None else [cache / rel for rel in PREPARE_WRITABLE]
     else:
         allow = [paths.output_dir if paths.output_dir is not None else paths.temp_dir]
+    # A scanner may write only its output dir, so its temp files go there.
+    temp_dir = allow[0] if kind is ProcessKind.SCANNER else paths.temp_dir
     deny_write = [paths.workspace / rel for rel in _PROTECTED_LITERALS]
     deny_write += [home / rel for rel in AGENT_GLOBAL_CONFIG]
     deny_write += [home / rel for rel in TOOLCHAIN_CONFIG]
@@ -271,6 +293,7 @@ def profile_for(
         deny_read=tuple(deny_read),
         deny_write=tuple(deny_write),
         deny_write_patterns=patterns,
+        temp_dir=temp_dir,
     )
 
 

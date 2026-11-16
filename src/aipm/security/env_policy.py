@@ -34,6 +34,8 @@ DENIED_NAMES: frozenset[str] = frozenset(
         "DISABLE_AUTOUPDATER", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
         # Files and prefixes the agents run or read as settings before aipm's.
         "CLAUDE_CODE_SHELL_PREFIX", "CLAUDE_ENV_FILE",
+        # srt makes the dir these name writable, as the command's TMPDIR (execution/sandbox.py).
+        "CLAUDE_CODE_TMPDIR", "CLAUDE_TMPDIR",
         "GEMINI_CLI_SYSTEM_SETTINGS_PATH", "GEMINI_CLI_SYSTEM_DEFAULTS_PATH",
         # An agent's own switch that approves every tool call.
         "COPILOT_ALLOW_ALL",

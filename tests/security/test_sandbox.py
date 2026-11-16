@@ -166,6 +166,21 @@ def test_gate_profile_hides_the_global_agent_homes_in_manual_mode(tmp_path: Path
         assert paths.home / rel in profile.deny_read
 
 
+def test_every_profile_names_a_temp_dir_it_may_write(tmp_path: Path) -> None:
+    """srt hands the command this dir as TMPDIR: it must be one the profile already allows."""
+    paths = _paths(tmp_path)
+    for kind in ProcessKind:
+        profile = profile_for(kind, NONE, paths, runtime="/bin/srt")
+        assert profile.temp_dir == paths.temp_dir, kind
+        assert profile.temp_dir in profile.allow_write, kind
+    output = tmp_path / "scanner-out"
+    scanner = profile_for(
+        ProcessKind.SCANNER, NONE, _paths(tmp_path, output_dir=output), runtime="/bin/srt"
+    )
+    assert scanner.temp_dir == output
+    assert scanner.allow_write == (output,)
+
+
 def test_every_profile_denies_writes_to_protected_paths_and_global_config(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
     for kind in ProcessKind:

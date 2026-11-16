@@ -233,6 +233,8 @@ DENIED = [
     # the variables aipm sets for agents
     "CLAUDE_CONFIG_DIR", "CODEX_HOME", "COPILOT_HOME", "GEMINI_CLI_HOME", "GEMINI_SANDBOX",
     "DISABLE_AUTOUPDATER", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    # srt makes the dir these name writable
+    "CLAUDE_CODE_TMPDIR", "CLAUDE_TMPDIR",
     # the owner's additions
     "PATH", "HOME", "TMPDIR",
     "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB",
@@ -328,6 +330,13 @@ def test_every_variable_aipm_sets_for_an_agent_is_denied() -> None:
     homes = {m.CONFIG_HOME.env_var for m in (claude_code, codex, copilot, gemini)}
     agent = {*claude_code.AGENT_ENV, *dict(gemini.GeminiAdapter.agent_env)}
     assert homes | agent <= DENIED_NAMES
+
+
+def test_srt_temp_dir_variables_are_denied() -> None:
+    """srt makes the dir these name writable; only aipm sets them (execution/sandbox.py)."""
+    from aipm.execution.sandbox import LEGACY_TEMP_ENV, TEMP_ENV  # noqa: PLC0415
+
+    assert {TEMP_ENV, LEGACY_TEMP_ENV} <= DENIED_NAMES
 
 
 # ---------------------------------------------------------------- N-5: the trace endpoint's host

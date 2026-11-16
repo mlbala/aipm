@@ -56,6 +56,8 @@ All notable changes to aipm are recorded here. The format follows [Keep a Change
 - `aipm status` with no build yet says "no build has run" instead of naming the milestone (the status snapshot changed on purpose).
 - The release workflow stub passes a milestone tag with a notice instead of failing it: until build prompt 08 adds the pipeline, a `v*` tag still builds and publishes nothing.
 - A directory where aipm expected a file (a `.gitignore` directory in a cloned repository, a trust store path) is refused instead of crashing.
+- Under `srt`, a command's `TMPDIR` is its own per-attempt temp dir. srt set it to `/tmp/claude`, which it never creates, so on Linux Go (`go vet`, `go test`) and pnpm failed with "no such file or directory". aipm now passes srt `CLAUDE_CODE_TMPDIR`, and `pass_env` refuses `CLAUDE_CODE_TMPDIR` and `CLAUDE_TMPDIR`, since srt makes the directory they name writable.
+- Removing a run's package cache crashed on Linux, where `os.chmod` cannot skip links; it now falls back to opening the directory without following links.
 
 ### Security
 
