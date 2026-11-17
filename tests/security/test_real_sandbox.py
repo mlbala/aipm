@@ -33,7 +33,7 @@ from aipm.execution.sandbox import (
     launcher_for,
     profile_for,
 )
-from aipm.gates.command_gate import run_prepare
+from aipm.gates.command_gate import run_command_gate, run_prepare
 from aipm.security.network import NetworkPolicy
 from tests.conftest import REPO_ROOT
 from tests.security.test_gates import make_ctx
@@ -283,6 +283,35 @@ def test_a_committed_pnpm_setting_cannot_move_pnpm_files_out_of_the_worktree(
     assert outcome is not None and outcome.result.status is GateStatus.PASS, outcome.full_output
     assert sorted((ctx.root / "node_modules" / ".pnpm").rglob("index.js"))
     assert not elsewhere.exists()
+
+
+@pytest.mark.parametrize("sandboxed", [True, False], ids=["srt", "no-srt"])
+def test_a_pnpm_gate_ignores_a_workspace_file_above_the_worktree(
+    tmp_path: Path, cache: Path, sandboxed: bool
+) -> None:
+    """Session 4 review: pnpm reads `pnpm-workspace.yaml` from any directory above its working
+    directory. One there asking to install before a script must not make the gate install:
+    the gate fails on its out-of-date dependencies instead."""
+    pnpm = need("pnpm")
+    ctx = make_ctx(tmp_path, runtime=need("srt") if sandboxed else None)
+    (tmp_path / "pnpm-workspace.yaml").write_text(
+        "verifyDepsBeforeRun: install\n", encoding="utf-8"
+    )
+    (ctx.root / "package.json").write_text(
+        json.dumps({
+            "name": "app", "version": "1.0.0", "scripts": {"test": "node -e 0"},
+            "dependencies": {"dep": tarball(ctx.root)},
+        }),
+        encoding="utf-8",
+    )  # fmt: skip
+    cfg = Config.model_validate(
+        {"allowed_executables": [[pnpm, "test"]], "gates": {"unit": {"run": [pnpm, "test"]}}}
+    )
+    ctx = dataclasses.replace(ctx, cfg=cfg, package_cache=cache)
+    outcome = run_command_gate("unit", cfg.gates["unit"], ctx, paths=[], required=True)
+    assert outcome.result.status is GateStatus.FAIL, outcome.full_output
+    assert "VERIFY_DEPS_BEFORE_RUN" in outcome.full_output, outcome.full_output
+    assert not (ctx.root / "node_modules").exists()
 
 
 def test_go_vet_runs_with_a_read_only_module_cache(tmp_path: Path, cache: Path) -> None:

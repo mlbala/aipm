@@ -30,7 +30,7 @@ from pydantic import AwareDatetime, Field, ValidationError
 from aipm import __version__
 from aipm.config.loader import relaxations
 from aipm.config.schema import Config
-from aipm.domain.errors import AipmError, PolicyViolation
+from aipm.domain.errors import AipmError, PolicyViolation, SchemaError
 from aipm.domain.models import GateDef, PrepareDef, RepoId, StrictModel, ToolName
 from aipm.domain.models.base import Sha256, Str200, Str500
 from aipm.observability.redaction import process_redactor
@@ -45,6 +45,7 @@ from aipm.security.command_policy import (
 from aipm.security.json_limits import TooDeep, loads_bounded
 from aipm.security.paths import is_within
 from aipm.security.sanitize import sanitize_text
+from aipm.state.pnpm_workspace import PNPM_WORKSPACE, is_risky, load_settings
 
 SURFACE_VERSION = 1
 TRUST_FILE = "trust.json"
@@ -303,9 +304,25 @@ def pin_toolchain(committed: Committed) -> dict[str, dict[str, str]]:
             table = _tool_uv(data)
             if table is not None:
                 found[rel] = table
+        elif rel == PNPM_WORKSPACE:
+            found[rel] = {"sha256": hashlib.sha256(data).hexdigest(), **_pnpm_settings(data)}
         else:
             found[rel] = {"sha256": hashlib.sha256(data).hexdigest()}
     return found
+
+
+def _pnpm_settings(data: bytes) -> dict[str, str]:
+    """`pnpm-workspace.yaml`'s settings as sorted JSON, for `trust --show` to list (they beat
+    the environment pnpm gets), or why they cannot be shown; the hash pins the file either
+    way."""
+    try:
+        settings = load_settings(data)
+    except SchemaError as exc:
+        return {"error": exc.message[:200]}
+    try:
+        return {"settings": json.dumps(settings, sort_keys=True, ensure_ascii=True, default=str)}
+    except (RecursionError, ValueError):
+        return {"error": "nested too deeply to show"}
 
 
 def execution_surface(
@@ -374,7 +391,38 @@ def _toolchain_lines(surface: Mapping[str, Any]) -> list[str]:
     for name, entry in sorted(toolchain.items()):
         part = f" [{entry['table']}]" if "table" in entry else ""
         lines.append(f"  {name}{part} [sha256 {entry['sha256']}]")
+        if name == PNPM_WORKSPACE:
+            lines.extend(_pnpm_lines(entry))
     return lines
+
+
+SHOWN_VALUE_CHARS = 160
+SHOWN_SETTINGS = 40
+
+
+def _pnpm_lines(entry: Mapping[str, str]) -> list[str]:
+    """One line per setting, marking those that change what pnpm installs or runs, or where it
+    writes. The values are repository text: the CLI prints every line as untrusted."""
+    if "error" in entry:
+        return [f"    settings not shown ({entry['error']}); review the file before trusting it"]
+    try:
+        settings: dict[str, object] = loads_bounded(entry.get("settings", "{}"))
+    except ValueError:  # TooDeep too: the surface is aipm's own, but read it like any JSON
+        return ["    settings not shown (unreadable); review the file before trusting it"]
+    lines: list[str] = []
+    ordered = sorted(settings.items(), key=lambda item: (not is_risky(item[0]), item[0]))
+    for key, value in ordered[:SHOWN_SETTINGS]:
+        name = _cut(key if key.isidentifier() else json.dumps(key, ensure_ascii=True))
+        shown = _cut(json.dumps(value, sort_keys=True, ensure_ascii=True))
+        mark = "  [changes what pnpm installs or runs, or where it writes]" if is_risky(key) else ""
+        lines.append(f"    {name}: {shown}{mark}")
+    if len(ordered) > SHOWN_SETTINGS:
+        lines.append(f"    ... and {len(ordered) - SHOWN_SETTINGS} more settings: review the file")
+    return lines
+
+
+def _cut(text: str) -> str:
+    return text if len(text) <= SHOWN_VALUE_CHARS else text[: SHOWN_VALUE_CHARS - 1] + "~"
 
 
 def render_surface(surface: Mapping[str, Any], surface_hash: str) -> list[str]:

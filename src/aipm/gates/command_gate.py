@@ -27,7 +27,7 @@ from pathlib import Path
 
 from aipm.domain.errors import PolicyViolation
 from aipm.domain.models import Ecosystem, GateDef, GateResult, GateStatus, NetworkProfile
-from aipm.execution.package_cache import cache_args, cache_env
+from aipm.execution.package_cache import cache_args, cache_env, pnpm_env
 from aipm.execution.process import BASE_ENV_ALLOWLIST, ProcessResult, build_env, run_safe
 from aipm.execution.sandbox import ProcessKind, ProfilePaths, SandboxProfile, profile_for
 from aipm.gates.context import GateContext
@@ -41,6 +41,8 @@ from aipm.security.command_policy import (
 from aipm.security.network import NetworkPolicy, parse_network
 from aipm.security.paths import SafeRelPath
 from aipm.security.sanitize import head_tail, sanitize_text, strip_terminal_escapes
+from aipm.state.pnpm_workspace import PNPM_WORKSPACE, installs_before_run
+from aipm.state.pnpm_workspace import read_settings as read_pnpm_settings
 
 GATE_TIMEOUT_S = 600.0
 MAX_OUTPUT_BYTES = 2_000_000
@@ -205,6 +207,23 @@ def _judge(
     return GateStatus.PASS, report.summary(), report
 
 
+def refuse_pnpm_install_before_run(program: str, root: Path) -> None:
+    """Exit 6 when a gate runs pnpm and the repository's `pnpm-workspace.yaml` asks pnpm 10 to
+    install before running a script (`verifyDepsBeforeRun: install`), or has a key pnpm would
+    expand (`${…}`). `pnpm_env` already overrides it; this refuses a repository that asks, in
+    case a pnpm version reads it differently (v0.4 decisions, session 4)."""
+    if program_name(program) != "pnpm":
+        return
+    settings = read_pnpm_settings(root)
+    if settings is not None and installs_before_run(settings):
+        raise PolicyViolation(
+            f"a pnpm gate would install dependencies first: {PNPM_WORKSPACE} sets "
+            "verifyDepsBeforeRun to a value that installs",
+            hint=f"Set verifyDepsBeforeRun to error, warn or false in {PNPM_WORKSPACE}; "
+            "prepare installs, and gates only run.",
+        )
+
+
 def run_command_gate(
     name: str, gate: GateDef, ctx: GateContext, *, paths: list[SafeRelPath], required: bool
 ) -> CommandOutcome:
@@ -219,6 +238,7 @@ def run_command_gate(
         compile_gate(gate, paths=paths, policy=ctx.cfg.command_policy(), report_file=report_file)
     )
     argv[0] = resolve_program(argv[0], ctx.root)
+    refuse_pnpm_install_before_run(argv[0], ctx.root)
     profile = sandbox_for(ctx, ProcessKind.GATE, ctx.cfg.security.network.gates, argv)
     if report_file is not None:
         report_file.unlink(missing_ok=True)
@@ -226,7 +246,9 @@ def run_command_gate(
     result = run_safe(
         argv,
         cwd=ctx.root,
-        env=gate_env(ctx) | cache_env(argv[0], ctx.package_dir, ctx.ws.temp_dir),
+        env=gate_env(ctx)
+        | cache_env(argv[0], ctx.package_dir, ctx.ws.temp_dir)
+        | pnpm_env(argv[0], ctx.root),
         timeout_s=GATE_TIMEOUT_S,
         max_output_bytes=MAX_OUTPUT_BYTES,
         sandbox=profile,
@@ -263,6 +285,7 @@ def run_prepare(ctx: GateContext) -> CommandOutcome | None:
             "TMPDIR": str(ctx.ws.temp_dir),
             **toolchain_env(ctx.root),
             **cache_env(argv[0], ctx.package_dir, ctx.ws.temp_dir),
+            **pnpm_env(argv[0], ctx.root),
         },
         base_allowlist=(*BASE_ENV_ALLOWLIST, *PREPARE_ENV),
     )

@@ -78,6 +78,26 @@ def cache_args(program: str, cache: Path) -> tuple[str, ...]:
     )
 
 
+def pnpm_env(program: str, root: Path) -> dict[str, str]:
+    """What pnpm gets in prepare and in gates, on top of `cache_env` (v0.4 decisions, session 4;
+    each checked by hand on pnpm 10.34.9).
+
+    - `NPM_CONFIG_WORKSPACE_DIR`: pnpm looks for `pnpm-workspace.yaml` in every directory above
+      its working directory; pinned to the worktree, a file planted above it is never read.
+    - `verifyDepsBeforeRun=error`: pnpm 10 may install before `pnpm test`, `run` or `exec`,
+      with the import method its settings name, not prepare's copies; a gate must run what
+      prepare installed. `npm_config_…` beats `.npmrc`, and `pnpm_config_…` beats
+      `pnpm-workspace.yaml`, including a key spelled with `${VAR:-…}`, which pnpm expands.
+      `gates/command_gate.py` also refuses a pnpm gate whose file asks to install."""
+    if program_name(program) != "pnpm":
+        return {}
+    return {
+        "NPM_CONFIG_WORKSPACE_DIR": str(root),
+        "npm_config_verify_deps_before_run": "error",
+        "pnpm_config_verify_deps_before_run": "error",
+    }
+
+
 def cache_env(program: str, cache: Path, temp: Path) -> dict[str, str]:
     """The variables that point `program` (an argv[0]) at the run's cache. Go also gets its build
     cache in the attempt's `temp` dir, which no other attempt shares."""

@@ -66,6 +66,9 @@ The low findings left open by the v0.4 decisions:
 - Release verification pins the signer certificate exactly: `install.sh` and the README use `gh attestation verify --cert-identity https://github.com/mlbala/aipm/.github/workflows/release.yml@refs/tags/<tag>` instead of `--signer-workflow`, which can match more than one workflow path (gh refuses the two together).
 - Dependabot updates the sandbox CI job's srt and pnpm (`.github/sandbox/package-lock.json`).
 - A committed `pnpm-workspace.yaml` could move pnpm's metadata cache (`cacheDir`), its virtual store (`virtualStoreDir`) or `node_modules` itself (`modulesDir`) outside the worktree. Prepare now also passes `--cache-dir`, `--virtual-store-dir=node_modules/.pnpm` and `--modules-dir=node_modules`, which win over the file.
+- A gate running pnpm could install first when the repository set pnpm 10's `verifyDepsBeforeRun: install`, with the repository's import method instead of prepare's copies. Such a gate gets `npm_config_verify_deps_before_run=error` (which beats `.npmrc`) and `pnpm_config_verify_deps_before_run=error` (which beats `pnpm-workspace.yaml`), and is refused (exit 6) when the file asks to install or has a key pnpm expands from the environment.
+- pnpm read a `pnpm-workspace.yaml` from any directory above the worktree. Prepare and gates running pnpm are now pinned to the worktree (`NPM_CONFIG_WORKSPACE_DIR`), and a pnpm workspace file above aipm's worktrees is refused (exit 6).
+- `aipm trust --show` lists `pnpm-workspace.yaml`'s settings and marks the risky ones (`dangerouslyAllowAllBuilds`, `overrides`, `configDependencies`, the store and import settings, …). A repository that commits the file re-trusts once.
 
 The step 08 security review found one high and two medium problems in the v0.4 work, all fixed:
 
