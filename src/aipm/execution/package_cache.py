@@ -63,10 +63,19 @@ def cache_args(program: str, cache: Path) -> tuple[str, ...]:
     repeated the environment's value, and the file's setting won. pnpm 10.34.9 accepts them
     before `install`, `fetch` and `test`, and refuses them ("Unknown options") before `run`,
     `exec` and `rebuild`, so a prepare step of that kind fails closed and gates get none
-    (session 3 re-review)."""
+    (session 3 re-review). The file's `cacheDir`, `virtualStoreDir` and `modulesDir` could move
+    pnpm's metadata cache, its virtual store or `node_modules` itself outside the worktree; the
+    flags keep them in the run's cache and the worktree (session 4; checked by hand on 10.34.9:
+    without the flag a committed `virtualStoreDir` was used, with it the worktree's)."""
     if program_name(program) != "pnpm":
         return ()
-    return (f"--store-dir={cache / 'pnpm-store'}", "--package-import-method=copy")
+    return (
+        f"--store-dir={cache / 'pnpm-store'}",
+        "--package-import-method=copy",
+        f"--cache-dir={cache / 'pnpm-cache'}",
+        "--virtual-store-dir=node_modules/.pnpm",
+        "--modules-dir=node_modules",
+    )
 
 
 def cache_env(program: str, cache: Path, temp: Path) -> dict[str, str]:

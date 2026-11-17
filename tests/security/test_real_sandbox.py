@@ -256,6 +256,35 @@ def test_a_committed_pnpm_setting_cannot_share_files_with_the_run_store(
     assert not elsewhere.exists()
 
 
+@pytest.mark.parametrize("sandboxed", [True, False], ids=["srt", "no-srt"])
+@pytest.mark.parametrize("setting", ["cacheDir", "virtualStoreDir", "modulesDir"])
+def test_a_committed_pnpm_setting_cannot_move_pnpm_files_out_of_the_worktree(
+    tmp_path: Path, cache: Path, setting: str, sandboxed: bool
+) -> None:
+    """Session 4: `pnpm-workspace.yaml`'s `cacheDir`, `virtualStoreDir` and `modulesDir` beat
+    the environment. aipm's flags keep pnpm's files in the run's cache and the worktree, with
+    or without srt (without it, nothing else would)."""
+    pnpm = need("pnpm")
+    ctx = make_ctx(tmp_path, runtime=need("srt") if sandboxed else None)
+    elsewhere = tmp_path / "elsewhere"
+    (ctx.root / "package.json").write_text(
+        json.dumps({"name": "app", "version": "1.0.0", "dependencies": {"dep": tarball(ctx.root)}}),
+        encoding="utf-8",
+    )
+    (ctx.root / "pnpm-workspace.yaml").write_text(f"{setting}: {elsewhere}\n", encoding="utf-8")
+    cfg = Config.model_validate(
+        {
+            "allowed_executables": [[pnpm, "install"]],
+            "prepare": {"run": [pnpm, "install", "--offline", "--ignore-scripts"]},
+        }
+    )
+    ctx = dataclasses.replace(ctx, cfg=cfg, package_cache=cache)
+    outcome = run_prepare(ctx)
+    assert outcome is not None and outcome.result.status is GateStatus.PASS, outcome.full_output
+    assert sorted((ctx.root / "node_modules" / ".pnpm").rglob("index.js"))
+    assert not elsewhere.exists()
+
+
 def test_go_vet_runs_with_a_read_only_module_cache(tmp_path: Path, cache: Path) -> None:
     """ADR-0031, unverified until now: a gate's `GOMODCACHE` is the run's, which gates cannot
     write; `go vet` must still work, with its build cache in the attempt's temp dir."""

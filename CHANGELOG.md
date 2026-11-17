@@ -65,6 +65,7 @@ The low findings left open by the v0.4 decisions:
 
 - Release verification pins the signer certificate exactly: `install.sh` and the README use `gh attestation verify --cert-identity https://github.com/mlbala/aipm/.github/workflows/release.yml@refs/tags/<tag>` instead of `--signer-workflow`, which can match more than one workflow path (gh refuses the two together).
 - Dependabot updates the sandbox CI job's srt and pnpm (`.github/sandbox/package-lock.json`).
+- A committed `pnpm-workspace.yaml` could move pnpm's metadata cache (`cacheDir`), its virtual store (`virtualStoreDir`) or `node_modules` itself (`modulesDir`) outside the worktree. Prepare now also passes `--cache-dir`, `--virtual-store-dir=node_modules/.pnpm` and `--modules-dir=node_modules`, which win over the file.
 
 The step 08 security review found one high and two medium problems in the v0.4 work, all fixed:
 

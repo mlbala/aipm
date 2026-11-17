@@ -435,6 +435,9 @@ def test_pnpm_gets_the_run_store_and_copying_as_flags(tmp_path: Path) -> None:
     assert cache_args("/opt/bin/pnpm", cache) == (
         f"--store-dir={cache / 'pnpm-store'}",
         "--package-import-method=copy",
+        f"--cache-dir={cache / 'pnpm-cache'}",
+        "--virtual-store-dir=node_modules/.pnpm",
+        "--modules-dir=node_modules",
     )
     for other in ("npm", "uv", "go", "cargo", "/usr/bin/python3", "pnpx"):
         assert cache_args(other, cache) == ()
@@ -450,6 +453,9 @@ def test_prepare_puts_the_pnpm_flags_before_the_subcommand(tmp_path: Path) -> No
     assert log.read_text(encoding="utf-8").splitlines() == [
         f"--store-dir={ctx.package_dir / 'pnpm-store'}",
         "--package-import-method=copy",
+        f"--cache-dir={ctx.package_dir / 'pnpm-cache'}",
+        "--virtual-store-dir=node_modules/.pnpm",
+        "--modules-dir=node_modules",
         "install",
         "--frozen-lockfile",
     ]
