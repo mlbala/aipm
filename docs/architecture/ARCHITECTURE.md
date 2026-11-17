@@ -745,7 +745,7 @@ sequenceDiagram
    - if the rebase conflicts, the task is blocked with `merge_conflict`.
 
    Finally the worktree is removed.
-6. **Fail.** If `attempts < --max-retries` (default 3), aipm builds a fix prompt and re-dispatches in the same worktree. Claude Code reuses the session with `--resume`. Otherwise the task is marked `blocked` with the reason `gates_failed`, and the summary lists each failing gate.
+6. **Fail.** If `attempts < --max-retries` (default 3), aipm builds a fix prompt and re-dispatches in the same worktree. Claude Code reuses the session with `--resume`. Otherwise the task is marked `blocked` with the reason `gates_failed`, and the summary lists each failing gate. Before a `go mod download` prepare step, every new Go module is looked up first; when the Go proxy cannot be asked, no gate runs and the task is blocked at once with the reason `registry_unavailable`, without a retry ([SECURITY.md §12.2](SECURITY.md#122-generated-projects)).
 
 ### 12.5 Budgets and limits
 
@@ -776,7 +776,7 @@ sequenceDiagram
 - The user runs their agent in their own working tree.
 - `aipm verify T-007` runs the same post-change checks and gates (§12.4 steps 3–4) against the diff from `base_sha` to the working tree.
 - **Attempt snapshot (§12.4 step 1).** The `aipm prompt` that starts a task records, outside the repository, the integrity hashes of git's and the agents' configuration and the hash of every file that already differed from `base_sha` or was untracked; aipm's own `.pm/` writes are recorded in a write ledger. `verify` compares the integrity hashes before git runs, takes `base_sha` from the snapshot, and counts only what changed since; tampering is judged before the G3 check ([ADR-0021](adr/0021-attempt-snapshot-and-pm-write-ledger.md)). A task without a snapshot exits 2.
-- **Outcome.** A severe violation blocks the task (exit 6). Otherwise the gates run, then the checks again; when the checks refused a dependency change, the prepare step (and so every command gate) does not run, so nothing refused is installed ([SECURITY.md §12.2](SECURITY.md#122-generated-projects)). The task is `done` only if every required gate passed (the menu's, and every gate the task names), `ac_review` vetoed nothing, there was no minor violation and `--gate` was not given; else exit 3, or 8 when a required scanner is missing, or 4 when the AC reviewer reported suspected injection without `--accept-risk`. Manual verify never reverts files: a minor violation fails the attempt. The report, the gate logs and the journal are saved in `runs/<run-id>/`, and `prompt --fix` reads the newest report.
+- **Outcome.** A severe violation blocks the task (exit 6). Otherwise the gates run, then the checks again; when the checks refused a dependency change, the prepare step (and so every command gate) does not run, so nothing refused is installed ([SECURITY.md §12.2](SECURITY.md#122-generated-projects)). The task is `done` only if every required gate passed (the menu's, and every gate the task names), `ac_review` vetoed nothing, there was no minor violation and `--gate` was not given; else exit 3, or 8 when a required scanner is missing or the Go proxy cannot be asked about new modules before prepare (the task is then blocked, `registry_unavailable`), or 4 when the AC reviewer reported suspected injection without `--accept-risk`. Manual verify never reverts files: a minor violation fails the attempt. The report, the gate logs and the journal are saved in `runs/<run-id>/`, and `prompt --fix` reads the newest report.
 - `--commit` commits the result with the same trailers, then checks that the commit holds exactly what the checks and gates saw; if not, the task is blocked (exit 6) and the commit is named for review ([SECURITY.md §11](SECURITY.md#11-git-safety)). Without it, verify only updates the task status (`done.commit` stays empty).
 - In manual mode the sandbox applies to gates only. aipm does not control the agent the user runs.
 
@@ -827,7 +827,7 @@ Each placeholder must be a whole argv element, and each expanded value is its ow
 
 ### 13.2 Execution
 
-- Gates run in the worktree (or the working tree in manual mode), in the sandbox, with the `gates` network profile (none). The `prepare` step uses the `registries` profile.
+- Gates run in the worktree (or the working tree in manual mode), in the sandbox, with the `gates` network profile (none). The `prepare` step uses the `registries` profile. Prepare installs into a package cache of the run, which gates read and only prepare writes; `verify` gets one of its own ([ADR-0031](adr/0031-a-package-cache-per-run.md)).
 - **Order:** cheap gates first (`secrets` → `lint` → `format` → `types` → `unit` → `ac_trace` → `sast` → `deps`), then `ac_review` last.
 - **Short-circuit:** with `dispatch.fail_fast: true` (the default during build), aipm stops at the first required failure. `verify` runs all gates.
 - **Results:** each gate produces `{name, status: pass|fail|error|skipped, duration_ms, summary, findings[], output_ref}`. Full output is stored in the run directory and redacted.
@@ -973,7 +973,7 @@ logging: {level: info, json: false}
 | `aipm` | v0.1 | | Phase report and next step (§7.3) |
 | `aipm init` | v0.1 | `--provider`, `--tool`, `--stack`, `--force` | Creates `.pm/`, detects the stack, writes the repo map, copies gates, runs the trust flow |
 | `aipm doctor` | v0.1 | | Tool versions, capabilities, sandbox, which API key env vars are set (never their values), plugins. `--fix-schema` arrives with the first v2 schema (§6.2). |
-| `aipm trust` | v0.1 | `--show`, `--revoke`, `--confirm HASH12` | Shows the exact argv of `prepare` and all gates, dispatch flags, network profiles and the surface hash, then records trust ([SECURITY.md §6](SECURITY.md#6-execution-trust)) |
+| `aipm trust` | v0.1 | `--show`, `--revoke`, `--confirm HASH12` | Shows the exact argv of `prepare` and all gates, dispatch flags, network profiles, the hashes of the repository's committed toolchain files ([ADR-0032](adr/0032-toolchain-files-in-the-trust-surface.md)) and the surface hash, then records trust ([SECURITY.md §6](SECURITY.md#6-execution-trust)) |
 | `aipm discover` | v0.1 | `--from FILE`, `--answers FILE`, `--defaults`, `--edit Q-ID`, `--max-rounds`, `--threshold`, `--accept-risk` | §8 |
 | `aipm approve <prd\|design\|plan\|context>` | v0.1 | `--yes` | Non-interactive approval |
 | `aipm design` | v0.1 | `--regenerate`, `--accept-risk`, `--accept-stale` | Architecture, ADRs, threat model |

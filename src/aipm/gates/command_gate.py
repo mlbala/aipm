@@ -27,6 +27,7 @@ from pathlib import Path
 
 from aipm.domain.errors import PolicyViolation
 from aipm.domain.models import Ecosystem, GateDef, GateResult, GateStatus, NetworkProfile
+from aipm.execution.package_cache import cache_args, cache_env
 from aipm.execution.process import BASE_ENV_ALLOWLIST, ProcessResult, build_env, run_safe
 from aipm.execution.sandbox import ProcessKind, ProfilePaths, SandboxProfile, profile_for
 from aipm.gates.context import GateContext
@@ -109,7 +110,7 @@ def ecosystems_for(argv: Sequence[str]) -> tuple[Ecosystem, ...]:
     return _ECOSYSTEMS.get(program_name(argv[0]), (Ecosystem.PYPI, Ecosystem.NPM))
 
 
-def _go_mod_download(argv: Sequence[str]) -> bool:
+def go_mod_download(argv: Sequence[str]) -> bool:
     """`go mod download`, with nothing between `go` and `mod download`."""
     return program_name(argv[0]) == "go" and list(argv[1:3]) == ["mod", "download"]
 
@@ -121,7 +122,7 @@ def _network(profile: NetworkProfile, argv: Sequence[str], kind: ProcessKind) ->
             hint="Use none (the default), registries or open for gates and the prepare step.",
         )
     ecosystems = ecosystems_for(argv)
-    if kind is not ProcessKind.PREPARE or not _go_mod_download(argv):
+    if kind is not ProcessKind.PREPARE or not go_mod_download(argv):
         # The Go proxy fetches any module path from its origin, and its storage host takes
         # anyone's bucket: test code could carry data out through either (step 08 review).
         # Only `go mod download`, which runs no repository code, gets them (ADR-0029); a test
@@ -137,8 +138,9 @@ def sandbox_for(
     if ctx.runtime is None:
         return None
     paths = ProfilePaths(
-        workspace=ctx.root, temp_dir=ctx.ws.temp_dir, home=ctx.home, extra_deny_read=ctx.deny_read
-    )
+        workspace=ctx.root, temp_dir=ctx.ws.temp_dir, home=ctx.home,
+        extra_deny_read=ctx.deny_read, package_cache=ctx.package_dir,
+    )  # fmt: skip
     return profile_for(kind, _network(profile, argv, kind), paths, runtime=ctx.runtime)
 
 
@@ -224,7 +226,7 @@ def run_command_gate(
     result = run_safe(
         argv,
         cwd=ctx.root,
-        env=gate_env(ctx),
+        env=gate_env(ctx) | cache_env(argv[0], ctx.package_dir, ctx.ws.temp_dir),
         timeout_s=GATE_TIMEOUT_S,
         max_output_bytes=MAX_OUTPUT_BYTES,
         sandbox=profile,
@@ -253,10 +255,15 @@ def run_prepare(ctx: GateContext) -> CommandOutcome | None:
         return None
     argv = list(compile_prepare(prepare, policy=ctx.cfg.command_policy()))
     argv[0] = resolve_program(argv[0], ctx.root)
+    argv[1:1] = cache_args(argv[0], ctx.package_dir)  # after the policy check: aipm's own
     profile = sandbox_for(ctx, ProcessKind.PREPARE, min_network(prepare.network, ctx), argv)
     started = time.monotonic()
     env = build_env(
-        extra={"TMPDIR": str(ctx.ws.temp_dir), **toolchain_env(ctx.root)},
+        extra={
+            "TMPDIR": str(ctx.ws.temp_dir),
+            **toolchain_env(ctx.root),
+            **cache_env(argv[0], ctx.package_dir, ctx.ws.temp_dir),
+        },
         base_allowlist=(*BASE_ENV_ALLOWLIST, *PREPARE_ENV),
     )
     result = run_safe(

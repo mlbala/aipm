@@ -24,7 +24,6 @@ suspected prompt injection and `--accept-risk` was not given. Manual verify neve
 anything in your tree.
 """
 
-import shutil
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -81,6 +80,7 @@ from aipm.domain.models import (
 from aipm.domain.models.snapshot import StateSnapshot
 from aipm.domain.phase import prompt_inputs
 from aipm.execution import git
+from aipm.execution.package_cache import remove_tree, run_cache
 from aipm.execution.sandbox import Runtime, resolve_sandbox
 from aipm.gates.context import GateContext
 from aipm.gates.runner import GateRun, run_gates
@@ -246,6 +246,8 @@ class _Verify:
     temp: Path
     sandbox: Runtime | None
     warnings: list[str]
+    packages: Path | None = None
+    """This verify's package cache (ADR-0031): outside the temp dir, which gates may write."""
 
     def _task(self) -> tuple[TasksDoc, Task, AttemptSnapshot, StateSnapshot]:
         state, _ = read_snapshot(
@@ -297,6 +299,7 @@ class _Verify:
             home=Path.home(), now=datetime.now(UTC), runtime=self.sandbox,
             withheld=ignore_spec(self.root, also=base_ignores(self.root, base)).match_file,
             changed_during_gates=lambda: moved_since(self.root, scanned),
+            package_cache=self.packages,
         )  # fmt: skip
         review, unavailable = reviewer(self.cfg, self.store, no_cache=self.options.no_cache)
         commit_paths = [c.path for c in changes.files if not c.path.startswith(".pm/")]
@@ -319,7 +322,40 @@ class _Verify:
             for path in moved_since(self.root, scanned)
         ]
         result.violations = [*violations, *moved]
+        if gate_run.registry_unavailable is not None:
+            self._block_unavailable(tasks, task, result, gate_run)
         return self._finish(tasks, task, result, gate_run, changes, expected)
+
+    def _block_unavailable(
+        self, tasks: TasksDoc, task: Task, result: VerifyResult, gate_run: GateRun
+    ) -> None:
+        """Block the task (`registry_unavailable`) and exit 8: the new Go modules could not be
+        looked up before prepare, so another attempt cannot pass until the proxy answers
+        (red-team v0.4, N-1)."""
+        why = gate_run.registry_unavailable or "the Go module proxy could not be asked"
+        result.outcome = "blocked"
+        result.report = GateReport(
+            task=task.id, run_id=result.run_id, attempt=result.attempt, gates=gate_run.results[:32]
+        )
+        blocked = task.model_copy(
+            update={
+                "status": TaskStatus.BLOCKED,
+                "attempts": result.attempt,
+                "blocked": Blocked(reason=BlockedReason.REGISTRY_UNAVAILABLE, detail=why[:1000]),
+            }
+        )
+        events: Events = [
+            (JournalEventType.TASK_BLOCKED, {"reason": BlockedReason.REGISTRY_UNAVAILABLE.value})
+        ]
+        _save_run(self.store, result, gate_run.outputs, events)
+        _save_tasks(self.store, tasks, blocked)
+        raise _stop(
+            result,
+            MissingCapability,
+            f"{task.id} is blocked: {why[:300]}",
+            f"Check the network or the Go proxy, then `aipm task unblock {task.id}` and "
+            f"`aipm verify {task.id}`.",
+        )
 
     def _block(
         self,
@@ -504,7 +540,9 @@ def run(project: Path | None, options: VerifyOptions) -> VerifyResult:
     require_trusted(root, loaded, command="verify")
     store = runtime.open_repo_store(root)
     temp = attempt_dir(root)
+    packages: Path | None = None
     try:
+        packages = run_cache(root, new_run_id(), home=Path.home())
         sandbox = resolve_sandbox(
             mode=cfg.dispatch.sandbox.value,
             require=cfg.security.require_sandbox,
@@ -513,6 +551,12 @@ def run(project: Path | None, options: VerifyOptions) -> VerifyResult:
         )
         warnings = [*loaded.warnings, *([sandbox.warning] if sandbox.warning else [])]
         with store.lock():
-            return _Verify(root, cfg, store, options, temp, sandbox.launcher, warnings).run()
+            return _Verify(
+                root, cfg, store, options, temp, sandbox.launcher, warnings, packages
+            ).run()
     finally:
-        shutil.rmtree(temp, ignore_errors=True)
+        try:
+            if packages is not None:
+                remove_tree(packages)  # Go leaves its module cache read-only (ADR-0031)
+        finally:
+            remove_tree(temp)

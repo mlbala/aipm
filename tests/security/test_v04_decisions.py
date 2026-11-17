@@ -101,6 +101,46 @@ def test_the_cli_exits_6_for_a_missing_aipm_config(
     assert not (tmp_repo / ".pm").exists()
 
 
+def _pm_files(repo: Path) -> dict[str, bytes]:
+    return {str(p.relative_to(repo)): p.read_bytes() for p in (repo / ".pm").rglob("*")
+            if p.is_file()}  # fmt: skip
+
+
+@pytest.fixture
+def initialized(isolated: Path, tmp_repo: Path) -> Path:
+    del isolated
+    result = runner.invoke(app, ["-C", str(tmp_repo), "init"])
+    assert result.exit_code == 0, result.output
+    return tmp_repo
+
+
+def test_the_phase_report_exits_6_for_a_missing_aipm_config(
+    isolated: Path, tmp_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Session 1 open item 2: in a repository without `.pm/`, bare `aipm` loads no
+    configuration (an initialized one already refused, through `load_state`), and its redactor
+    fell back to the built-in patterns for a user config it could not read."""
+    del isolated
+    monkeypatch.setenv("AIPM_CONFIG", str(tmp_path / "missing.yaml"))
+    result = runner.invoke(app, ["-C", str(tmp_repo)])
+    assert result.exit_code == 6, result.output
+    assert "AIPM_CONFIG" in result.stderr
+    assert not (tmp_repo / ".pm").exists()
+
+
+def test_aipm_task_exits_6_for_a_missing_aipm_config(
+    initialized: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = _pm_files(initialized)
+    monkeypatch.setenv("AIPM_CONFIG", str(tmp_path / "missing.yaml"))
+    result = runner.invoke(
+        app, ["-C", str(initialized), "task", "block", "T-001", "--reason", "waiting"]
+    )
+    assert result.exit_code == 6, result.output
+    assert "AIPM_CONFIG" in result.stderr
+    assert _pm_files(initialized) == before
+
+
 def test_a_missing_default_user_config_is_still_fine(isolated: Path) -> None:
     """A new user has no config file; only an explicit `AIPM_CONFIG` must exist."""
     del isolated
@@ -193,6 +233,8 @@ DENIED = [
     # the variables aipm sets for agents
     "CLAUDE_CONFIG_DIR", "CODEX_HOME", "COPILOT_HOME", "GEMINI_CLI_HOME", "GEMINI_SANDBOX",
     "DISABLE_AUTOUPDATER", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    # srt makes the dir these name writable
+    "CLAUDE_CODE_TMPDIR", "CLAUDE_TMPDIR",
     # the owner's additions
     "PATH", "HOME", "TMPDIR",
     "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB",
@@ -209,7 +251,27 @@ DENIED = [
     "SHELLOPTS", "BASHOPTS", "IFS", "PS4", "PROMPT_COMMAND", "ZDOTDIR",
 ]  # fmt: skip
 
-ALLOWED = ["GITHUB_TOKEN", "MY_API_TOKEN", "LANG", "UVICORN_PORT", "NODE_ENV", "GOPATH_X", "path"]
+# Session 2: the names the security review found in the owner's classes (open item 1), one case
+# per entry; families with the members the review named.
+DENIED_V2 = [
+    # Go
+    "GOENV", "GOSUMDB", "GOPRIVATE", "GONOPROXY", "GOWORK", "GOROOT", "GOMODCACHE", "CC", "CXX",
+    "CGO_CFLAGS", "CGO_LDFLAGS", "CGO_ENABLED",
+    # Rust
+    "RUSTC", "RUSTC_WORKSPACE_WRAPPER", "RUSTDOC", "RUSTDOCFLAGS",
+    "RUSTUP_TOOLCHAIN", "RUSTUP_HOME",
+    # Perl and Python
+    "PERLLIB", "PERL5DB", "PYTHONUSERBASE",
+    # git
+    "XDG_CONFIG_HOME",
+    # the agents
+    "SHELL", "CLAUDE_CODE_SHELL_PREFIX", "CLAUDE_ENV_FILE",
+    "GEMINI_CLI_SYSTEM_SETTINGS_PATH", "GEMINI_CLI_SYSTEM_DEFAULTS_PATH",
+    "YARN_YARN_PATH", "YARN_RC_FILENAME", "yarn_npm_registry_server", "Yarn_Npm_Auth_Token",
+]  # fmt: skip
+
+ALLOWED = ["GITHUB_TOKEN", "MY_API_TOKEN", "LANG", "UVICORN_PORT", "NODE_ENV", "GOPATH_X", "path",
+           "CCACHE_DIR", "SHELLCHECK_OPTS", "RUSTY_TOKEN", "YARNISH"]  # fmt: skip
 
 
 def _user_config(tmp_path: Path, tool: str, names: list[str]) -> dict[str, str]:
@@ -222,6 +284,17 @@ def _user_config(tmp_path: Path, tool: str, names: list[str]) -> dict[str, str]:
 
 @pytest.mark.parametrize("name", DENIED)
 def test_a_denied_name_in_pass_env_exits_6(isolated: Path, tmp_path: Path, name: str) -> None:
+    del isolated
+    assert denied_pass_env(name)
+    with pytest.raises(PolicyViolation, match="pass_env") as info:
+        load_config(None, env=_user_config(tmp_path, "claude", ["MY_TOKEN", name]))
+    assert name in info.value.message
+
+
+@pytest.mark.parametrize("name", DENIED_V2)
+def test_a_name_the_review_found_in_pass_env_exits_6(
+    isolated: Path, tmp_path: Path, name: str
+) -> None:
     del isolated
     assert denied_pass_env(name)
     with pytest.raises(PolicyViolation, match="pass_env") as info:
@@ -257,6 +330,13 @@ def test_every_variable_aipm_sets_for_an_agent_is_denied() -> None:
     homes = {m.CONFIG_HOME.env_var for m in (claude_code, codex, copilot, gemini)}
     agent = {*claude_code.AGENT_ENV, *dict(gemini.GeminiAdapter.agent_env)}
     assert homes | agent <= DENIED_NAMES
+
+
+def test_srt_temp_dir_variables_are_denied() -> None:
+    """srt makes the dir these name writable; only aipm sets them (execution/sandbox.py)."""
+    from aipm.execution.sandbox import LEGACY_TEMP_ENV, TEMP_ENV  # noqa: PLC0415
+
+    assert {TEMP_ENV, LEGACY_TEMP_ENV} <= DENIED_NAMES
 
 
 # ---------------------------------------------------------------- N-5: the trace endpoint's host

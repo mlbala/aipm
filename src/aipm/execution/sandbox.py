@@ -110,8 +110,9 @@ TOOLCHAIN_CONFIG: tuple[str, ...] = (
 reads `$CARGO_HOME/config.toml` (a `rustc-wrapper` or test `runner` is any program), rustup's
 settings can override the toolchain for a directory, and `go env -w` writes Go's env file
 (`os.UserConfigDir()/go/env`), where `GOFLAGS=-toolexec=…` would wrap every later build. Gates get
-no `CARGO_HOME`, `RUSTUP_HOME` or `GOENV`, so these are the files they read. No process aipm
-starts may write them, and a build watches them."""
+no `RUSTUP_HOME` or `GOENV`, so these are the files they read; their `CARGO_HOME` is the run's
+package cache, seeded from `~/.cargo/config.toml` (ADR-0031). No process aipm starts may write
+them, and a build watches them."""
 
 CONFIG_HOME_PROTECTED: tuple[str, ...] = (
     "settings.json", "settings.local.json", "CLAUDE.md", "hooks", "agents", "skills",
@@ -121,11 +122,33 @@ CONFIG_HOME_PROTECTED: tuple[str, ...] = (
 settings on the next `--resume`. The agent may write its sessions there, never these
 (ADR-0023). Other tools name theirs in their adapter's `ConfigHomeSpec` (ADR-0026)."""
 
-PACKAGE_CACHES: tuple[str, ...] = (
-    ".cache/uv", ".cache/pip", "Library/Caches/uv", "Library/Caches/pip",
-    ".npm", ".cache/pnpm", ".local/share/pnpm", "Library/pnpm", "Library/Caches/pnpm",
+CARGO_DIR = "cargo"
+"""The run's `CARGO_HOME`, inside its package cache (ADR-0031)."""
+PROTECTED_CARGO: tuple[str, ...] = (
+    "config.toml", "config", "bin", "credentials.toml", "credentials",
 )  # fmt: skip
-"""Where package managers keep their caches, relative to home; only `prepare` may write there."""
+"""In the run's `CARGO_HOME`: what Cargo reads as settings, or runs as `cargo <cmd>` before
+anything on PATH. No process aipm starts may write them, so one task's prepare cannot plant them
+for the next task's gates (SECURITY.md §9.1)."""
+
+
+CARGO_LOCK_FILES: tuple[str, ...] = (".package-cache", ".package-cache-mutate", ".global-cache")
+"""Files Cargo writes at the root of `CARGO_HOME` while it fetches; aipm creates them first."""
+PREPARE_WRITABLE: tuple[str, ...] = (
+    "uv", "pip", "npm", "pnpm-store", "pnpm-cache", "go-mod",
+    f"{CARGO_DIR}/registry", f"{CARGO_DIR}/git",
+    *(f"{CARGO_DIR}/{name}" for name in CARGO_LOCK_FILES),
+)  # fmt: skip
+"""What prepare may write in the run's package cache: each package manager's own directory and
+Cargo's downloads and locks, never the cache root or Cargo's settings and `bin/`. Being an
+allowlist, it holds even for a path that does not exist yet (security review of the v0.4
+decisions)."""
+
+
+def protected_cache_paths(cache: Path) -> tuple[Path, ...]:
+    """The paths in the run's package cache no process may write (`PROTECTED_CARGO`)."""
+    return tuple(cache / CARGO_DIR / name for name in PROTECTED_CARGO)
+
 
 _PROTECTED_LITERALS: tuple[str, ...] = (
     ".pm", ".git", ".github", ".gitlab-ci.yml", "AGENTS.md", "CLAUDE.md", "GEMINI.md", ".claude",
@@ -166,6 +189,9 @@ class ProfilePaths:
     config_home_protected: tuple[str, ...] = CONFIG_HOME_PROTECTED
     """What in `config_home` the agent may not write: its tool's settings, hooks and skills
     (`ConfigHomeSpec.protected`)."""
+    package_cache: Path | None = None
+    """The run's package cache (ADR-0031): only `prepare` may write it, and no process may
+    write the Cargo settings and programs in it. Prepare never writes the user's own caches."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +212,26 @@ class SandboxProfile:
     deny_read: tuple[Path, ...] = ()
     deny_write: tuple[Path, ...] = field(default_factory=tuple[Path, ...])
     deny_write_patterns: tuple[str, ...] = ()
+    temp_dir: Path | None = None
+    """The process's own writable temp dir; `settings_dir` when not given (`temp_env`)."""
+
+
+TEMP_ENV = "CLAUDE_CODE_TMPDIR"
+"""srt sets the sandboxed command's `TMPDIR` to this variable's value, read from its own
+environment, and to `/tmp/claude` without it, which srt does not create: Go and pnpm then fail
+on Linux ("stat /tmp/claude: no such file or directory"). srt also makes the directory it names
+writable, so aipm always sets it, and `pass_env` may never (`security/env_policy.py`)."""
+LEGACY_TEMP_ENV = "CLAUDE_TMPDIR"
+"""The older name srt still reads when `TEMP_ENV` is unset."""
+
+
+def temp_env(profile: SandboxProfile) -> dict[str, str]:
+    """What `srt`'s environment needs so that the command's `TMPDIR` is its own temp dir. srt
+    makes that dir writable, so one the profile does not already allow is refused (exit 6)."""
+    temp = profile.temp_dir if profile.temp_dir is not None else profile.settings_dir
+    if not temp.is_absolute() or temp not in profile.allow_write:
+        raise PolicyViolation(f"the sandbox temp dir {temp} is not a path the profile may write")
+    return {TEMP_ENV: str(temp)}
 
 
 type Runtime = str | tuple[str, ...]
@@ -221,13 +267,20 @@ def profile_for(
         else:
             deny_read += [home / rel for rel in AGENT_HOMES]
     elif kind is ProcessKind.PREPARE:
-        allow = [paths.workspace, paths.temp_dir, *(home / rel for rel in PACKAGE_CACHES)]
+        allow = [paths.workspace, paths.temp_dir]
+        cache = paths.package_cache
+        allow += [] if cache is None else [cache / rel for rel in PREPARE_WRITABLE]
     else:
         allow = [paths.output_dir if paths.output_dir is not None else paths.temp_dir]
+    # A scanner may write only its output dir, so its temp files go there.
+    temp_dir = allow[0] if kind is ProcessKind.SCANNER else paths.temp_dir
     deny_write = [paths.workspace / rel for rel in _PROTECTED_LITERALS]
     deny_write += [home / rel for rel in AGENT_GLOBAL_CONFIG]
     deny_write += [home / rel for rel in TOOLCHAIN_CONFIG]
     deny_write += agent_config
+    deny_write += (
+        [] if paths.package_cache is None else list(protected_cache_paths(paths.package_cache))
+    )
     workspace = str(paths.workspace)
     patterns = () if _GLOB_CHARS & set(workspace) else (f"{workspace}/{ENV_PATTERN}",)
     return SandboxProfile(
@@ -240,6 +293,7 @@ def profile_for(
         deny_read=tuple(deny_read),
         deny_write=tuple(deny_write),
         deny_write_patterns=patterns,
+        temp_dir=temp_dir,
     )
 
 

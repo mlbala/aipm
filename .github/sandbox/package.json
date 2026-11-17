@@ -1,0 +1,9 @@
+{
+  "name": "aipm-ci-sandbox",
+  "private": true,
+  "description": "The real srt (and pnpm) for aipm's sandbox CI job; installed with npm ci --ignore-scripts.",
+  "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.81",
+    "pnpm": "10.34.9"
+  }
+}

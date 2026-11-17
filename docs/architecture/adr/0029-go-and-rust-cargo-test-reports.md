@@ -37,3 +37,4 @@ Option 2.
 - **Strict `go.mod` reading.** A directive's verb ends at any whitespace or `(`, as in Go's own lexer. Any verb outside the `go.mod` grammar, or a malformed line, makes the file unreadable, which is a violation.
 - **Per-test tracing.** For Go, `ac_trace` counts a `_test.go` file as run only when a `func TestX(` that the file defines ran in its package. Another test of the same package does not count.
 - **Go registries for prepare only.** A gate never gets the Go registries: the proxy fetches any origin, and its storage host takes anyone's bucket.
+- **Looked up before prepare (v0.4 decisions, N-1).** The deps gate ran after prepare, and `go mod download` had already sent every agent-written module path to the proxy. Every new Go module is now looked up the same way (cache only) before `go mod download`. A module that fails holds prepare and fails the attempt; no answer blocks the task (`registry_unavailable`; SECURITY.md §12.2).

@@ -51,6 +51,19 @@ class GateContext:
     warnings: list[str] = field(default_factory=list[str])
     deny_read: tuple[Path, ...] = ()
     """More paths gates may not read: in a build, the agent's isolated config home."""
+    package_cache: Path | None = None
+    """The run's package cache in a build (ADR-0031); `None` gives the attempt one of its own."""
+
+    @property
+    def package_dir(self) -> Path:
+        """Where prepare caches packages and gates read them: the run's cache, else a directory
+        beside the attempt's temp dir, never inside it (gates may write the temp dir, and so
+        could plant `$CARGO_HOME/bin/cargo-<cmd>` for the next gate), and never the user's own
+        caches. Build and verify always pass a run cache."""
+        if self.package_cache is not None:
+            return self.package_cache
+        temp = self.ws.temp_dir
+        return temp.with_name(f"{temp.name}-packages")
 
     @property
     def root(self) -> Path:

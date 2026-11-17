@@ -16,7 +16,15 @@
 uv tool install git+https://github.com/mlbala/aipm
 ```
 
-Or run [`install.sh`](install.sh) (`sh install.sh [-y] [-t TAG]`): it prints what it will do, refuses to run with a relative or empty PATH entry or an active virtualenv (run it from a shell with no repository environment loaded), asks before installing uv with the official installer of one pinned uv release if uv is missing, then runs the same `uv tool install` for a release tag (`v0.4.0` by default). It builds from the tag; to install the attested files instead, see [Verifying a release](#verifying-a-release).
+Or run [`install.sh`](install.sh) (`sh install.sh [-y] [-t TAG]`), which installs a release's attested wheel (`v0.4.0` by default, and no older):
+
+1. It prints what it will do, and refuses to run with a relative or empty PATH entry or an active virtualenv (run it from a shell with no repository environment loaded).
+2. If uv is missing, it asks, then runs the official installer of one pinned uv release after checking its SHA-256.
+3. It downloads the wheel and `SHA256SUMS` from the release and checks the wheel's SHA-256.
+4. If [`gh`](https://cli.github.com/) is installed, it runs `gh attestation verify` on the wheel with the flags under [Verifying a release](#verifying-a-release), and stops if gh is not logged in (`gh auth login`) or the check fails. Without gh it says that only the SHA-256 was checked: `SHA256SUMS` comes from the same release, so that catches a broken download, not a replaced release.
+5. It runs `uv tool install` on the wheel. Its dependencies come from PyPI at install time, as with any wheel.
+
+A tag older than `v0.4.0` has no attested wheel; the script refuses it and prints the `uv tool install git+…@<tag>` command that builds it from source.
 
 aipm needs Python 3.13 or later. It is distributed from GitHub only ([ADR-0001](docs/architecture/adr/0001-distribute-from-github.md)).
 
@@ -89,7 +97,7 @@ Every command accepts `--json`, which prints exactly one result object to stdout
 
 `aipm init` must run inside a git repository. It detects the stack from the manifests at the repository root (`python-uv`, `python-pip`, `node-npm`, `node-pnpm`, and from v0.4 `go` and `rust-cargo`), copies that stack's gate menu into `.pm/config.yaml`, writes `.pm/.gitignore` and `.pm/repo-map.md`, and shows the execution surface: every command aipm may run, in full, with the executable it resolves to on your `PATH`. `--force` re-initializes and keeps your other `.pm/` files. `--provider` is a user-level setting, so aipm tells you where to put it instead of writing it into the repository. The `go` stack runs its tests with gotestsum, and `rust-cargo` with cargo-nextest (`cargo install cargo-nextest --locked`), because each writes a test report aipm checks; install them alongside Go and cargo.
 
-`aipm trust` records your approval of that exact surface, for you and this machine only, in your user state directory. It asks interactively, or takes `--confirm` with the first 12 characters of the surface hash, so a script has to name the surface it trusts. `--yes` never grants trust. Any change to a gate, the prepare step, a dispatch flag, a security setting or the resolved path of an executable changes the hash and needs trust again. `aipm trust --show` prints the surface without recording anything, and `--revoke` removes your trust.
+`aipm trust` records your approval of that exact surface, for you and this machine only, in your user state directory. It asks interactively, or takes `--confirm` with the first 12 characters of the surface hash, so a script has to name the surface it trusts. `--yes` never grants trust. Any change to a gate, the prepare step, a dispatch flag, a security setting or the resolved path of an executable changes the hash and needs trust again. So does a change to the repository's toolchain and package-manager files (`.cargo/config.toml`, `rust-toolchain.toml`, `go.work`, `.npmrc`, `.yarnrc.yml`, `uv.toml` or `[tool.uv]`, `.python-version`, `.tool-versions`), which can change where code or a toolchain comes from: review them after a `git pull` before you trust again. `conftest.py` and other test code are not part of the surface. `aipm trust --show` prints the surface without recording anything, and `--revoke` removes your trust.
 
 `aipm doctor` lists the versions of git, uv, the coding agents and the scanners (missing tools are listed, not errors), whether your API key variables are set (never their values), whether the `.pm/` files are valid, and the lock and trust status.
 
@@ -150,7 +158,7 @@ In manual mode aipm cannot tell your edits from your agent's: anything changed a
 
 `aipm scan` runs gitleaks, semgrep, osv-scanner and trivy over the repository and fails (exit 3) on a finding at `--fail-on` (default `high`) or above; `--scanner NAME` runs one. Scanners never read scanner configuration from the repository. `aipm task show|reset|block|unblock|skip T-ID [--reason …]` changes a task's progress by hand; every change is recorded in `approvals.yaml`, and skipping a task or unblocking one blocked for a policy violation is also a security event.
 
-For full coverage install [`srt`](https://github.com/anthropic-experimental/sandbox-runtime) (`npm install -g @anthropic-ai/sandbox-runtime`; macOS also needs ripgrep, Linux bubblewrap, socat and ripgrep), gitleaks, semgrep, osv-scanner and, for `aipm scan`, trivy.
+For full coverage install [`srt`](https://github.com/anthropic-experimental/sandbox-runtime) (`npm install -g @anthropic-ai/sandbox-runtime`; macOS also needs ripgrep, Linux bubblewrap, socat and ripgrep; on Ubuntu 24.04 and later, AppArmor blocks the user namespaces bubblewrap needs unless you give `bwrap` an AppArmor profile that allows them), gitleaks, semgrep, osv-scanner and, for `aipm scan`, trivy.
 
 ### Building with an agent: `run`, `build` and `merge`
 
@@ -315,8 +323,10 @@ aipm dispatches Claude Code (from v0.3), Codex CLI and Gemini CLI (from v0.4). T
 | Codex CLI | 0.167.2 (documentation) | `codex exec --help`: `--sandbox workspace-write`, `--json`, `--ephemeral`, `--ignore-rules`, `--config`; `CODEX_HOME`; `CODEX_API_KEY`; `.agents/skills` |
 | Gemini CLI | 0.68.0 (documentation) | `gemini --help`: `--prompt`, `--approval-mode auto_edit`, `--allowed-tools`, `--output-format json`, `--extensions`, `--sandbox`; `GEMINI_CLI_HOME`; `GEMINI_API_KEY`; `GEMINI.md` with an `@./AGENTS.md` import |
 | GitHub Copilot CLI | 1.0.109 (documentation; render-only) | `AGENTS.md` and `.github/copilot-instructions.md`; dispatch off ([ADR-0025](docs/architecture/adr/0025-copilot-ships-render-only.md)) |
-| Go, gotestsum | not run by the tests | the `go` stack's commands pass the command policy (`tests/unit/test_config.py`) |
-| Rust (cargo, cargo-nextest) | not run by the tests | the `rust-cargo` stack's commands pass the command policy; the unit gate is judged on nextest's JUnit report, checked with a stub `cargo` ([ADR-0030](docs/architecture/adr/0030-rust-unit-gate-runs-nextest.md)) |
+| srt | 0.0.81 (CI: Ubuntu and macOS, `.github/sandbox/package-lock.json`) | the run's package cache under the real sandbox: what prepare and gates may write, pnpm's store and import method (`tests/security/test_real_sandbox.py`) |
+| pnpm | 10.34.9 (under srt only) | `npm_config_store_dir` and `npm_config_package_import_method` win over a repository `.npmrc` |
+| Go, gotestsum | the runner's Go, in CI's sandbox job | the `go` stack's commands pass the command policy (`tests/unit/test_config.py`); `go vet` with a read-only module cache under srt |
+| Rust (cargo, cargo-nextest) | the runner's Rust, in CI's sandbox job | the `rust-cargo` stack's commands pass the command policy; `cargo test --offline` with a read-only `CARGO_HOME` under srt; the unit gate is judged on nextest's JUnit report, checked with a stub `cargo` ([ADR-0030](docs/architecture/adr/0030-rust-unit-gate-runs-nextest.md)) |
 
 ## Verifying a release
 

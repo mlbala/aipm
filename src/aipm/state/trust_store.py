@@ -17,7 +17,8 @@ import secrets
 import shlex
 import shutil
 import stat
-from collections.abc import Callable, Mapping
+import tomllib
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -214,13 +215,107 @@ def repo_agent_config(root: Path, cfg: Config) -> dict[str, Any] | None:
     return found
 
 
+TOOLCHAIN_FILES: tuple[str, ...] = (
+    ".cargo/config.toml", ".cargo/config", "rust-toolchain.toml", "rust-toolchain", "go.work",
+    ".npmrc", ".yarnrc.yml", ".yarnrc", "uv.toml", ".python-version", ".tool-versions",
+    "pnpm-workspace.yaml",
+)  # fmt: skip
+"""Repository-root files that change where code or a toolchain comes from (red-team v0.4, N-4;
+ADR-0032): Cargo's settings (`rustc-wrapper`, test `runner`, aliases, source replacement), the
+toolchain rustup installs, Go's workspace (`replace` for any module), the npm, pnpm and Yarn
+registries and `yarnPath`, pnpm 10's settings (store, import method, overrides), uv's indexes,
+the interpreter uv installs, and the versions asdf or mise shims run. `pyproject.toml` joins
+with its `[tool.uv]` table only. `conftest.py` is project code like any test and is not hashed
+(R-9)."""
+MAX_TOOLCHAIN_BYTES = 1_048_576
+PYPROJECT = "pyproject.toml"
+CARGO_DIR = ".cargo"
+_REGULAR = ("100644", "100755")
+_TREE = "040000"
+
+type Committed = dict[str, tuple[str, bytes | None]]
+"""Committed toolchain files: path → (git mode, bytes); the bytes are `None` for anything but a
+regular file, or for a file larger than `MAX_TOOLCHAIN_BYTES`."""
+
+
+def _unpinnable(rel: str, why: str) -> PolicyViolation:
+    return PolicyViolation(
+        f"the repository's toolchain file {rel} cannot be pinned in the trust surface ({why})",
+        hint="aipm hashes it so that a change asks for trust again: commit it as a regular file "
+        "of at most 1 MiB (not a link), under one spelling, or remove it.",
+    )
+
+
+def select_toolchain(names: Iterable[str], wanted: tuple[str, ...]) -> dict[str, str]:
+    """`wanted` name → the committed name it matches in `names`, compared casefolded: a macOS or
+    Windows checkout opens `.NPMRC` as `.npmrc`. Exit 6 when two spellings exist, because which
+    one a tool reads then depends on the filesystem."""
+    found: dict[str, str] = {}
+    folded = {w.casefold(): w for w in wanted}
+    for name in names:
+        want = folded.get(name.casefold())
+        if want is None:
+            continue
+        if want in found:
+            raise _unpinnable(want, f"committed as both {found[want]} and {name}")
+        found[want] = name
+    return found
+
+
+def _tool_uv(data: bytes) -> dict[str, str] | None:
+    """`pyproject.toml`'s `[tool.uv]` table, hashed as sorted JSON, so a dependency change
+    alone needs no new trust; a file that does not parse is pinned whole."""
+    whole = {"sha256": hashlib.sha256(data).hexdigest(), "error": "not valid TOML"}
+    try:
+        doc = tomllib.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, RecursionError):
+        return whole  # nested too deep too (as RT04-21 for JSON)
+    tool = doc.get("tool")
+    table = cast("dict[str, object]", tool).get("uv") if isinstance(tool, dict) else None
+    if table is None:
+        return None
+    try:
+        text = json.dumps(table, sort_keys=True, separators=(",", ":"), default=str)
+    except (RecursionError, ValueError):
+        return {**whole, "error": "nested too deeply to read"}
+    return {"sha256": hashlib.sha256(text.encode()).hexdigest(), "table": "tool.uv"}
+
+
+def pin_toolchain(committed: Committed) -> dict[str, dict[str, str]]:
+    """The surface entry for the committed toolchain files (`TOOLCHAIN_FILES` and
+    `pyproject.toml`'s `[tool.uv]`): the SHA-256 of each. Exit 6 for a link (the file, or
+    `.cargo` above it), anything else that is not a regular file, or a file over 1 MiB, since a
+    link's target could change without changing the hash."""
+    cargo = committed.get(CARGO_DIR)
+    if cargo is not None and cargo[0] != _TREE:
+        raise _unpinnable(CARGO_DIR, "a link or not a directory")
+    found: dict[str, dict[str, str]] = {}
+    for rel in (*TOOLCHAIN_FILES, PYPROJECT):
+        entry = committed.get(rel)
+        if entry is None:
+            continue
+        mode, data = entry
+        if mode not in _REGULAR:
+            raise _unpinnable(rel, "a link" if mode == "120000" else "not a regular file")
+        if data is None:
+            raise _unpinnable(rel, "larger than 1 MiB")
+        if rel == PYPROJECT:
+            table = _tool_uv(data)
+            if table is not None:
+                found[rel] = table
+        else:
+            found[rel] = {"sha256": hashlib.sha256(data).hexdigest()}
+    return found
+
+
 def execution_surface(
     cfg: Config, *, which: Which = shutil.which, repo_agent: Mapping[str, Any] | None = None
 ) -> dict[str, Any]:
     """The canonical execution surface (SECURITY.md §6).
 
     `repo_agent` is `repo_agent_config(...)`; it joins the surface only when it is not `None`
-    (bare mode off), so the surface of every other repository is unchanged.
+    (bare mode off), so the surface of every other repository is unchanged. The committed
+    toolchain files join in `app.trust.repository_surface` (ADR-0032).
 
     Raises `PolicyViolation` (exit 6) if any configured argv or prefix fails the command policy.
     """
@@ -269,6 +364,17 @@ def canonical_json(value: object) -> str:
 def hash_surface(surface: Mapping[str, Any]) -> str:
     """`surface_hash = sha256(canonical_json(surface))` (SECURITY.md §6 rule 1)."""
     return hashlib.sha256(canonical_json(surface).encode("ascii")).hexdigest()
+
+
+def _toolchain_lines(surface: Mapping[str, Any]) -> list[str]:
+    toolchain: Mapping[str, Mapping[str, str]] = surface.get("toolchain_files") or {}
+    if not toolchain:
+        return []
+    lines = ["repository toolchain files (hashed; a change asks for trust again):"]
+    for name, entry in sorted(toolchain.items()):
+        part = f" [{entry['table']}]" if "table" in entry else ""
+        lines.append(f"  {name}{part} [sha256 {entry['sha256']}]")
+    return lines
 
 
 def render_surface(surface: Mapping[str, Any], surface_hash: str) -> list[str]:
@@ -322,6 +428,7 @@ def render_surface(surface: Mapping[str, Any], surface_hash: str) -> list[str]:
     lines.extend(f"  {item}" for item in surface["relaxations"])
     if not surface["relaxations"]:
         lines.append("  (none)")
+    lines.extend(_toolchain_lines(surface))
     agent = surface.get("repo_agent_config")
     if agent is not None:
         lines.append("repository hooks and MCP servers (bare: false; listed, never loaded):")
@@ -348,7 +455,8 @@ class FileTrustStore:
 
     def surface(self, cfg: Config, *, root: Path | None = None) -> dict[str, Any]:
         """The execution surface for `cfg`, resolved against the current PATH; with `root`,
-        the repository's own agent hooks and MCP servers when bare mode is off."""
+        the repository's own agent hooks and MCP servers when bare mode is off. The hashes of
+        its committed toolchain files are added by `app.trust.repository_surface` (ADR-0032)."""
         agent = None if root is None else repo_agent_config(root, cfg)
         return execution_surface(cfg, which=self._which, repo_agent=agent)
 

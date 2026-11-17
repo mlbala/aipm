@@ -1,0 +1,49 @@
+# ADR-0031: A package cache per run
+
+- **Status:** Accepted
+- **Date:** 2026-11-15
+- **Source:** red-team v0.4 §6.3, v0.2 O-2 (decided in §6.4); SECURITY.md §9.1, R-13
+
+## Context
+
+The prepare step runs repository code: `uv sync` runs the project's build backend, `pip install -r` can run `setup.py`. It also wrote the user's own package caches (`~/.cache/uv`, `~/.cache/pip`, `~/.npm`, pnpm's store, `~/go/pkg/mod`, `~/.cargo/registry`), and under `srt` those were the only paths outside the worktree it could write. Every other project on the machine reads those caches outside any sandbox, so a build step that poisons a cache entry reaches them (R-13).
+
+Part 2 of the review also found that gates had no Go build cache they could write under `srt`, so `go vet` might fail under the real sandbox (observation E).
+
+## Options
+
+1. A cache per attempt: no sharing at all; every attempt downloads everything again.
+2. A cache per run, shared by the run's tasks and deleted when the run ends.
+3. Accept R-13.
+
+## Decision
+
+Option 2, the owner's choice.
+
+- **Where.** `<user_cache_dir>/aipm/packages/<repo_id>/<run_id>/`, mode 0700, refused inside the repository (exit 6). `verify` gets one of its own the same way, removed when it ends. Neither lives in the attempt's temp dir, which gates may write. A gate context without a run cache (only tests have none) uses a directory beside the temp dir, never the user's caches.
+- **How.** Each package manager is pointed at its own subdirectory through its own variable, chosen by the program prepare or the gate runs:
+
+  | Program | Variables |
+  |---|---|
+  | `uv` | `UV_CACHE_DIR` |
+  | `python`, `pip` | `PIP_CACHE_DIR` |
+  | `npm` | `npm_config_cache` |
+  | `pnpm` | `npm_config_store_dir`, `npm_config_cache_dir` |
+  | `go`, `gotestsum` | `GOMODCACHE`; `GOCACHE` in the attempt's temp dir |
+  | `cargo` | `CARGO_HOME` |
+
+  Gates get the same variables, so `go vet -mod=readonly`, `cargo --offline` and `uv run --offline` find what prepare fetched. uv installs with `UV_LINK_MODE=copy` and pnpm with `package-import-method=clone-or-copy`. On Linux both would otherwise hard-link from the cache, so a write to the worktree's `.venv` or `node_modules`, which the agent and the gates may make, would change the cache for the next task.
+- **Who writes it.** Under `srt` only prepare may write the run's cache, and only an allowlist of paths in it: each package manager's directory, Cargo's `registry/` and `git/`, and Cargo's lock files. All of them are created when the cache is, so the allowlist names paths that exist. The cache root and Cargo's `config*`, `bin/` and credentials are not on it. Prepare may no longer write the user's caches. Gates and agents may read the cache but never write it. Go's build cache is per attempt, so gates never share one.
+- **Cargo.** Moving `CARGO_HOME` would make Cargo stop reading the user's `~/.cargo/config.toml` (mirrors, source replacement), so that file is copied into the run's `CARGO_HOME` when the run starts, if it is a regular file of at most 1 MiB. Credentials are never copied. Cargo runs `$CARGO_HOME/bin/cargo-<cmd>` before anything on PATH and reads `$CARGO_HOME/config.toml` as settings, so these are write-denied to every process: `config.toml`, `config`, `bin`, `credentials.toml` and `credentials`.
+- **When it goes.** A build creates the cache when it starts or resumes, and deletes it when it ends, finished or interrupted. A cache that a killed run left behind is emptied first, so a resumed run always starts empty. Go leaves its module cache read-only, and repository code can make a directory unreadable, so deletion first makes every directory accessible. It walks each directory relative to its parent's descriptor, without following links.
+
+## Consequences
+
+- The user's caches are no longer written by aipm's prepare step: R-13's cross-project path is closed.
+- Within one run, tasks share the cache, and this is accepted with option 2. One task's prepare (repository build code) can change what a later task's prepare installs. It can also change the sources a later task's gates compile directly from the cache: Cargo's `registry/src` and `git/checkouts`, and Go's module cache. A planted `build.rs` there runs in the later task's gates, and so can fake their result. Option 1 would close this, at the cost of downloading everything again on every attempt. Checking the cache against the lockfiles before gates (`go mod verify`; Cargo has no equivalent for extracted sources) is left for v0.5. Settings and subcommands are not shared, because prepare cannot write them.
+- Every run downloads its packages once. A resumed run downloads them again.
+- A private registry that needs credentials in `~/.cargo/credentials.toml` no longer works for Cargo prepare steps.
+- Checked under the real `srt` (0.0.81) by `tests/security/test_real_sandbox.py`, which CI's `sandbox` job runs on Ubuntu and macOS with every tool required (v0.3 rec 3): prepare writes only `PREPARE_WRITABLE`, never the cache root or Cargo's settings, `bin/` and credentials; gates write nothing in the cache; pnpm 10.34.9 takes its store and import method from the environment, over a repository `.npmrc`; `go vet` with a read-only `GOMODCACHE`; `cargo test --offline` with a read-only `CARGO_HOME`. The first three were run on macOS before the job existed; the Go and Cargo checks run first in CI.
+- Found while checking pnpm (medium; fixed in session 3 on the owner's decision): a `pnpm-workspace.yaml` overrides both variables (`storeDir`, `packageImportMethod`); the flags `--store-dir` and `--package-import-method` win over it. The agent cannot add or change the file: it is package configuration (`diff_checks.PACKAGE_CONFIG`), so an edit holds prepare. A repository may commit it, though, and it is not in the trust surface. With `packageImportMethod: hardlink`, every task's `node_modules` shares inodes with the run's store, and a write to one worktree's `node_modules`, which `srt` allows and the change set ignores, changes the files a later task's gates run (M-2 again). A `storeDir` override fails under `srt` (prepare may write only its allowlist) and without `srt` adds nothing to R-13. **Fix:** prepare runs `pnpm --store-dir=<run cache>/pnpm-store --package-import-method=copy <subcommand> …`. The flags go before the subcommand, after the command policy has checked the trusted argv, so they are pnpm's own options. pnpm 10.34.9 accepts them before `install`, `fetch` and `test` and refuses them before `run`, `exec` and `rebuild` ("Unknown options"), so a prepare step of that kind fails closed, and gates, which may run any of these, get none. `copy`, not `clone-or-copy`: pnpm 10.34.9 ignored a `clone-or-copy` flag that repeated the environment's value, and the file's `hardlink` won (checked by hand: link count 2 with `clone-or-copy`, 1 with `copy`). On copy-on-write filesystems `copy` costs more disk than a clone. `pnpm-workspace.yaml` is also hashed into the surface (ADR-0032). `test_a_committed_pnpm_setting_cannot_share_files_with_the_run_store` runs aipm's prepare under the real `srt` with a committed `pnpm-workspace.yaml` or `.npmrc` that asks for `hardlink` and another store, and checks that no installed file shares an inode with the run's store. It failed for both workspace cases before the fix. Still open (low): `cacheDir` (pnpm's metadata cache) and `virtualStoreDir` in that file are not overridden; under `srt` prepare cannot write outside its allowlist, and without `srt` they are R-13. Also low: a gate that runs pnpm reads the file's settings, and pnpm 10's `verifyDepsBeforeRun: install` makes `pnpm test`, `run` or `exec` install first, with the file's import method. That needs a user-configured pnpm gate (the `node-pnpm` stack runs none), a committed setting (now in the surface, so it was trusted), and dependencies out of date after prepare's frozen install; on Linux the store is a read-only bind, so a hard link fails (EXDEV); on macOS this is untested.
+- Still not checked: whether `cargo fetch` copes when it cannot create SQLite sidecar files beside `.global-cache`, and whether a symlinked path in the allowlist behaves as expected (both need the network or a crafted layout).
+- Without `srt`, the variables still steer the package managers, but nothing stops repository code from writing the user's caches, or the run cache's Cargo settings, which a build does not watch (as before; §9.1 "No sandbox available").

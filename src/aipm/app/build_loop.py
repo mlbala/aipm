@@ -81,6 +81,7 @@ from aipm.domain.scheduler import next_batch, ready
 from aipm.execution import git, process
 from aipm.execution.git import MAX_CONTENT_BYTES, ChangeInputs
 from aipm.execution.journal import Journal, find_resumable, load, replay
+from aipm.execution.package_cache import remove_tree, run_cache
 from aipm.execution.process import KILL_GRACE_S
 from aipm.execution.sandbox import Runtime, main_repo_entries, path_dirs
 from aipm.execution.worktree import (
@@ -282,6 +283,7 @@ class BuildLoop:
         self.run_base: str | None = None
         self.journal: Journal | None = None
         self.agent_root = Path()
+        self.package_cache: Path | None = None
         self.homes: dict[str, Path] = {}
         self.resumed = False
         self.resumable: set[str] = set()
@@ -480,6 +482,9 @@ class BuildLoop:
         base = cache_root() / AGENT_HOMES_DIR / repo_id(self.root) / self.run_id
         self.agent_root = outside_repo(base, self.root, "the agents' config homes")
         self.agent_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # The run's package cache, shared by its tasks; a resumed run starts an empty one, as the
+        # interrupted run removed its own (ADR-0031).
+        self.package_cache = run_cache(self.root, self.run_id, home=self.home)
 
     def _other_homes(self, task_id: str) -> tuple[Path, ...]:
         """The other tasks' config homes in this run: their transcripts hold their prompts and
@@ -567,6 +572,8 @@ class BuildLoop:
         else:
             self._journal(JournalEventType.RUN_FINISHED, spent_usd=round(self.spend.spent_usd, 6))
             shutil.rmtree(self.agent_root, ignore_errors=True)
+        if self.package_cache is not None:  # on every path, interrupted too (ADR-0031)
+            remove_tree(self.package_cache)
         self._write_cost()
 
     def _summary(self) -> BuildSummary:
@@ -1009,6 +1016,7 @@ class BuildLoop:
                 *self._elsewhere(task_id),
                 *self._main_repo(wt, gates_dir),
             ),
+            package_cache=self.package_cache,
         )
         gate_run = await asyncio.to_thread(
             lambda: run_gates(
@@ -1036,6 +1044,16 @@ class BuildLoop:
         late = severe(check_changes(after, task, self.policy))
         if late:
             self._severe(task_id, task.attempts + 1, [*minor, *late], gate_run)
+            return None
+        if gate_run.registry_unavailable is not None:
+            # Retrying cannot help until the proxy answers, and each retry costs an agent run.
+            self._count(task_id, task.attempts + 1)
+            self._block(
+                task_id,
+                BlockedReason.REGISTRY_UNAVAILABLE,
+                f"{gate_run.registry_unavailable}; check the network or the Go proxy, then "
+                f"`aipm task unblock {task_id}`",
+            )
             return None
         if gate_run.injection:
             self.store.append_event(

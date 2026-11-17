@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
 
+from aipm.domain.errors import PolicyViolation
 from aipm.domain.models import Ecosystem
 from aipm.security.json_limits import loads_bounded
 from aipm.security.supply_chain import check_package_name, normalize_name
@@ -60,6 +61,14 @@ _GO_VERSION = re.compile(
 
 class RegistryError(Exception):
     """The registry could not be asked, or answered something aipm cannot read."""
+
+
+class RegistryUnavailable(RegistryError):
+    """No answer about the package at all: the registry could not be reached, took too long,
+    answered a status that is neither "found" nor "gone" (5xx, 429, ...), or an answer aipm
+    cannot read. Before prepare, this blocks the task instead of failing the attempt, so retries
+    spend nothing on attempts that cannot pass (red-team v0.4, N-1). Any other `RegistryError`
+    is an answer about the package (no tagged version, no release time)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,7 +118,7 @@ def _bounded(get: Fetch, url: str, headers: Mapping[str, str]) -> Response:
     worker.start()
     worker.join(DEADLINE_S)
     if worker.is_alive() or not box:
-        raise RegistryError(f"the registry took too long to answer (over {DEADLINE_S:.0f} s)")
+        raise RegistryUnavailable(f"the registry took too long to answer (over {DEADLINE_S:.0f} s)")
     result = box[0]
     if isinstance(result, BaseException):
         raise result
@@ -126,9 +135,9 @@ def _get(url: str, headers: Mapping[str, str]) -> Response:
     except urllib.error.HTTPError as exc:
         return Response(exc.code, b"")
     except Exception as exc:  # any failure to ask fails closed
-        raise RegistryError(f"cannot reach the registry ({type(exc).__name__})") from None
+        raise RegistryUnavailable(f"cannot reach the registry ({type(exc).__name__})") from None
     if len(body) > MAX_RESPONSE_BYTES:
-        raise RegistryError("the registry's answer is larger than aipm reads")
+        raise RegistryUnavailable("the registry's answer is larger than aipm reads")
     return Response(status, body)
 
 
@@ -204,18 +213,18 @@ def _json_object(response: Response) -> dict[str, Any]:
     try:
         doc = loads_bounded(response.body)
     except ValueError:  # nested too deep too (RT04-21)
-        raise RegistryError("the registry's answer is not JSON") from None
+        raise RegistryUnavailable("the registry's answer is not JSON") from None
     if not isinstance(doc, dict):
-        raise RegistryError("the registry's answer is not a JSON object")
+        raise RegistryUnavailable("the registry's answer is not a JSON object")
     return cast("dict[str, Any]", doc)
 
 
 def _status(response: Response, *, gone: tuple[int, ...] = (404,)) -> bool:
-    """True for 200, False for "no such package"; an error otherwise."""
+    """True for 200, False for "no such package"; no answer (`RegistryUnavailable`) otherwise."""
     if response.status in gone:
         return False
     if response.status != 200:
-        raise RegistryError(f"the registry answered HTTP {response.status}")
+        raise RegistryUnavailable(f"the registry answered HTTP {response.status}")
     return True
 
 
@@ -232,11 +241,26 @@ def _go_first(name: str, ask: Fetch) -> PackageInfo:
     info = ask(GO_PROXY.format(module=module, what=f"{urllib.parse.quote(tag)}.info"),
                {"Accept": _ACCEPT[Ecosystem.GO], **GO_NO_FETCH})  # fmt: skip
     if not _status(info, gone=(404, 410)):
-        raise RegistryError(f"the proxy lists {tag} but has no information on it")
+        raise RegistryUnavailable(f"the proxy lists {tag} but has no information on it")
     first = _parse_time(_json_object(info).get("Time"))
     if first is None:
         raise RegistryError("the registry gave no first-release time")
     return PackageInfo(exists=True, first_release=first)
+
+
+def go_version_cached(module: str, version: str, *, fetch: Fetch | None = None) -> bool:
+    """Whether the Go proxy already holds `module` at `version`, asked with
+    `Disable-Module-Fetch`, so an uncached version is never fetched from its origin, where the
+    version string itself could carry data out (security review of the v0.4 decisions, N-1).
+    Exit 6 (`PolicyViolation`) for a name or version that is not well formed."""
+    check_package_name(Ecosystem.GO.value, module)
+    if not _GO_VERSION.fullmatch(version):
+        raise PolicyViolation(f"{version[:80]!r} is not a Go module version")
+    ask = fetch if fetch is not None else _fetch
+    what = f"{urllib.parse.quote(go_escape(version), safe='!')}.info"
+    response = ask(GO_PROXY.format(module=go_escape(module), what=what),
+                   {"Accept": _ACCEPT[Ecosystem.GO], **GO_NO_FETCH})  # fmt: skip
+    return _status(response, gone=(404, 410))
 
 
 def first_release(ecosystem: Ecosystem, name: str, *, fetch: Fetch | None = None) -> PackageInfo:

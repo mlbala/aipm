@@ -11,6 +11,7 @@ registry lookup that fails is an error.
 """
 
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from aipm.domain.errors import PolicyViolation
@@ -19,8 +20,19 @@ from aipm.gates.builtin import BuiltinOutcome, outcome, to_findings, tool_missin
 from aipm.gates.context import GateContext
 from aipm.scanners import osv
 from aipm.scanners.base import ScanStatus
-from aipm.scanners.registry import RegistryError, first_release
-from aipm.security.diff_checks import LOCKFILES, is_manifest, new_dependencies, new_lock_packages
+from aipm.scanners.registry import (
+    RegistryError,
+    RegistryUnavailable,
+    first_release,
+    go_version_cached,
+)
+from aipm.security.diff_checks import (
+    LOCKFILES,
+    is_manifest,
+    new_dependencies,
+    new_go_requirements,
+    new_lock_packages,
+)
 from aipm.security.supply_chain import age_ok, edit_distance, normalize_name, typosquat_of
 
 NAME = "deps"
@@ -56,44 +68,144 @@ def _to_check(ctx: GateContext) -> list[tuple[str, Ecosystem, str, bool]]:
     return found
 
 
+def new_go_modules(ctx: GateContext) -> bool:
+    """Whether the attempt adds a Go module (to `go.mod` or `go.sum`), or a new version of one
+    to `go.mod`."""
+    return bool(new_go_requirements(ctx.changes)) or any(
+        eco is Ecosystem.GO for _, eco, _, _ in _to_check(ctx)
+    )
+
+
+@dataclass(slots=True)
+class _Checked:
+    findings: list[GateFinding] = field(default_factory=list[GateFinding])
+    errors: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
+    """(path, why) for each package whose lookup gave an answer aipm cannot judge."""
+    unavailable: list[str] = field(default_factory=list[str])
+    """Why each lookup that got no answer at all failed (`RegistryUnavailable`)."""
+    flagged: set[str] = field(default_factory=set[str])
+    """The casefolded names that got a finding, an error or no answer."""
+    began: float = 0.0
+    """When the lookups started: every lookup of the attempt shares `DEPS_BUDGET_S`."""
+
+
 def check_new(ctx: GateContext, now: datetime) -> tuple[list[GateFinding], list[str]]:
     """Registry existence and first-release age of every new package, and typosquats of every
-    new direct dependency."""
-    findings: list[GateFinding] = []
-    errors: list[str] = []
-    min_days = ctx.cfg.security.min_dependency_age_days
-    packages = _to_check(ctx)
+    new direct dependency. A lookup that fails is an error, whatever the reason."""
+    checked = _check(ctx, now, only=None)
+    return checked.findings, [why for _, why in checked.errors] + checked.unavailable
+
+
+@dataclass(frozen=True, slots=True)
+class PrePrepare:
+    """The lookup of the attempt's new Go modules before `go mod download` (N-1): the modules
+    that failed it, or why the proxy could not be asked."""
+
+    findings: tuple[GateFinding, ...] = ()
+    unavailable: tuple[str, ...] = ()
+
+
+def check_before_prepare(ctx: GateContext) -> PrePrepare:
+    """Look up every new Go module before `go mod download` sends its path to the proxy, which
+    fetches it from its origin (red-team v0.4, N-1; R-20). The lookups ask the proxy's cache
+    only (`Disable-Module-Fetch`). A missing, too new, lookalike or invalid module, or one whose
+    age the proxy cannot tell, is a finding, and so is a new version (of any module) the
+    proxy has not cached; a lookup that got no answer is `unavailable`."""
+    checked = _check(ctx, ctx.now, only=Ecosystem.GO)
+    _check_versions(ctx, checked)
+    unknown = [_finding(path, "unknown-age", why) for path, why in checked.errors]
+    return PrePrepare(tuple(checked.findings + unknown)[:100], tuple(checked.unavailable))
+
+
+def _check(ctx: GateContext, now: datetime, *, only: Ecosystem | None) -> _Checked:
+    checked = _Checked()
+    packages = [p for p in _to_check(ctx) if only is None or p[1] is only]
     if len(packages) > MAX_LOOKUPS:
-        errors.append(f"{len(packages)} new packages, more than the {MAX_LOOKUPS} aipm looks up")
+        checked.errors.append((packages[0][0], f"{len(packages)} new packages, more than the "
+                               f"{MAX_LOOKUPS} aipm looks up"))  # fmt: skip
         packages = packages[:MAX_LOOKUPS]
-    began = _clock()
+    checked.began = began = _clock()
     for index, (path, eco, name, direct) in enumerate(packages):
         if _clock() - began > DEPS_BUDGET_S:
-            errors.append(f"registry lookups took over {DEPS_BUDGET_S:.0f} s; "
-                          f"{len(packages) - index} package(s) were not checked")  # fmt: skip
+            left = len(packages) - index
+            checked.unavailable.append(
+                f"registry lookups took over {DEPS_BUDGET_S:.0f} s; "
+                f"{left} package(s) were not checked"
+            )
             break
-        squat = typosquat_of(eco, name) if direct else None
-        if squat is not None:
-            near = edit_distance(normalize_name(eco, name), squat, limit=1) <= 1
-            how = "is one edit from" if near else "copies, under a lookalike owner,"
-            findings.append(_finding(path, "typosquat", f"{name} {how} {squat}"))
+        sizes = (len(checked.findings), len(checked.errors), len(checked.unavailable))
+        _check_one(ctx, checked, (path, eco, name, direct), now)
+        if sizes != (len(checked.findings), len(checked.errors), len(checked.unavailable)):
+            checked.flagged.add(name.casefold())
+    return checked
+
+
+def _check_one(
+    ctx: GateContext, checked: _Checked, package: tuple[str, Ecosystem, str, bool], now: datetime
+) -> None:
+    path, eco, name, direct = package
+    findings = checked.findings
+    min_days = ctx.cfg.security.min_dependency_age_days
+    squat = typosquat_of(eco, name) if direct else None
+    if squat is not None:
+        near = edit_distance(normalize_name(eco, name), squat, limit=1) <= 1
+        how = "is one edit from" if near else "copies, under a lookalike owner,"
+        findings.append(_finding(path, "typosquat", f"{name} {how} {squat}"))
+    try:
+        info = first_release(eco, name, fetch=ctx.fetch)
+    except PolicyViolation:
+        findings.append(_finding(path, "invalid-name", f"{name!r} is not a valid package name"))
+        return
+    except RegistryUnavailable as exc:
+        checked.unavailable.append(f"{eco.value} {name}: {exc}")
+        return
+    except RegistryError as exc:
+        checked.errors.append((path, f"{eco.value} {name}: {exc}"))
+        return
+    if not info.exists:
+        findings.append(_finding(path, "missing", f"{name} does not exist on {_REGISTRY[eco]}"))
+    elif info.first_release is not None and not age_ok(
+        info.first_release, min_days=min_days, now=now
+    ):
+        first = info.first_release.date().isoformat()
+        message = f"{name} was first released on {first}, less than {min_days} days ago"
+        findings.append(_finding(path, "too-new", message))
+
+
+def _check_versions(ctx: GateContext, checked: _Checked) -> None:
+    """Every (module, version) a changed `go.mod` newly requires must already be in the Go
+    proxy's cache: `go mod download` would otherwise make the proxy fetch that version from its
+    origin, and the version string can carry data as well as the path can (security review of
+    the v0.4 decisions). Modules whose name check already failed are not asked again."""
+    pairs = [(p, m, v) for p, m, v in new_go_requirements(ctx.changes)
+             if m.casefold() not in checked.flagged]  # fmt: skip
+    if len(pairs) > MAX_LOOKUPS:  # an error, never a pass (security review)
+        checked.errors.append((pairs[0][0], f"{len(pairs)} new module versions, more than the "
+                               f"{MAX_LOOKUPS} aipm looks up"))  # fmt: skip
+        pairs = pairs[:MAX_LOOKUPS]
+    for index, (path, module, version) in enumerate(pairs):
+        if _clock() - checked.began > DEPS_BUDGET_S:
+            checked.unavailable.append(
+                f"registry lookups took over {DEPS_BUDGET_S:.0f} s; "
+                f"{len(pairs) - index} module version(s) were not checked"
+            )
+            break
         try:
-            info = first_release(eco, name, fetch=ctx.fetch)
+            cached = go_version_cached(module, version, fetch=ctx.fetch)
         except PolicyViolation:
-            findings.append(_finding(path, "invalid-name", f"{name!r} is not a valid package name"))
+            message = f"{module} {version[:80]!r} is not a valid module and version"
+            checked.findings.append(_finding(path, "invalid-version", message))
+            continue
+        except RegistryUnavailable as exc:
+            checked.unavailable.append(f"go {module} {version[:80]}: {exc}")
             continue
         except RegistryError as exc:
-            errors.append(f"{eco.value} {name}: {exc}")
+            checked.errors.append((path, f"go {module} {version[:80]}: {exc}"))
             continue
-        if not info.exists:
-            findings.append(_finding(path, "missing", f"{name} does not exist on {_REGISTRY[eco]}"))
-        elif info.first_release is not None and not age_ok(
-            info.first_release, min_days=min_days, now=now
-        ):
-            first = info.first_release.date().isoformat()
-            message = f"{name} was first released on {first}, less than {min_days} days ago"
-            findings.append(_finding(path, "too-new", message))
-    return findings, errors
+        if not cached:
+            message = (f"{module} {version} is not in the Go proxy's cache; downloading it would "
+                       "make the proxy fetch it from its origin")  # fmt: skip
+            checked.findings.append(_finding(path, "uncached-version", message))
 
 
 def run(ctx: GateContext, gate: GateDef, *, name: str = NAME, required: bool) -> BuiltinOutcome:

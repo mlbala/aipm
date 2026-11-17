@@ -166,6 +166,21 @@ def test_gate_profile_hides_the_global_agent_homes_in_manual_mode(tmp_path: Path
         assert paths.home / rel in profile.deny_read
 
 
+def test_every_profile_names_a_temp_dir_it_may_write(tmp_path: Path) -> None:
+    """srt hands the command this dir as TMPDIR: it must be one the profile already allows."""
+    paths = _paths(tmp_path)
+    for kind in ProcessKind:
+        profile = profile_for(kind, NONE, paths, runtime="/bin/srt")
+        assert profile.temp_dir == paths.temp_dir, kind
+        assert profile.temp_dir in profile.allow_write, kind
+    output = tmp_path / "scanner-out"
+    scanner = profile_for(
+        ProcessKind.SCANNER, NONE, _paths(tmp_path, output_dir=output), runtime="/bin/srt"
+    )
+    assert scanner.temp_dir == output
+    assert scanner.allow_write == (output,)
+
+
 def test_every_profile_denies_writes_to_protected_paths_and_global_config(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
     for kind in ProcessKind:
@@ -196,10 +211,15 @@ def test_agent_profile_without_the_optional_paths(tmp_path: Path) -> None:
 
 
 def test_only_prepare_may_write_package_caches(tmp_path: Path) -> None:
-    paths = _paths(tmp_path)
+    # The run's own package cache since the v0.4 decisions (v0.2 O-2, ADR-0031; owner-approved
+    # change): prepare never writes the user's caches.
+    paths = _paths(tmp_path, package_cache=tmp_path / "run-cache")
     prepare = profile_for(ProcessKind.PREPARE, NONE, paths, runtime="/bin/srt")
     gate = profile_for(ProcessKind.GATE, NONE, paths, runtime="/bin/srt")
-    assert paths.home / ".cache" / "uv" in prepare.allow_write
+    assert tmp_path / "run-cache" / "uv" in prepare.allow_write
+    assert tmp_path / "run-cache" not in prepare.allow_write  # only its listed paths
+    assert not any(p.is_relative_to(tmp_path / "run-cache") for p in gate.allow_write)
+    assert paths.home / ".cache" / "uv" not in prepare.allow_write
     assert paths.home / ".cache" / "uv" not in gate.allow_write
 
 

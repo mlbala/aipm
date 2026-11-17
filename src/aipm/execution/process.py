@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import IO, cast
 
 from aipm.domain.errors import PolicyViolation, UsageError
-from aipm.execution.sandbox import SandboxProfile, wrap
+from aipm.execution.sandbox import LEGACY_TEMP_ENV, SandboxProfile, temp_env, wrap
 
 BASE_ENV_ALLOWLIST: tuple[str, ...] = (
     "PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "USER",
@@ -129,7 +129,13 @@ def _check_call(
     if not cwd.is_dir():
         raise UsageError(f"working directory {cwd} does not exist")
     checked = tuple(str(arg) for arg in items)
-    return (wrap(checked, sandbox) if sandbox is not None else checked), _check_env(env)
+    if sandbox is None:
+        return checked, _check_env(env)
+    wrapped = wrap(checked, sandbox)
+    sandboxed = _check_env(env)
+    sandboxed.pop(LEGACY_TEMP_ENV, None)
+    sandboxed.update(temp_env(sandbox))  # aipm's value, never the caller's
+    return wrapped, sandboxed
 
 
 class _Capture:

@@ -13,14 +13,23 @@ from typing import Any
 
 from aipm.app.workspace import find_repo_root, require_initialized
 from aipm.config.loader import LoadedConfig, load_config
+from aipm.config.schema import Config
 from aipm.domain.errors import PolicyViolation
 from aipm.domain.models import RepoId
+from aipm.execution import git
 from aipm.state.layout import repo_id
 from aipm.state.trust_store import (
+    CARGO_DIR,
+    MAX_TOOLCHAIN_BYTES,
+    PYPROJECT,
+    TOOLCHAIN_FILES,
+    Committed,
     FileTrustStore,
     default_trust_store,
     hash_surface,
+    pin_toolchain,
     render_surface,
+    select_toolchain,
 )
 
 _HASH_PREFIX = re.compile(r"[0-9a-f]{12,64}")
@@ -78,13 +87,49 @@ def load(project: Path | None) -> TrustContext:
     return TrustContext(root=root, loaded=load_config(root))
 
 
+def committed_toolchain(root: Path) -> Committed:
+    """The repository's committed toolchain files at the root (and in `.cargo/`), from `HEAD`:
+    what a clone or a pull brings (ADR-0032). The working tree is not read: an agent's change
+    there is the post-change checks' to judge (a dependency violation), which must not turn
+    into a question to trust the surface again."""
+    head = git.committed_head(root)
+    if head is None:
+        return {}
+    top = {e.name: e for e in git.list_tree(root, head)}
+    picked = {want: top[name] for want, name in
+              select_toolchain(top, (*TOOLCHAIN_FILES, PYPROJECT, CARGO_DIR)).items()}  # fmt: skip
+    cargo = picked.get(CARGO_DIR)
+    if cargo is not None and cargo.kind == "tree":
+        inner = {e.name: e for e in git.list_tree(root, cargo.object_id)}
+        wanted = tuple(rel.split("/", 1)[1] for rel in TOOLCHAIN_FILES if rel.startswith(".cargo/"))
+        for want, name in select_toolchain(inner, wanted).items():
+            picked[f"{CARGO_DIR}/{want}"] = inner[name]
+    committed: Committed = {}
+    for rel, entry in picked.items():
+        data: bytes | None = None
+        if entry.kind == "blob" and entry.mode in ("100644", "100755"):
+            raw, cut = git.read_object(root, entry.object_id, max_bytes=MAX_TOOLCHAIN_BYTES)
+            data = None if cut else raw
+        committed[rel] = (entry.mode, data)
+    return committed
+
+
+def repository_surface(store: FileTrustStore, cfg: Config, root: Path) -> dict[str, Any]:
+    """The execution surface of the repository at `root`: `cfg`'s, its agent hooks and MCP
+    servers when bare mode is off, and the hashes of its committed toolchain files. The command
+    policy is checked first, so a refused argv exits 6 before git is asked anything."""
+    surface = store.surface(cfg, root=root)
+    toolchain = pin_toolchain(committed_toolchain(root))
+    return {**surface, "toolchain_files": toolchain} if toolchain else surface
+
+
 def inspect(context: TrustContext, *, store: FileTrustStore | None = None) -> TrustReport:
     """Compute the surface and its hash, and whether this user trusts it.
 
     Raises `PolicyViolation` (exit 6) if the surface fails the command policy.
     """
     trust_store = store if store is not None else default_trust_store(context.root)
-    surface = trust_store.surface(context.loaded.config, root=context.root)
+    surface = repository_surface(trust_store, context.loaded.config, context.root)
     digest = hash_surface(surface)
     rid = repo_id(context.root)
     return TrustReport(

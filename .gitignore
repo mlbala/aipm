@@ -232,3 +232,6 @@ src/aipm/_version.py
 .claude/settings.local.json
 # import-linter cache.
 .import_linter_cache/
+
+# The CI sandbox job installs srt and pnpm here (npm ci).
+/.github/sandbox/node_modules/
