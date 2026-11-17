@@ -22,17 +22,17 @@ classifiers = [
 ]
 # Runtime dependencies: ARCHITECTURE §19, lower bounds only.
 dependencies = [
-    "typer>=0.27",
+    "typer>=0.29.0",
     "rich>=15.0",
     "questionary>=2.1",
     "pydantic>=2.14.3",
     "ruamel.yaml>=0.19",
     "jinja2>=3.1.6",        # 3.1.6 fixes a sandbox escape; aipm relies on SandboxedEnvironment
-    "filelock>=4.2.9",
+    "filelock>=4.2.10",
     "platformdirs>=4.14.5",
     "pathspec>=1.1",
-    "anthropic>=2.6.0",     # needs >=2.0.0 (API version 2026-10-21, ARCHITECTURE §14); Dependabot set the floor
-    "openai>=3.46.0",
+    "anthropic>=2.7.0",     # needs >=2.0.0 (API version 2026-10-21, ARCHITECTURE §14); Dependabot set the floor
+    "openai>=3.49.0",
 ]
 
 [project.optional-dependencies]
@@ -56,11 +56,11 @@ dev = [
     "pytest>=9.2",
     "pytest-socket>=0.8.1",
     "pytest-cov>=7.1",
-    "hypothesis>=6.170.14",
+    "hypothesis>=6.170.15",
     "syrupy>=6.1",
     "ruff>=0.17.4",
     "pyright>=1.1.414",
-    "import-linter>=2.15",
+    "import-linter>=2.16",
     "zizmor==1.32.0",
     "pytest-xdist>=3.8.0",
 ]
