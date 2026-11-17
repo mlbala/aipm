@@ -35,9 +35,12 @@ AGENT_HOMES_DIR = "agents"
 INTEGRATE_DIR = ".integrate"
 """Under a repository's worktree directory: where task commits are rebased."""
 TOOLCHAIN_NAMES = frozenset({".cargo", "go.work", "go.work.sum", "rust-toolchain",
-                             "rust-toolchain.toml"})  # fmt: skip
-"""Casefolded: what Cargo (`.cargo/config.toml`), Go (`go.work`) and rustup (a toolchain file)
-look for in the working directory and in every directory above it (red-team v0.4, RT04-11)."""
+                             "rust-toolchain.toml", "pnpm-workspace.yaml", "pnpm-workspace.yml",
+                             "pnpm-workspaces.yaml", "pnpm-workspaces.yml"})  # fmt: skip
+"""Casefolded: what Cargo (`.cargo/config.toml`), Go (`go.work`), rustup (a toolchain file)
+and pnpm (`pnpm-workspace.yaml`, and the misspellings it refuses to run with) look for in the
+working directory and in every directory above it (red-team v0.4, RT04-11; v0.4 decisions,
+session 4)."""
 TASK_BRANCH_PREFIX = "aipm/task/"
 INTEGRATION_PREFIX = "aipm/"
 
@@ -104,8 +107,8 @@ class WorktreeManager:
             planted = sorted(n for n in names if n.casefold() in TOOLCHAIN_NAMES)
             if planted:
                 raise PolicyViolation(
-                    f"{directory / planted[0]} would give Go, Cargo or rustup settings to every "
-                    "task worktree below it",
+                    f"{directory / planted[0]} would give Go, Cargo or rustup settings, or "
+                    "pnpm's, to every task worktree below it",
                     hint="Remove it; aipm writes nothing by that name there.",
                 )
 

@@ -191,7 +191,7 @@ def readme_verify_flags() -> list[str]:
     for line in README.read_text(encoding="utf-8").splitlines():
         if line.strip().startswith("gh attestation verify"):
             words = shlex.split(line.split("#", 1)[0])[4:]  # after "gh attestation verify FILE"
-            return [re.sub(r"^refs/tags/.*", "refs/tags/", w) for w in words]
+            return [re.sub(r"refs/tags/.*$", "refs/tags/", w) for w in words]
     raise AssertionError("no gh attestation verify in the README")
 
 
@@ -316,11 +316,12 @@ def test_install_sh_verifies_the_attestation_with_the_readme_flags(
     assert uv_log.read_text(encoding="utf-8").split()[2] == words[2]  # the file it checked
     assert words[3:] == [
         "--repo", "mlbala/aipm",
-        "--signer-workflow", "mlbala/aipm/.github/workflows/release.yml",
+        "--cert-identity",
+        "https://github.com/mlbala/aipm/.github/workflows/release.yml@refs/tags/v0.4.1",
         "--source-ref", "refs/tags/v0.4.1",
         "--deny-self-hosted-runners",
     ]  # fmt: skip
-    assert [re.sub(r"^refs/tags/.*", "refs/tags/", w) for w in words[3:]] == (readme_verify_flags())
+    assert [re.sub(r"refs/tags/.*$", "refs/tags/", w) for w in words[3:]] == (readme_verify_flags())
     assert "only the SHA-256" not in out
 
 
@@ -434,6 +435,9 @@ def test_pnpm_gets_the_run_store_and_copying_as_flags(tmp_path: Path) -> None:
     assert cache_args("/opt/bin/pnpm", cache) == (
         f"--store-dir={cache / 'pnpm-store'}",
         "--package-import-method=copy",
+        f"--cache-dir={cache / 'pnpm-cache'}",
+        "--virtual-store-dir=node_modules/.pnpm",
+        "--modules-dir=node_modules",
     )
     for other in ("npm", "uv", "go", "cargo", "/usr/bin/python3", "pnpx"):
         assert cache_args(other, cache) == ()
@@ -449,6 +453,9 @@ def test_prepare_puts_the_pnpm_flags_before_the_subcommand(tmp_path: Path) -> No
     assert log.read_text(encoding="utf-8").splitlines() == [
         f"--store-dir={ctx.package_dir / 'pnpm-store'}",
         "--package-import-method=copy",
+        f"--cache-dir={ctx.package_dir / 'pnpm-cache'}",
+        "--virtual-store-dir=node_modules/.pnpm",
+        "--modules-dir=node_modules",
         "install",
         "--frozen-lockfile",
     ]

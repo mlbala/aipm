@@ -35,3 +35,15 @@ updates:
     groups:
       build-backend:
         patterns: ["*"]
+
+  - package-ecosystem: npm # srt and pnpm for the sandbox CI job
+    directory: /.github/sandbox
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: chore
+    groups:
+      sandbox:
+        patterns: ["*"]

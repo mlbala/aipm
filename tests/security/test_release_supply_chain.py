@@ -105,12 +105,13 @@ def test_the_readme_verify_command_pins_the_release_workflow_and_the_tag() -> No
     assert commands
     for command in commands:
         words = shlex.split(command.split("#", 1)[0])
-        assert "--signer-workflow" in words, command
-        assert words[words.index("--signer-workflow") + 1] == (
-            "mlbala/aipm/.github/workflows/release.yml"
-        )
+        assert "--cert-identity" in words, command  # exact; gh refuses it with --signer-workflow
         assert "--source-ref" in words, command
-        assert re.fullmatch(r"refs/tags/v\d+\.\d+\.\d+", words[words.index("--source-ref") + 1])
+        ref = words[words.index("--source-ref") + 1]
+        assert re.fullmatch(r"refs/tags/v\d+\.\d+\.\d+", ref)
+        assert words[words.index("--cert-identity") + 1] == (
+            f"https://github.com/mlbala/aipm/.github/workflows/release.yml@{ref}"
+        )
         assert "--deny-self-hosted-runners" in words, command
 
 

@@ -8,5 +8,6 @@ input:
     gh attestation verify aipm-0.4.0-py3-none-any.whl --repo mlbala/aipm
 expected:
   outcome: >-
-    The documented command also pins --signer-workflow to release.yml, --source-ref to the
-    release tag and --deny-self-hosted-runners; an attestation from a branch run fails it.
+    The documented command also pins --cert-identity exactly to release.yml run from the
+    release tag, --source-ref to that tag and --deny-self-hosted-runners; an attestation from
+    a branch run fails it.
