@@ -109,7 +109,7 @@ if [ -n "$GH" ]; then
   "$GH" auth status --hostname github.com >/dev/null 2>&1 ||
     fail "gh is not logged in, so the wheel's provenance cannot be checked: run gh auth login and retry"
   "$GH" attestation verify "$dir/$wheel" --repo mlbala/aipm \
-    --signer-workflow mlbala/aipm/.github/workflows/release.yml \
+    --cert-identity "https://github.com/mlbala/aipm/.github/workflows/release.yml@refs/tags/$TAG" \
     --source-ref "refs/tags/$TAG" --deny-self-hosted-runners ||
     fail "verification failed: $wheel has no valid attestation from aipm's release workflow for $TAG; nothing installed"
 else

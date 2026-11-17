@@ -61,6 +61,11 @@ All notable changes to aipm are recorded here. The format follows [Keep a Change
 
 ### Security
 
+The low findings left open by the v0.4 decisions:
+
+- Release verification pins the signer certificate exactly: `install.sh` and the README use `gh attestation verify --cert-identity https://github.com/mlbala/aipm/.github/workflows/release.yml@refs/tags/<tag>` instead of `--signer-workflow`, which can match more than one workflow path (gh refuses the two together).
+- Dependabot updates the sandbox CI job's srt and pnpm (`.github/sandbox/package-lock.json`).
+
 The step 08 security review found one high and two medium problems in the v0.4 work, all fixed:
 
 - The rust-cargo unit gate (`cargo test`) passed on exit 0 alone, so a test calling `std::process::exit(0)`, or a `build.rs` killing cargo under `srt`, passed a task whose tests failed. It now runs `cargo nextest run` with a configuration aipm writes outside the work tree (the new `{nextest_config}` placeholder), and passes only when nextest's JUnit report shows tests ran and none failed. The command policy allows `run` only in `cargo nextest run`, and refuses nextest's prebuilt-binary and tool-config flags ([ADR-0030](docs/architecture/adr/0030-rust-unit-gate-runs-nextest.md)).

@@ -52,3 +52,20 @@ def test_every_dependabot_entry_waits_a_week() -> None:
 def test_the_root_lockfile_stays_covered() -> None:
     assert ("uv", "/") in _dependabot_entries()
     assert Path(REPO_ROOT / "uv.lock").is_file()
+
+
+# ---------------------------------------------------------------- 4: exact signer identity
+
+SIGNER = "https://github.com/mlbala/aipm/.github/workflows/release.yml@refs/tags/"
+
+
+def test_install_sh_and_the_readme_pin_the_exact_signer_identity() -> None:
+    """`--signer-workflow` may match more than one workflow path; `--cert-identity` is exact,
+    and gh refuses the two together, so neither command may name `--signer-workflow`."""
+    install = (REPO_ROOT / "install.sh").read_text(encoding="utf-8")
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert f'--cert-identity "{SIGNER}$TAG"' in install
+    assert f"--cert-identity {SIGNER}v" in readme
+    for text in (install, readme):
+        assert "--signer-workflow mlbala" not in text
+        assert "--cert-identity-regex" not in text
