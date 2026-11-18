@@ -130,7 +130,12 @@ jobs:
       - name: Tests under the real sandbox
         env:
           AIPM_REQUIRE_REAL_SRT: "1"
-        run: uv run --frozen pytest -q -rs tests/security/test_real_sandbox.py tests/security/test_gates.py
+        # Every real-tool test file: test_real_sandbox.py and its test_real_sandbox_*.py
+        # siblings. nullglob drops the pattern when no sibling exists yet.
+        run: |
+          shopt -s nullglob
+          uv run --frozen pytest -q -rs tests/security/test_real_sandbox.py \
+            tests/security/test_real_sandbox_*.py tests/security/test_gates.py
 
   commit-authorship:
     name: Commit authorship
