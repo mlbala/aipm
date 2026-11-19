@@ -18,6 +18,7 @@ writes one only where its configuration says (ADR-0030).
 
 import json
 import os
+import posixpath
 import secrets
 import shutil
 import time
@@ -214,10 +215,12 @@ PNPM_SCRIPTS = frozenset({"pnpm.cjs", "pnpm.js", "pnpm.mjs"})
 def reaches_pnpm(argv: Sequence[str]) -> bool:
     """Whether `argv` names pnpm anywhere aipm can see it: as the program, after a launcher or
     wrapper (`corepack pnpm`, `corepack pnpm@10.34.9`, `time pnpm`), or as a script `node`
-    runs (`node …/pnpm.cjs`). A `package.json` script or a Makefile that calls pnpm is not
-    visible here; `pnpm_guard_env` covers those."""
+    runs (`node …/pnpm.cjs`, or `node …/pnpm/`, whose `package.json` names `bin/pnpm.cjs`;
+    the path is normalised first, so a trailing `/` or `/.` hides nothing). A `package.json`
+    script, a Makefile or a link under another name that runs pnpm is not visible here;
+    `pnpm_guard_env` covers those."""
     for arg in argv:
-        name = program_name(arg)
+        name = program_name(posixpath.normpath(arg))
         if name.split("@", 1)[0] == "pnpm" or name in PNPM_SCRIPTS:
             return True
     return False

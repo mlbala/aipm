@@ -45,6 +45,7 @@ with open({log!r}, "a") as out:
 """
 
 PNPM_CJS = "node_modules/pnpm/bin/pnpm.cjs"
+PNPX_CJS = "node_modules/pnpm/bin/pnpx.cjs"
 
 
 def recorder(tmp_path: Path, name: str) -> tuple[str, Path]:
@@ -149,6 +150,8 @@ def test_the_guard_variables_by_program(tmp_path: Path) -> None:
         ["/usr/bin/node22", "--no-warnings", "/opt/pnpm/dist/pnpm.mjs", "run", "x"],
         ["node", "/x/PNPM.JS", "test"],
         ["time", "pnpm", "test"],
+        ["node", "node_modules/pnpm/", "test"],  # pnpm's package.json "main"
+        ["node", "node_modules/pnpm/.", "test"],
     ],
 )
 def test_argv_that_reaches_pnpm(argv: list[str]) -> None:
@@ -269,10 +272,14 @@ OWNER_DECISION = (
         (["corepack", "yarn"], ["corepack", "yarn", "dlx", "cowsay"], "prepare"),
         (["node", PNPM_CJS], ["node", PNPM_CJS, "dlx", "cowsay"], "gate"),
         (["node", PNPM_CJS], ["node", PNPM_CJS, "dlx", "cowsay"], "prepare"),
+        (["node", "node_modules/pnpm/"], ["node", "node_modules/pnpm/", "dlx", "cowsay"], "gate"),
+        (["node", PNPX_CJS], ["node", PNPX_CJS, "cowsay"], "gate"),
+        (["node", PNPX_CJS], ["node", PNPX_CJS, "cowsay"], "prepare"),
     ],
     ids=[
         "corepack-pnpm-version", "corepack-install", "corepack-pnpm-dlx-prepare",
         "corepack-yarn-dlx-prepare", "node-pnpm-dlx-gate", "node-pnpm-dlx-prepare",
+        "node-pnpm-dir-dlx-gate", "node-pnpx-gate", "node-pnpx-prepare",
     ],
 )  # fmt: skip
 def test_a_launcher_that_fetches_and_runs_code_is_refused(
