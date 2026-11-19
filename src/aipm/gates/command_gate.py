@@ -18,6 +18,7 @@ writes one only where its configuration says (ADR-0030).
 
 import json
 import os
+import posixpath
 import secrets
 import shutil
 import time
@@ -27,7 +28,7 @@ from pathlib import Path
 
 from aipm.domain.errors import PolicyViolation
 from aipm.domain.models import Ecosystem, GateDef, GateResult, GateStatus, NetworkProfile
-from aipm.execution.package_cache import cache_args, cache_env, pnpm_env
+from aipm.execution.package_cache import cache_args, cache_env, pnpm_guard_env
 from aipm.execution.process import BASE_ENV_ALLOWLIST, ProcessResult, build_env, run_safe
 from aipm.execution.sandbox import ProcessKind, ProfilePaths, SandboxProfile, profile_for
 from aipm.gates.context import GateContext
@@ -207,12 +208,31 @@ def _judge(
     return GateStatus.PASS, report.summary(), report
 
 
-def refuse_pnpm_install_before_run(program: str, root: Path) -> None:
-    """Exit 6 when a gate runs pnpm and the repository's `pnpm-workspace.yaml` asks pnpm 10 to
-    install before running a script (`verifyDepsBeforeRun: install`), or has a key pnpm would
-    expand (`${…}`). `pnpm_env` already overrides it; this refuses a repository that asks, in
-    case a pnpm version reads it differently (v0.4 decisions, session 4)."""
-    if program_name(program) != "pnpm":
+PNPM_SCRIPTS = frozenset({"pnpm.cjs", "pnpm.js", "pnpm.mjs"})
+"""The file names of pnpm's own entry points, which `node` can run directly."""
+
+
+def reaches_pnpm(argv: Sequence[str]) -> bool:
+    """Whether `argv` names pnpm anywhere aipm can see it: as the program, after a launcher or
+    wrapper (`corepack pnpm`, `corepack pnpm@10.34.9`, `time pnpm`), or as a script `node`
+    runs (`node …/pnpm.cjs`, or `node …/pnpm/`, whose `package.json` names `bin/pnpm.cjs`;
+    the path is normalised first, so a trailing `/` or `/.` hides nothing). A `package.json`
+    script, a Makefile or a link under another name that runs pnpm is not visible here;
+    `pnpm_guard_env` covers those."""
+    for arg in argv:
+        name = program_name(posixpath.normpath(arg))
+        if name.split("@", 1)[0] == "pnpm" or name in PNPM_SCRIPTS:
+            return True
+    return False
+
+
+def refuse_pnpm_install_before_run(program: str, root: Path, args: Sequence[str] = ()) -> None:
+    """Exit 6 when a gate reaches pnpm (`reaches_pnpm` on `program` and its `args`) and the
+    repository's `pnpm-workspace.yaml` asks pnpm 10 to install before running a script
+    (`verifyDepsBeforeRun: install`), has a key pnpm would expand (`${…}`), or cannot be read.
+    `pnpm_guard_env` already overrides it; this refuses a repository that asks, in case a pnpm
+    version reads it differently (v0.4 decisions, session 4; launchers since session 5)."""
+    if not reaches_pnpm((program, *args)):
         return
     settings = read_pnpm_settings(root)
     if settings is not None and installs_before_run(settings):
@@ -238,7 +258,7 @@ def run_command_gate(
         compile_gate(gate, paths=paths, policy=ctx.cfg.command_policy(), report_file=report_file)
     )
     argv[0] = resolve_program(argv[0], ctx.root)
-    refuse_pnpm_install_before_run(argv[0], ctx.root)
+    refuse_pnpm_install_before_run(argv[0], ctx.root, argv[1:])
     profile = sandbox_for(ctx, ProcessKind.GATE, ctx.cfg.security.network.gates, argv)
     if report_file is not None:
         report_file.unlink(missing_ok=True)
@@ -248,7 +268,7 @@ def run_command_gate(
         cwd=ctx.root,
         env=gate_env(ctx)
         | cache_env(argv[0], ctx.package_dir, ctx.ws.temp_dir)
-        | pnpm_env(argv[0], ctx.root),
+        | pnpm_guard_env(argv[0], ctx.root),
         timeout_s=GATE_TIMEOUT_S,
         max_output_bytes=MAX_OUTPUT_BYTES,
         sandbox=profile,
@@ -285,7 +305,7 @@ def run_prepare(ctx: GateContext) -> CommandOutcome | None:
             "TMPDIR": str(ctx.ws.temp_dir),
             **toolchain_env(ctx.root),
             **cache_env(argv[0], ctx.package_dir, ctx.ws.temp_dir),
-            **pnpm_env(argv[0], ctx.root),
+            **pnpm_guard_env(argv[0], ctx.root),
         },
         base_allowlist=(*BASE_ENV_ALLOWLIST, *PREPARE_ENV),
     )
