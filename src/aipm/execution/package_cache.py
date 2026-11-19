@@ -79,8 +79,9 @@ def cache_args(program: str, cache: Path) -> tuple[str, ...]:
 
 
 def pnpm_env(program: str, root: Path) -> dict[str, str]:
-    """What pnpm gets in prepare and in gates, on top of `cache_env` (v0.4 decisions, session 4;
-    each checked by hand on pnpm 10.34.9).
+    """The variables that keep pnpm to the worktree and to what prepare installed, when
+    `program` is pnpm itself; `pnpm_guard_env` gives them to every other program too (v0.4
+    decisions, session 4; each checked by hand on pnpm 10.34.9).
 
     - `NPM_CONFIG_WORKSPACE_DIR`: pnpm looks for `pnpm-workspace.yaml` in every directory above
       its working directory; pinned to the worktree, a file planted above it is never read.
@@ -88,7 +89,8 @@ def pnpm_env(program: str, root: Path) -> dict[str, str]:
       with the import method its settings name, not prepare's copies; a gate must run what
       prepare installed. `npm_config_…` beats `.npmrc`, and `pnpm_config_…` beats
       `pnpm-workspace.yaml`, including a key spelled with `${VAR:-…}`, which pnpm expands.
-      `gates/command_gate.py` also refuses a pnpm gate whose file asks to install."""
+      `gates/command_gate.py` also refuses a gate that reaches pnpm when the file asks to
+      install."""
     if program_name(program) != "pnpm":
         return {}
     return {
@@ -96,6 +98,24 @@ def pnpm_env(program: str, root: Path) -> dict[str, str]:
         "npm_config_verify_deps_before_run": "error",
         "pnpm_config_verify_deps_before_run": "error",
     }
+
+
+def pnpm_guard_env(program: str, root: Path) -> dict[str, str]:
+    """What every gate and the prepare step get, whatever `program` (argv[0]) is, on top of
+    `cache_env`: `pnpm_env`'s variables. A gate can reach pnpm through another launcher
+    (`corepack pnpm`, `node …/pnpm.cjs`, a `package.json` script, a Makefile), and pnpm reads
+    them from the environment it inherits (v0.4 decisions, session 5, item 1; checked by hand on
+    pnpm 10.34.9 through corepack 0.32.0, node and an npm 11.5.2 script).
+
+    npm warns about every `npm_config_` name it does not know ("Unknown env config", which its
+    next major version stops accepting), so a program npm gets only `pnpm_config_…`, which beats
+    `pnpm-workspace.yaml`; a committed `.npmrc` that asks pnpm to install beats it in an npm
+    script that calls pnpm (SECURITY.md R-26). uv ignores the variables (checked by hand on uv
+    0.13.6); Go and Cargo read only their own `GO…` and `CARGO_…` names."""
+    env = pnpm_env("pnpm", root)
+    if program_name(program) == "npm":
+        return {"pnpm_config_verify_deps_before_run": env["pnpm_config_verify_deps_before_run"]}
+    return env
 
 
 def cache_env(program: str, cache: Path, temp: Path) -> dict[str, str]:
