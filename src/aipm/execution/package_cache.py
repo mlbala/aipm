@@ -78,6 +78,24 @@ def cache_args(program: str, cache: Path) -> tuple[str, ...]:
     )
 
 
+def lockfile_args(program: str) -> tuple[str, ...]:
+    """The option that prepare puts after `cache_args`: pnpm's lockfile directory is `.`, the
+    worktree root prepare runs in. A committed `lockfile-dir` (in `.npmrc`, `pnpm-workspace.yaml`'s
+    `lockfileDir`, or the `.npmrc` of the directory a `pnpm -C <dir>` names) moved the lockfile
+    and the virtual store, which the relative `--virtual-store-dir` resolves against, outside
+    the worktree, so every task's `node_modules` could link into one store there (v0.4
+    decisions, session 5, item 2 review). Checked by hand on pnpm 10.34.9: the flag beats all
+    three; `npm_config_lockfile_dir` beats only the `.npmrc` ones. Relative, not the absolute
+    root: pnpm resolves it against its working directory also under `-C <dir>`, and an absolute
+    path would put the user's checkout path (in `verify`) into argv, which `srt` refuses when
+    it holds a quote or `$` (`sandbox.check_shell_safe`; session 5, item 2 re-review). A
+    repository with one lockfile per project (`sharedWorkspaceLockfile: false`) fails a
+    `--frozen-lockfile` prepare: it must use one shared lockfile."""
+    if program_name(program) != "pnpm":
+        return ()
+    return ("--lockfile-dir=.",)
+
+
 def pnpm_env(program: str, root: Path) -> dict[str, str]:
     """The variables that keep pnpm to the worktree and to what prepare installed, when
     `program` is pnpm itself; `pnpm_guard_env` gives them to every other program too (v0.4

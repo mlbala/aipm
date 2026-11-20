@@ -456,6 +456,7 @@ def test_prepare_puts_the_pnpm_flags_before_the_subcommand(tmp_path: Path) -> No
         f"--cache-dir={ctx.package_dir / 'pnpm-cache'}",
         "--virtual-store-dir=node_modules/.pnpm",
         "--modules-dir=node_modules",
+        "--lockfile-dir=.",
         "install",
         "--frozen-lockfile",
     ]

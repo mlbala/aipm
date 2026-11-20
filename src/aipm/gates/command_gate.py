@@ -27,7 +27,7 @@ from pathlib import Path
 
 from aipm.domain.errors import PolicyViolation
 from aipm.domain.models import Ecosystem, GateDef, GateResult, GateStatus, NetworkProfile
-from aipm.execution.package_cache import cache_args, cache_env, pnpm_guard_env
+from aipm.execution.package_cache import cache_args, cache_env, lockfile_args, pnpm_guard_env
 from aipm.execution.process import BASE_ENV_ALLOWLIST, ProcessResult, build_env, run_safe
 from aipm.execution.sandbox import ProcessKind, ProfilePaths, SandboxProfile, profile_for
 from aipm.gates.context import GateContext
@@ -307,7 +307,10 @@ def run_prepare(ctx: GateContext) -> CommandOutcome | None:
         return None
     argv = list(compile_prepare(prepare, policy=ctx.cfg.command_policy()))
     argv[0] = resolve_program(argv[0], ctx.root)
-    argv[1:1] = cache_args(argv[0], ctx.package_dir)  # after the policy check: aipm's own
+    argv[1:1] = (  # after the policy check: aipm's own
+        *cache_args(argv[0], ctx.package_dir),
+        *lockfile_args(argv[0]),
+    )
     profile = sandbox_for(ctx, ProcessKind.PREPARE, min_network(prepare.network, ctx), argv)
     started = time.monotonic()
     env = build_env(
