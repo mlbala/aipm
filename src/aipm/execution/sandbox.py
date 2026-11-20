@@ -24,6 +24,7 @@ import json
 import os
 import secrets
 import shutil
+import stat
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -219,19 +220,77 @@ class SandboxProfile:
 TEMP_ENV = "CLAUDE_CODE_TMPDIR"
 """srt sets the sandboxed command's `TMPDIR` to this variable's value, read from its own
 environment, and to `/tmp/claude` without it, which srt does not create: Go and pnpm then fail
-on Linux ("stat /tmp/claude: no such file or directory"). srt also makes the directory it names
-writable, so aipm always sets it, and `pass_env` may never (`security/env_policy.py`)."""
+on Linux ("stat /tmp/claude: no such file or directory"). 0.0.81 does not make the directory it
+names writable, but a later srt may, so aipm always sets it, and `pass_env` may never
+(`security/env_policy.py`)."""
 LEGACY_TEMP_ENV = "CLAUDE_TMPDIR"
 """The older name srt still reads when `TEMP_ENV` is unset."""
 
 
 def temp_env(profile: SandboxProfile) -> dict[str, str]:
-    """What `srt`'s environment needs so that the command's `TMPDIR` is its own temp dir. srt
-    makes that dir writable, so one the profile does not already allow is refused (exit 6)."""
+    """What `srt`'s environment needs so that the command's `TMPDIR` is its own temp dir.
+
+    srt may make that dir writable, so it must be one the profile already lets the process write:
+    an `allow_write` entry (as for agents, gates and prepare), or a directory inside one (a
+    scanner's `<out>/tmp`) that is normalised, outside every denied path and pattern, and not
+    reached through a link below that entry. The entry's own parents may be links (macOS's
+    `/var`). Anything else is refused (exit 6).
+    """
     temp = profile.temp_dir if profile.temp_dir is not None else profile.settings_dir
-    if not temp.is_absolute() or temp not in profile.allow_write:
-        raise PolicyViolation(f"the sandbox temp dir {temp} is not a path the profile may write")
-    return {TEMP_ENV: str(temp)}
+    if temp.is_absolute() and (temp in profile.allow_write or _inside_allowed(temp, profile)):
+        return {TEMP_ENV: str(temp)}
+    raise PolicyViolation(
+        f"the sandbox temp dir {temp} is not a normalised path the profile may write, reached "
+        "without a link"
+    )
+
+
+def _inside_allowed(temp: Path, profile: SandboxProfile) -> bool:
+    """Whether absolute `temp` lies inside an `allow_write` entry and nothing could make it a
+    path the profile may not write (read-only checks)."""
+    raw = str(temp)
+    if os.path.normpath(raw) != raw:
+        return False
+    entry = next((e for e in profile.allow_write if temp.is_relative_to(e)), None)
+    if entry is None:
+        return False
+    denied = (*profile.deny_write, *profile.deny_read)
+    if any(temp.is_relative_to(d) or _holds_folded(d, temp) for d in denied):
+        return False
+    lineage = (temp, *temp.parents)
+    if any(p.full_match(pat) for pat in profile.deny_write_patterns for p in lineage):
+        return False
+    if _link_below(entry, temp):
+        return False
+    expected = Path(os.path.realpath(entry)) / temp.relative_to(entry)
+    return os.path.realpath(temp) == str(expected)
+
+
+def _holds_folded(parent: Path, path: Path) -> bool:
+    """`holds`, with case folded: a deny entry spelled through a link (`/var` and
+    `/private/var`), or in another case on a case-insensitive disk, still covers `path`. On a
+    case-sensitive disk this refuses more than it must, never less."""
+    outer = os.path.realpath(parent).casefold()
+    inner = os.path.realpath(path).casefold()
+    return inner == outer or inner.startswith(outer.rstrip(os.sep) + os.sep)
+
+
+def _link_below(entry: Path, temp: Path) -> bool:
+    """Whether a part of `temp` below `entry` is a link, or cannot be checked. `realpath` alone
+    misses a link loop (it returns the path as given). A missing part ends the walk: nothing
+    below it exists."""
+    current = entry
+    for part in temp.relative_to(entry).parts:
+        current = current / part
+        try:
+            mode = os.lstat(current).st_mode
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        if stat.S_ISLNK(mode):
+            return True
+    return False
 
 
 type Runtime = str | tuple[str, ...]
@@ -272,8 +331,11 @@ def profile_for(
         allow += [] if cache is None else [cache / rel for rel in PREPARE_WRITABLE]
     else:
         allow = [paths.output_dir if paths.output_dir is not None else paths.temp_dir]
-    # A scanner may write only its output dir, so its temp files go there.
-    temp_dir = allow[0] if kind is ProcessKind.SCANNER else paths.temp_dir
+    # A scanner may write only its output dir, so its temp dir is that dir or one inside it
+    # (`<out>/tmp`); one outside it falls back to the output dir, which `temp_env` accepts.
+    temp_dir = paths.temp_dir
+    if kind is ProcessKind.SCANNER and not temp_dir.is_relative_to(allow[0]):
+        temp_dir = allow[0]
     deny_write = [paths.workspace / rel for rel in _PROTECTED_LITERALS]
     deny_write += [home / rel for rel in AGENT_GLOBAL_CONFIG]
     deny_write += [home / rel for rel in TOOLCHAIN_CONFIG]

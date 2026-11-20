@@ -271,7 +271,7 @@ def run_tool(
     profile = None
     if ctx.runtime is not None:
         network: NetworkPolicy = parse_network(tool.network)
-        paths = ProfilePaths(workspace=cwd, temp_dir=out_dir, home=Path.home(), output_dir=out_dir)
+        paths = ProfilePaths(workspace=cwd, temp_dir=tmp, home=Path.home(), output_dir=out_dir)
         profile = profile_for(ProcessKind.SCANNER, network, paths, runtime=ctx.runtime)
     return run_safe(
         [executable, *args],
