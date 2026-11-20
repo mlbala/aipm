@@ -10,6 +10,7 @@ runner, a short-option cluster that contains an inline-code letter counts as tha
 (`-Bc` is `-B -c`), and so does a short flag with its value attached (`-cprint(1)`).
 """
 
+import posixpath
 import re
 import unicodedata
 from collections.abc import Iterable, Sequence
@@ -90,11 +91,22 @@ FETCH_AND_RUN: tuple[Argv, ...] = (
 
 _NEEDS_PROGRAM = frozenset(
     {"uv", "npm", "pnpm", "yarn", "bun", "pip", "python", "node", "nodejs", "deno", "ruby", "perl",
-     "go", "cargo"}
+     "go", "cargo", "corepack"}
 )  # fmt: skip
 """Package managers and interpreters: an allowed prefix starting with one must also name the
 program or subcommand it runs, so `[uv]` or `[uv, run]` can never allow everything."""
 _RUNNER_WORDS = frozenset({"run", "tool", "exec", "dlx", "x", "uvx"})
+
+PNPM_SCRIPTS = frozenset({"pnpm.cjs", "pnpm.js", "pnpm.mjs"})
+"""The file names of pnpm's own entry points, which `node` can run directly."""
+PNPX_SCRIPTS = frozenset({"pnpx.cjs", "pnpx.js", "pnpx.mjs"})
+"""pnpm's `pnpx` entry points: `pnpx` is hard-denied, and so is running its script."""
+COREPACK_MANAGERS = frozenset({"pnpm", "yarn", "npm"})
+"""What `corepack <manager> …` may start. Every other corepack command (`install`, `use`, `up`,
+`enable`, `prepare`, `pack`, `cache`, …) installs or changes a package manager, and a version
+(`corepack pnpm@10.0.0`) makes corepack download it (v0.4 decisions, session 5, item 1)."""
+_SCRIPT_RUNNERS = frozenset({"node", "nodejs", "bun"})
+"""Programs that run a JavaScript file given as their first argument."""
 
 _PYTHON = re.compile(r"(?:python|pypy)(?:\d+(?:\.\d+)*t?)?")
 _PERL = re.compile(r"perl\d+(?:\.\d+)*")
@@ -246,6 +258,25 @@ def program_name(arg: str) -> str:
 
 
 _program = program_name
+
+
+def _entry_name(arg: str) -> str:
+    """`program_name` of `arg` after normalising its path: `node_modules/pnpm/` and
+    `node_modules/pnpm/.` name pnpm's package directory, which `node` runs as its `main`."""
+    return program_name(posixpath.normpath(arg))
+
+
+def reaches_pnpm(argv: Sequence[str]) -> bool:
+    """Whether `argv` names pnpm anywhere the policy can see it: as the program, after a launcher
+    or wrapper (`corepack pnpm`, `corepack pnpm@10.34.9`, `time pnpm`), or as a script or
+    package directory a JavaScript runtime runs (`node …/pnpm.cjs`, `node …/pnpm/`). A
+    `package.json` script, a Makefile or a link under another name that runs pnpm is not
+    visible here; the environment every gate gets covers those."""
+    for arg in argv:
+        name = _entry_name(arg)
+        if name.split("@", 1)[0] == "pnpm" or name in PNPM_SCRIPTS:
+            return True
+    return False
 
 
 def _invisible(ch: str) -> bool:
@@ -477,6 +508,57 @@ def _check_install(argv: Argv) -> None:
             raise _deny(f"package installation is allowed only in the prepare step: {item!r}")
 
 
+def _launched(argv: Argv) -> list[Argv]:
+    """The package-manager argv each launcher in `argv` starts, read the way the policy reads
+    `argv[0]`: `corepack pnpm dlx x` is `pnpm dlx x`, `node …/pnpm.cjs install` is `pnpm
+    install`. A launcher shape the policy cannot read with certainty is refused (the owner's
+    decision on session 5, item 1)."""
+    found: list[Argv] = []
+    for index, arg in enumerate(argv):
+        program = _program(arg)
+        rest = argv[index + 1 :]
+        if program == "corepack":
+            manager = rest[0].casefold() if rest else ""
+            if "@" in manager:
+                raise _deny(
+                    f"corepack {rest[0]!r} names a package manager version, which corepack "
+                    "downloads and runs; it is refused"
+                )
+            if manager not in COREPACK_MANAGERS:
+                raise _deny(
+                    "corepack may only start pnpm, yarn or npm (`corepack pnpm …`); its other "
+                    "commands install or change package managers, and are refused"
+                )
+            found.append((manager, *rest[1:]))
+        elif program in _SCRIPT_RUNNERS:
+            for position, later in enumerate(rest):
+                name = _entry_name(later)
+                if name == "pnpx" or name in PNPX_SCRIPTS:
+                    raise _deny(f"{later!r} is pnpx, which fetches and runs a package; refused")
+                if name != "pnpm" and name not in PNPM_SCRIPTS:
+                    continue
+                if position != 0:
+                    raise _deny(
+                        f"{arg!r} must run pnpm's script as its first argument, with nothing "
+                        "before it, so the policy can read the pnpm command; it is refused"
+                    )
+                found.append(("pnpm", *rest[1:]))
+                break
+    return found
+
+
+def _check_launchers(argv: Argv, stage: Stage) -> None:
+    """What a launcher starts gets the checks `argv[0]` gets: fetch-and-run and, in a gate,
+    installation. The other runners of pnpm, yarn and npm are `exec`, which is denied at any
+    position (`_check_denied_anywhere`)."""
+    for launched in _launched(argv):
+        fetch = _matches(FETCH_AND_RUN, launched)
+        if fetch is not None:
+            raise _deny(f"{' '.join(fetch)} fetches and runs a package; it is hard-denied")
+        if stage == "gate":
+            _check_install(launched)
+
+
 def check_argv(
     argv: Sequence[str],
     policy: CommandPolicy,
@@ -505,6 +587,7 @@ def check_argv(
     _check_code_modules(checked)
     _check_toolchains(checked)
     _check_denied_anywhere(checked, values)
+    _check_launchers(checked, stage)
     if stage == "gate":
         _check_install(checked)
     return checked
@@ -587,8 +670,19 @@ def compile_gate(
 
 
 def compile_prepare(prepare: PrepareDef, *, policy: CommandPolicy) -> Argv:
-    """Check the prepare step. It takes no placeholders, and may install packages."""
-    return check_argv(prepare.run, policy, stage="prepare")
+    """Check the prepare step. It takes no placeholders, and may install packages. A prepare
+    that starts pnpm through anything but `pnpm` itself (`corepack pnpm`, `node …/pnpm.cjs`, a
+    wrapper) is refused: aipm's store, copy and directory flags go right after `pnpm`, and the
+    environment does not beat a committed `pnpm-workspace.yaml` or `.npmrc` (the owner's
+    decision on session 5, item 1; checked by hand on pnpm 10.34.9)."""
+    checked = check_argv(prepare.run, policy, stage="prepare")
+    if reaches_pnpm(checked) and _program(checked[0]) != "pnpm":
+        raise PolicyViolation(
+            f"the prepare step starts pnpm through {checked[0]!r}, so aipm cannot pass the store "
+            "and copy flags that beat the repository's pnpm settings",
+            hint="Run pnpm directly (`pnpm install --frozen-lockfile`).",
+        )
+    return checked
 
 
 def _option_values(argv: Argv, long: str, short: str) -> list[str | None]:
