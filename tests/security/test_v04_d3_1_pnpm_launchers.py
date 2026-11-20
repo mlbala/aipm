@@ -425,6 +425,9 @@ NPMRC_INSTALLS = {
     "line-separator-in-value": "verify-deps-before-run=error\u2028install\n",
     "crlf": "x=1\r\nverify-deps-before-run=install\r\n",
     "null": "verify-deps-before-run=null\n",
+    # The re-review: inside an npm script, `npm_package_name` comes from `package.json`.
+    "env-key-without-default": "${npm_package_name}=install\n",
+    "env-key-inside": "verify-${npm_package_name}=install\n",
 }
 NPMRC_SAFE = {
     "error": "verify-deps-before-run=error\n",
@@ -435,6 +438,8 @@ NPMRC_SAFE = {
     "empty": "",
     "inline-comment": "verify-deps-before-run=error ; pnpm fails rather than installs\n",
     "quoted-safe": "verify-deps-before-run='false'\n",
+    "registry-key-with-env": "//${NPM_HOST}/:_authToken=${NPM_TOKEN}\n",
+    "scope-key-with-env": "@${NPM_SCOPE}:registry=https://registry.npmjs.org/\n",
 }
 
 

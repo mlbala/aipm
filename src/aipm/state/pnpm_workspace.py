@@ -102,19 +102,20 @@ def read_settings(root: Path) -> dict[str, object] | None:
 
 
 _VERIFY_KEY = "verifydepsbeforerun"
-_EXPANDS_WITH_DEFAULT = re.compile(r"\$\{[^}]*-")
-"""`${VAR:-default}` (or `${VAR-default}`): pnpm expands `.npmrc` keys and values from the
-environment, and a default can name any setting or value."""
+_LITERAL_PREFIXES = ("//", "@")
+"""A registry (`//host/:_authToken`) or scope (`@scope:registry`) key: what pnpm expands
+after this literal prefix can never make the key a setting."""
 
 
 def npmrc_installs(root: Path) -> bool:
     """Whether `root/.npmrc` may make pnpm install before a script (`verify-deps-before-run`
     other than `error`, `warn` or `false`). Each line is read as npm's `ini` package reads it
     (`_ini_line`), then checked failing closed: every section, keys compared without case, `-`
-    or `_` (pnpm also reads the camel-case spelling), a bare key as `true`, a key with an
-    expansion default or a value with any expansion as installing; and any other line that
-    spells the setting's letters is refused unless it is a safe assignment. Exit 6 when the file
-    cannot be read, as for `read_settings`."""
+    or `_` (pnpm also reads the camel-case spelling), a bare key as `true`, and a key with any
+    expansion (but a registry or scope key) or a value with any expansion as installing: inside
+    an npm script, npm sets `npm_package_name` and others from `package.json`. Any other line
+    that spells the setting's letters is refused unless it is a safe assignment. Exit 6 when the
+    file cannot be read, as for `read_settings`."""
     data = _read_small(root, NPMRC)
     if data is None:
         return False
@@ -132,8 +133,8 @@ def npmrc_installs(root: Path) -> bool:
                 return True  # a line `ini` skips, which aipm cannot be sure pnpm skips
             continue
         key, value = parsed
-        if _EXPANDS_WITH_DEFAULT.search(key):
-            return True
+        if "${" in key and not key.startswith(_LITERAL_PREFIXES):
+            return True  # an npm script's `npm_package_name` comes from `package.json`
         setting = re.sub(r"[-_]", "", key).casefold() == _VERIFY_KEY
         if (setting and not _safe_verify(value)) or (spells and not setting):
             return True  # an installing value, or the setting's letters in another spelling
@@ -163,7 +164,9 @@ def _ini_ignores(line: str) -> bool:
 def _ini_line(line: str) -> tuple[str, object] | None:
     """`(key, value)` as `ini.decode` (npm's `ini` 4) reads one line that `_ini_ignores` does
     not, or `None` for a line it skips. A key that is not a string after `JSON.parse` names no
-    setting."""
+    setting. pnpm 10.18.3 reads `.npmrc` through `ini` 1.3.8, whose section pattern allows no
+    trailing whitespace and which keeps whitespace-only lines; a line the two read differently
+    starts with `[`, so it is never the setting."""
     match = _ASSIGNMENT.fullmatch(line)
     if match is None:
         return None
