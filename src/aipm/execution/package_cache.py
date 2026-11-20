@@ -14,6 +14,7 @@ Cargo would run from it (`$CARGO_HOME/bin/cargo-<cmd>`, before PATH) or read as 
 (`$CARGO_HOME/config.toml`) is write-denied to every process (`sandbox.PROTECTED_CARGO`).
 """
 
+import errno
 import os
 import re
 import shutil
@@ -30,6 +31,8 @@ from aipm.state.layout import repo_id
 PACKAGES_DIR = "packages"
 _RUN_ID = re.compile(r"r-\d{8}-\d{4}-[0-9a-f]{4}")
 MAX_CARGO_CONFIG_BYTES = 1_048_576
+_PROC_FD = "/proc/self/fd"
+"""Linux's links to this process's open descriptors (`_make_unreadable_writable`)."""
 
 _CACHE_ENV: dict[str, tuple[tuple[str, str], ...]] = {
     "uv": (("UV_CACHE_DIR", "uv"),),
@@ -212,34 +215,68 @@ def remove_tree(path: Path) -> None:
         path.unlink(missing_ok=True)
         return
     _make_writable(None, str(path))
-    for _, dirnames, _, dirfd in os.fwalk(path, follow_symlinks=False):
-        for name in dirnames:
-            _make_writable(dirfd, name)
+    with suppress(OSError):  # fwalk raises only for a root it cannot open: it is left
+        for _, dirnames, _, dirfd in os.fwalk(path, follow_symlinks=False):
+            for name in dirnames:
+                _make_writable(dirfd, name)
     shutil.rmtree(path, ignore_errors=True)
 
 
 def _make_writable(dirfd: int | None, name: str) -> None:
-    """`chmod 0700` the directory `name` (relative to `dirfd`), never through a link. semgrep's
-    insecure-file-permissions rule flags any mode with an execute bit; 0700 is owner-only, and a
-    directory needs `x` to be entered and emptied."""
-    try:  # macOS: fchmodat with AT_SYMLINK_NOFOLLOW
-        # nosemgrep: insecure-file-permissions
-        os.chmod(name, 0o700, dir_fd=dirfd, follow_symlinks=False)
-        return
-    except (NotImplementedError, ValueError, OSError):
-        pass  # Linux refuses the pair: ValueError with dir_fd, NotImplementedError without
+    """`chmod 0700` the directory `name` (relative to `dirfd`), never through a link and never
+    anything but a directory. semgrep's insecure-file-permissions rule flags any mode with an
+    execute bit; 0700 is owner-only, and a directory needs `x` to be entered and emptied.
+
+    1. Open it `O_RDONLY | O_DIRECTORY | O_NOFOLLOW` and `fchmod` the descriptor: a directory
+       aipm can read, on every system.
+    2. One it cannot read (EACCES): `_make_unreadable_writable`.
+
+    There is no by-name `chmod`, and the no-follow `fchmodat` is not tried first: between the
+    walk listing a directory and the call, a process still running in the cache could swap it
+    for a link (a by-name `chmod` follows it) or a hard link to an outside file (`fchmodat`
+    changes that file). A directory none of this reaches is left, and
+    `rmtree(ignore_errors=True)` leaves it under the cache root, which is safe. Errors never
+    escape: `fchmod` fails on macOS for a `chflags uchg` directory."""
     try:
         fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dirfd)
-    except OSError:
-        # An unreadable directory gives no descriptor: change it by name, once it is known to be
-        # a directory and not a link.
-        with suppress(OSError):
-            if stat.S_ISDIR(os.stat(name, dir_fd=dirfd, follow_symlinks=False).st_mode):
-                # nosemgrep: insecure-file-permissions
-                os.chmod(name, 0o700, dir_fd=dirfd)
+    except OSError as err:
+        if err.errno == errno.EACCES:
+            _make_unreadable_writable(dirfd, name)
         return
     try:
-        # nosemgrep: insecure-file-permissions
-        os.fchmod(fd, 0o700)
+        with suppress(OSError):
+            # nosemgrep: insecure-file-permissions
+            os.fchmod(fd, 0o700)
+    finally:
+        os.close(fd)
+
+
+def _make_unreadable_writable(dirfd: int | None, name: str) -> None:
+    """A directory aipm cannot read gives no `O_RDONLY` descriptor.
+
+    - **Linux:** `O_PATH` needs no read permission. With `O_NOFOLLOW` a link gives a descriptor
+      to the link itself, which `O_DIRECTORY` refuses, as it refuses a file, so a swapped-in
+      link fails instead of being followed. `fchmod` on an `O_PATH` descriptor fails (EBADF), so
+      the descriptor is changed through `/proc/self/fd`, which names the opened directory,
+      whatever its name points to now. Without `/proc`, nothing is changed.
+    - **Without `O_PATH` (macOS):** `fchmodat` with `AT_SYMLINK_NOFOLLOW`, which changes a link
+      itself, never its target. Only a hard link swapped in between the EACCES and this call
+      gets through (an open low in the v0.4 decisions progress doc). Where it fails (a link on
+      Linux's CPython, a libc without it), nothing is changed."""
+    o_path: int | None = getattr(os, "O_PATH", None)
+    if o_path is None:
+        with suppress(NotImplementedError, ValueError, OSError):
+            # nosemgrep: insecure-file-permissions
+            os.chmod(name, 0o700, dir_fd=dirfd, follow_symlinks=False)
+        return
+    try:
+        fd = os.open(name, o_path | os.O_NOFOLLOW | os.O_DIRECTORY, dir_fd=dirfd)
+    except OSError:
+        return
+    try:
+        with suppress(OSError):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                # nosemgrep: insecure-file-permissions
+                Path(_PROC_FD, str(fd)).chmod(0o700)
     finally:
         os.close(fd)
