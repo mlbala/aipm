@@ -74,3 +74,104 @@ def test_node_running_pnpm_runs_without_installing(
     assert outcome.result.status is GateStatus.FAIL, outcome.full_output
     assert "VERIFY_DEPS_BEFORE_RUN" in outcome.full_output, outcome.full_output
     assert not (ctx.root / "node_modules").exists()
+
+
+def test_a_corepack_gate_never_downloads_an_uncached_pnpm(
+    tmp_path: Path,
+    cache: Path,  # noqa: F811 - the fixture
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The owner's decision: corepack never downloads in a gate. With an empty corepack cache
+    (a fresh HOME), `packageManager: pnpm@9.15.9` makes corepack fetch that pnpm; the gate's
+    `COREPACK_ENABLE_NETWORK=0` stops it before any request. Under srt only, whose `none`
+    network profile also keeps the test off the network if the variable were missing."""
+    corepack = need("corepack")
+    need("node")
+    ctx = make_ctx(tmp_path, runtime=need("srt"))
+    # corepack makes a temp dir in its cache before it downloads, and srt lets a gate write only
+    # the worktree and its temp dir: a HOME inside the worktree lets it reach the download.
+    home = ctx.root / "fresh-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    (ctx.root / "package.json").write_text(
+        json.dumps({"name": "app", "version": "1.0.0", "packageManager": "pnpm@9.15.9",
+                    "scripts": {"test": "node -e 0"}}),
+        encoding="utf-8",
+    )  # fmt: skip
+    run = [corepack, "pnpm", "test"]
+    cfg = Config.model_validate({"allowed_executables": [run], "gates": {"unit": {"run": run}}})
+    ctx = dataclasses.replace(ctx, cfg=cfg, package_cache=cache)
+    outcome = run_command_gate("unit", cfg.gates["unit"], ctx, paths=[], required=True)
+    assert outcome.result.status is GateStatus.FAIL, outcome.full_output
+    assert "Network access disabled by the environment" in outcome.full_output, outcome.full_output
+    assert not list(home.rglob("9.15.9"))
+
+
+@pytest.mark.parametrize("sandboxed", [True, False], ids=["srt", "no-srt"])
+def test_an_npm_script_calling_pnpm_is_refused_when_npmrc_installs(
+    tmp_path: Path,
+    cache: Path,  # noqa: F811 - the fixture
+    sandboxed: bool,
+) -> None:
+    """R-26, closed by the owner's decision: an `npm`-led gate gets only `pnpm_config_…`, which
+    a committed `.npmrc` `verify-deps-before-run=install` beats (checked by hand on pnpm
+    10.34.9 and npm 11.5.2: `npm run x` calling `pnpm test` installed first). The gate never
+    starts."""
+    npm = need("npm")
+    need("pnpm")
+    ctx = make_ctx(tmp_path, runtime=need("srt") if sandboxed else None)
+    (ctx.root / "package.json").write_text(
+        json.dumps({
+            "name": "app", "version": "1.0.0",
+            "scripts": {"test": "node -e 0", "check": "pnpm test"},
+            "dependencies": {"dep": tarball(ctx.root)},
+        }),
+        encoding="utf-8",
+    )  # fmt: skip
+    (ctx.root / ".npmrc").write_text("verify-deps-before-run=install\n", encoding="utf-8")
+    run = [npm, "run", "check"]
+    cfg = Config.model_validate({"allowed_executables": [run], "gates": {"unit": {"run": run}}})
+    ctx = dataclasses.replace(ctx, cfg=cfg, package_cache=cache)
+    with pytest.raises(PolicyViolation, match="verify-deps-before-run"):
+        run_command_gate("unit", cfg.gates["unit"], ctx, paths=[], required=True)
+    assert not (ctx.root / "node_modules").exists()
+
+
+def test_a_corepack_env_file_cannot_plant_a_package_manager(
+    tmp_path: Path,
+    cache: Path,  # noqa: F811 - the fixture
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The security review of the follow-up: corepack 0.32.0 read `COREPACK_HOME` from the
+    repository's `.corepack.env` and ran a pnpm planted there, even with
+    `COREPACK_ENABLE_NETWORK=0`. Gates run with `COREPACK_ENV_FILE=0`."""
+    corepack = need("corepack")
+    need("node")
+    ctx = make_ctx(tmp_path, runtime=need("srt"))
+    home = ctx.root / "fresh-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    planted = ctx.root / ".cp" / "v1" / "pnpm" / "9.9.9"
+    (planted / "bin").mkdir(parents=True)
+    (planted / ".corepack").write_text(
+        json.dumps({"locator": {"name": "pnpm", "reference": "9.9.9"},
+                    "bin": {"pnpm": "./bin/pnpm.cjs"}, "hash": "x"}),
+        encoding="utf-8",
+    )  # fmt: skip
+    (planted / "package.json").write_text(
+        json.dumps({"name": "pnpm", "version": "9.9.9", "bin": {"pnpm": "./bin/pnpm.cjs"}}),
+        encoding="utf-8",
+    )
+    (planted / "bin" / "pnpm.cjs").write_text('console.log("PLANTED PNPM RAN")\n', encoding="utf-8")
+    (ctx.root / ".corepack.env").write_text(f"COREPACK_HOME={ctx.root / '.cp'}\n", encoding="utf-8")
+    (ctx.root / "package.json").write_text(
+        json.dumps({"name": "app", "version": "1.0.0", "packageManager": "pnpm@9.9.9",
+                    "scripts": {"test": "node -e 0"}}),
+        encoding="utf-8",
+    )  # fmt: skip
+    run = [corepack, "pnpm", "test"]
+    cfg = Config.model_validate({"allowed_executables": [run], "gates": {"unit": {"run": run}}})
+    ctx = dataclasses.replace(ctx, cfg=cfg, package_cache=cache)
+    outcome = run_command_gate("unit", cfg.gates["unit"], ctx, paths=[], required=True)
+    assert "PLANTED PNPM RAN" not in outcome.full_output, outcome.full_output
+    assert outcome.result.status is GateStatus.FAIL, outcome.full_output

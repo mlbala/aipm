@@ -8,13 +8,16 @@ parsed with aipm's safe YAML loader and only ever shown as data.
 
 import errno
 import os
+import re
 import stat
 from pathlib import Path
 
 from aipm.domain.errors import PolicyViolation, SchemaError
+from aipm.security.json_limits import loads_bounded
 from aipm.state.yamlio import MAX_YAML_BYTES, load_yaml
 
 PNPM_WORKSPACE = "pnpm-workspace.yaml"
+NPMRC = ".npmrc"
 
 NOT_SETTINGS = frozenset({"packages", "catalog", "catalogs"})
 """Top-level keys that list workspace packages or dependency versions, not settings."""
@@ -89,30 +92,154 @@ def read_settings(root: Path) -> dict[str, object] | None:
     """The settings of `root/pnpm-workspace.yaml`, or `None` when there is none. Exit 6 for a
     link, anything but a regular file, a file over 1 MiB, or one aipm cannot parse: pnpm would
     still read it, so a check that relies on it fails closed."""
-    path = root / PNPM_WORKSPACE
+    data = _read_small(root, PNPM_WORKSPACE)
+    if data is None:
+        return None
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # a FIFO never blocks
+        return load_settings(data)
+    except SchemaError as exc:
+        raise _unreadable(PNPM_WORKSPACE, exc.message) from None
+
+
+_VERIFY_KEY = "verifydepsbeforerun"
+_LITERAL_PREFIXES = ("//", "@")
+"""A registry (`//host/:_authToken`) or scope (`@scope:registry`) key: what pnpm expands
+after this literal prefix can never make the key a setting."""
+
+
+def npmrc_installs(root: Path) -> bool:
+    """Whether `root/.npmrc` may make pnpm install before a script (`verify-deps-before-run`
+    other than `error`, `warn` or `false`). Each line is read as npm's `ini` package reads it
+    (`_ini_line`), then checked failing closed: every section, keys compared without case, `-`
+    or `_` (pnpm also reads the camel-case spelling), a bare key as `true`, and a key with any
+    expansion (but a registry or scope key) or a value with any expansion as installing: inside
+    an npm script, npm sets `npm_package_name` and others from `package.json`. Any other line
+    that spells the setting's letters is refused unless it is a safe assignment. Exit 6 when the
+    file cannot be read, as for `read_settings`."""
+    data = _read_small(root, NPMRC)
+    if data is None:
+        return False
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise _unreadable(NPMRC, "it is not UTF-8") from None
+    for line in _NEWLINES.split(text):
+        if _ini_ignores(line):
+            continue
+        spells = _VERIFY_KEY in re.sub(r"[^a-z]", "", line.casefold())
+        parsed = _ini_line(line)
+        if parsed is None:
+            if spells:
+                return True  # a line `ini` skips, which aipm cannot be sure pnpm skips
+            continue
+        key, value = parsed
+        if "${" in key and not key.startswith(_LITERAL_PREFIXES):
+            return True  # an npm script's `npm_package_name` comes from `package.json`
+        setting = re.sub(r"[-_]", "", key).casefold() == _VERIFY_KEY
+        if (setting and not _safe_verify(value)) or (spells and not setting):
+            return True  # an installing value, or the setting's letters in another spelling
+    return False
+
+
+_JS_SPACE = (
+    "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008"
+    "\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+"""JavaScript's `\\s` and `trim()`: unlike Python's `str.strip()`, they include U+FEFF."""
+_NEWLINES = re.compile(r"[\r\n]+")
+_SECTION = re.compile(rf"\[[^\]]*\][{_JS_SPACE}]*")
+_JSON_WORDS: dict[str, object] = {"true": True, "false": False, "null": None}
+"""The unquoted values `ini` turns into JSON's literals."""
+_ASSIGNMENT = re.compile(r"([^=]+)(=([^\n\r\u2028\u2029]*))?")
+"""`ini`'s line pattern; JavaScript's `.` matches no line terminator."""
+
+
+def _ini_ignores(line: str) -> bool:
+    """A blank line, a comment or a section header, which `ini.decode` sets nothing from."""
+    if not line.strip(_JS_SPACE) or line.lstrip(_JS_SPACE)[:1] in ("#", ";"):
+        return True
+    return line.startswith("[") and _SECTION.fullmatch(line) is not None
+
+
+def _ini_line(line: str) -> tuple[str, object] | None:
+    """`(key, value)` as `ini.decode` (npm's `ini` 4) reads one line that `_ini_ignores` does
+    not, or `None` for a line it skips. A key that is not a string after `JSON.parse` names no
+    setting. pnpm 10.18.3 reads `.npmrc` through `ini` 1.3.8, whose section pattern allows no
+    trailing whitespace and which keeps whitespace-only lines; a line the two read differently
+    starts with `[`, so it is never the setting."""
+    match = _ASSIGNMENT.fullmatch(line)
+    if match is None:
+        return None
+    key = _ini_unsafe(match.group(1))
+    if not isinstance(key, str):
+        return None
+    if len(key) > 2 and key.endswith("[]"):
+        key = key[:-2]
+    value: object = _ini_unsafe(match.group(3)) if match.group(2) is not None else True
+    if isinstance(value, str) and value in _JSON_WORDS:
+        value = _JSON_WORDS[value]
+    return key, value
+
+
+def _ini_unsafe(text: str) -> object:
+    """`ini`'s `unsafe()`: a quoted value (single quotes stripped first) through `JSON.parse`;
+    otherwise cut at the first unescaped `;` or `#`, with `\\;`, `\\#` and `\\\\` unescaped."""
+    text = text.strip(_JS_SPACE)
+    if text[:1] in ('"', "'") and text.endswith(text[0]):
+        if text[0] == "'":
+            text = text[1:-1]
+        try:
+            return loads_bounded(text)
+        except ValueError:  # also `TooDeep`: a deeply nested array names no setting either
+            return text
+    out: list[str] = []
+    escaped = False
+    for ch in text:
+        if escaped:
+            out.append(ch if ch in "\\;#" else "\\" + ch)
+            escaped = False
+        elif ch in ";#":
+            break
+        elif ch == "\\":
+            escaped = True
+        else:
+            out.append(ch)
+    if escaped:
+        out.append("\\")
+    return "".join(out).strip(_JS_SPACE)
+
+
+def _safe_verify(value: object) -> bool:
+    """`false`, or a string `error`, `warn` or `false` with no expansion."""
+    if value is False:
+        return True
+    return isinstance(value, str) and "${" not in value and value.casefold() in SAFE_VERIFY_DEPS
+
+
+def _read_small(root: Path, name: str) -> bytes | None:
+    """`root/name`, or `None` when there is none. Exit 6 for a link, anything but a regular
+    file, or a file over 1 MiB."""
+    try:
+        fd = os.open(root / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # FIFO-safe
     except FileNotFoundError:
         return None
     except OSError as exc:
         if exc.errno == errno.ELOOP:
-            raise _unreadable("it is a symbolic link") from None
-        raise _unreadable(exc.strerror or "it cannot be opened") from None
+            raise _unreadable(name, "it is a symbolic link") from None
+        raise _unreadable(name, exc.strerror or "it cannot be opened") from None
     if not stat.S_ISREG(os.fstat(fd).st_mode):
         os.close(fd)
-        raise _unreadable("it is not a regular file")
+        raise _unreadable(name, "it is not a regular file")
     with os.fdopen(fd, "rb") as handle:
         data = handle.read(MAX_YAML_BYTES + 1)
     if len(data) > MAX_YAML_BYTES:
-        raise _unreadable("it is larger than 1 MiB")
-    try:
-        return load_settings(data)
-    except SchemaError as exc:
-        raise _unreadable(exc.message) from None
+        raise _unreadable(name, "it is larger than 1 MiB")
+    return data
 
 
-def _unreadable(why: str) -> PolicyViolation:
+def _unreadable(name: str, why: str) -> PolicyViolation:
+    kind = "YAML " if name == PNPM_WORKSPACE else ""
     return PolicyViolation(
-        f"the repository's {PNPM_WORKSPACE} cannot be checked before a pnpm gate runs ({why})",
-        hint=f"Commit {PNPM_WORKSPACE} as a regular YAML file of at most 1 MiB, or remove it.",
+        f"the repository's {name} cannot be checked before a gate that may run pnpm ({why})",
+        hint=f"Commit {name} as a regular {kind}file of at most 1 MiB, or remove it.",
     )

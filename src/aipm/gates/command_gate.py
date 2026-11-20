@@ -18,7 +18,6 @@ writes one only where its configuration says (ADR-0030).
 
 import json
 import os
-import posixpath
 import secrets
 import shutil
 import time
@@ -38,11 +37,12 @@ from aipm.security.command_policy import (
     compile_prepare,
     nextest_config_path,
     program_name,
+    reaches_pnpm,
 )
 from aipm.security.network import NetworkPolicy, parse_network
 from aipm.security.paths import SafeRelPath
 from aipm.security.sanitize import head_tail, sanitize_text, strip_terminal_escapes
-from aipm.state.pnpm_workspace import PNPM_WORKSPACE, installs_before_run
+from aipm.state.pnpm_workspace import NPMRC, PNPM_WORKSPACE, installs_before_run, npmrc_installs
 from aipm.state.pnpm_workspace import read_settings as read_pnpm_settings
 
 GATE_TIMEOUT_S = 600.0
@@ -79,14 +79,26 @@ def toolchain_env(root: Path) -> dict[str, str]:
     return env
 
 
+COREPACK_ENV = {"COREPACK_ENV_FILE": "0"}
+"""Gates and prepare: corepack (0.32.0) otherwise loads `COREPACK_*` settings, such as a
+`COREPACK_HOME` holding a planted package manager, from the repository's `.corepack.env`, for
+every name aipm does not set itself (security review of session 5, item 1's follow-up)."""
+
+
 def gate_env(ctx: GateContext) -> dict[str, str]:
-    """The base allowlist (SECURITY.md §8), with the temp dir and no in-tree bytecode."""
+    """The base allowlist (SECURITY.md §8), with the temp dir and no in-tree bytecode.
+    Corepack never downloads in a gate (`COREPACK_ENABLE_NETWORK=0`): `pnpm` on PATH is often
+    its shim, which fetches and runs the version `packageManager` names when it is not cached
+    (checked by hand on corepack 0.32.0; v0.4 decisions, session 5, item 1), and it reads no
+    `.corepack.env` (`COREPACK_ENV`)."""
     temp = ctx.ws.temp_dir
     return build_env(
         extra={
             "TMPDIR": str(temp),
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONPYCACHEPREFIX": str(temp / "pycache"),
+            "COREPACK_ENABLE_NETWORK": "0",
+            **COREPACK_ENV,
             **toolchain_env(ctx.root),
         }
     )
@@ -208,24 +220,6 @@ def _judge(
     return GateStatus.PASS, report.summary(), report
 
 
-PNPM_SCRIPTS = frozenset({"pnpm.cjs", "pnpm.js", "pnpm.mjs"})
-"""The file names of pnpm's own entry points, which `node` can run directly."""
-
-
-def reaches_pnpm(argv: Sequence[str]) -> bool:
-    """Whether `argv` names pnpm anywhere aipm can see it: as the program, after a launcher or
-    wrapper (`corepack pnpm`, `corepack pnpm@10.34.9`, `time pnpm`), or as a script `node`
-    runs (`node …/pnpm.cjs`, or `node …/pnpm/`, whose `package.json` names `bin/pnpm.cjs`;
-    the path is normalised first, so a trailing `/` or `/.` hides nothing). A `package.json`
-    script, a Makefile or a link under another name that runs pnpm is not visible here;
-    `pnpm_guard_env` covers those."""
-    for arg in argv:
-        name = program_name(posixpath.normpath(arg))
-        if name.split("@", 1)[0] == "pnpm" or name in PNPM_SCRIPTS:
-            return True
-    return False
-
-
 def refuse_pnpm_install_before_run(program: str, root: Path, args: Sequence[str] = ()) -> None:
     """Exit 6 when a gate reaches pnpm (`reaches_pnpm` on `program` and its `args`) and the
     repository's `pnpm-workspace.yaml` asks pnpm 10 to install before running a script
@@ -240,6 +234,21 @@ def refuse_pnpm_install_before_run(program: str, root: Path, args: Sequence[str]
             f"a pnpm gate would install dependencies first: {PNPM_WORKSPACE} sets "
             "verifyDepsBeforeRun to a value that installs",
             hint=f"Set verifyDepsBeforeRun to error, warn or false in {PNPM_WORKSPACE}; "
+            "prepare installs, and gates only run.",
+        )
+
+
+def refuse_npmrc_install_before_run(root: Path) -> None:
+    """Exit 6 for every gate when the repository's `.npmrc` sets pnpm's
+    `verify-deps-before-run` to a value that installs, or cannot be read. Any gate can reach
+    pnpm through a script, and an `npm`-led one gets only `pnpm_config_…`, which a committed
+    `.npmrc` beats (checked by hand on pnpm 10.34.9; SECURITY.md R-26, the owner's decision on
+    session 5, item 1)."""
+    if npmrc_installs(root):
+        raise PolicyViolation(
+            f"a gate could make pnpm install dependencies first: {NPMRC} sets "
+            "verify-deps-before-run to a value that installs",
+            hint=f"Set verify-deps-before-run to error, warn or false in {NPMRC}, or remove it; "
             "prepare installs, and gates only run.",
         )
 
@@ -259,6 +268,7 @@ def run_command_gate(
     )
     argv[0] = resolve_program(argv[0], ctx.root)
     refuse_pnpm_install_before_run(argv[0], ctx.root, argv[1:])
+    refuse_npmrc_install_before_run(ctx.root)
     profile = sandbox_for(ctx, ProcessKind.GATE, ctx.cfg.security.network.gates, argv)
     if report_file is not None:
         report_file.unlink(missing_ok=True)
@@ -303,6 +313,7 @@ def run_prepare(ctx: GateContext) -> CommandOutcome | None:
     env = build_env(
         extra={
             "TMPDIR": str(ctx.ws.temp_dir),
+            **COREPACK_ENV,
             **toolchain_env(ctx.root),
             **cache_env(argv[0], ctx.package_dir, ctx.ws.temp_dir),
             **pnpm_guard_env(argv[0], ctx.root),
