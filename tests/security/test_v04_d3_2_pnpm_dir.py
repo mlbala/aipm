@@ -22,6 +22,7 @@ import pytest
 from aipm.config.schema import Config
 from aipm.domain.errors import ExitCode, PolicyViolation
 from aipm.domain.models import GateStatus
+from aipm.execution.package_cache import lockfile_args
 from aipm.gates.command_gate import run_command_gate, run_prepare
 from aipm.gates.context import GateContext
 from aipm.security.command_policy import CommandPolicy, Stage, check_argv
@@ -106,7 +107,8 @@ def test_a_gate_in_a_sub_directory_is_pinned_to_the_worktree_root(
 def test_prepare_in_a_sub_directory_gets_the_cache_flags_first(
     tmp_path: Path, flag: list[str]
 ) -> None:
-    """`cache_args` go right after `pnpm`, before the directory flag, and the pin is the root."""
+    """`cache_args` and `lockfile_args` go right after `pnpm`, before the directory flag, and
+    the pin and the lockfile directory are the worktree root, not the directory the flag names."""
     program, log = pnpm_recorder(tmp_path)
     ctx = ctx_for(tmp_path, gate=[program, "test"], prepare=[program, *flag, "install"])
     outcome = run_prepare(ctx)
@@ -119,6 +121,7 @@ def test_prepare_in_a_sub_directory_gets_the_cache_flags_first(
         f"--cache-dir={cache / 'pnpm-cache'}",
         "--virtual-store-dir=node_modules/.pnpm",
         "--modules-dir=node_modules",
+        f"--lockfile-dir={ctx.root}",
         *flag,
         "install",
     ]
@@ -149,3 +152,12 @@ def test_a_sub_directory_file_is_not_checked_because_pnpm_never_reads_it(
     (ctx.root / "sub" / "pnpm-workspace.yaml").write_text("verifyDepsBeforeRun: install\n", "utf-8")
     assert run_unit(ctx) is GateStatus.PASS
     assert log.exists()
+
+
+def test_only_pnpm_gets_the_lockfile_flag(tmp_path: Path) -> None:
+    """Review of item 2: a committed `lockfile-dir` moved prepare's lockfile and virtual store
+    outside the worktree; the flag beats `.npmrc` and `pnpm-workspace.yaml` (checked by hand on
+    pnpm 10.34.9)."""
+    assert lockfile_args("/opt/bin/pnpm", tmp_path) == (f"--lockfile-dir={tmp_path}",)
+    for other in ("npm", "uv", "go", "cargo", "/usr/bin/python3", "pnpx", "corepack"):
+        assert lockfile_args(other, tmp_path) == ()
