@@ -215,9 +215,10 @@ def remove_tree(path: Path) -> None:
         path.unlink(missing_ok=True)
         return
     _make_writable(None, str(path))
-    for _, dirnames, _, dirfd in os.fwalk(path, follow_symlinks=False):
-        for name in dirnames:
-            _make_writable(dirfd, name)
+    with suppress(OSError):  # fwalk raises only for a root it cannot open: it is left
+        for _, dirnames, _, dirfd in os.fwalk(path, follow_symlinks=False):
+            for name in dirnames:
+                _make_writable(dirfd, name)
     shutil.rmtree(path, ignore_errors=True)
 
 
