@@ -79,11 +79,18 @@ def toolchain_env(root: Path) -> dict[str, str]:
     return env
 
 
+COREPACK_ENV = {"COREPACK_ENV_FILE": "0"}
+"""Gates and prepare: corepack (0.32.0) otherwise loads `COREPACK_*` settings, such as a
+`COREPACK_HOME` holding a planted package manager, from the repository's `.corepack.env`, for
+every name aipm does not set itself (security review of session 5, item 1's follow-up)."""
+
+
 def gate_env(ctx: GateContext) -> dict[str, str]:
     """The base allowlist (SECURITY.md §8), with the temp dir and no in-tree bytecode.
     Corepack never downloads in a gate (`COREPACK_ENABLE_NETWORK=0`): `pnpm` on PATH is often
     its shim, which fetches and runs the version `packageManager` names when it is not cached
-    (checked by hand on corepack 0.32.0; v0.4 decisions, session 5, item 1)."""
+    (checked by hand on corepack 0.32.0; v0.4 decisions, session 5, item 1), and it reads no
+    `.corepack.env` (`COREPACK_ENV`)."""
     temp = ctx.ws.temp_dir
     return build_env(
         extra={
@@ -91,6 +98,7 @@ def gate_env(ctx: GateContext) -> dict[str, str]:
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONPYCACHEPREFIX": str(temp / "pycache"),
             "COREPACK_ENABLE_NETWORK": "0",
+            **COREPACK_ENV,
             **toolchain_env(ctx.root),
         }
     )
@@ -305,6 +313,7 @@ def run_prepare(ctx: GateContext) -> CommandOutcome | None:
     env = build_env(
         extra={
             "TMPDIR": str(ctx.ws.temp_dir),
+            **COREPACK_ENV,
             **toolchain_env(ctx.root),
             **cache_env(argv[0], ctx.package_dir, ctx.ws.temp_dir),
             **pnpm_guard_env(argv[0], ctx.root),

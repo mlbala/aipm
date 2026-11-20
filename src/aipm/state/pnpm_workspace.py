@@ -13,6 +13,7 @@ import stat
 from pathlib import Path
 
 from aipm.domain.errors import PolicyViolation, SchemaError
+from aipm.security.json_limits import loads_bounded
 from aipm.state.yamlio import MAX_YAML_BYTES, load_yaml
 
 PNPM_WORKSPACE = "pnpm-workspace.yaml"
@@ -108,10 +109,12 @@ environment, and a default can name any setting or value."""
 
 def npmrc_installs(root: Path) -> bool:
     """Whether `root/.npmrc` may make pnpm install before a script (`verify-deps-before-run`
-    other than `error`, `warn` or `false`). Read as npm's ini format, failing closed: every line
-    in every section, keys compared without case, `-` or `_` (pnpm also reads the camel-case
-    spelling), a key with an expansion default or a value with any expansion counts as
-    installing. Exit 6 when the file cannot be read, as for `read_settings`."""
+    other than `error`, `warn` or `false`). Each line is read as npm's `ini` package reads it
+    (`_ini_line`), then checked failing closed: every section, keys compared without case, `-`
+    or `_` (pnpm also reads the camel-case spelling), a bare key as `true`, a key with an
+    expansion default or a value with any expansion as installing; and any other line that
+    spells the setting's letters is refused unless it is a safe assignment. Exit 6 when the file
+    cannot be read, as for `read_settings`."""
     data = _read_small(root, NPMRC)
     if data is None:
         return False
@@ -119,27 +122,95 @@ def npmrc_installs(root: Path) -> bool:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         raise _unreadable(NPMRC, "it is not UTF-8") from None
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line[0] in "#;" or (line[0] == "[" and line[-1] == "]"):
+    for line in _NEWLINES.split(text):
+        if _ini_ignores(line):
             continue
-        key, equals, value = line.partition("=")
-        key = _unquote(key).removesuffix("[]")
+        spells = _VERIFY_KEY in re.sub(r"[^a-z]", "", line.casefold())
+        parsed = _ini_line(line)
+        if parsed is None:
+            if spells:
+                return True  # a line `ini` skips, which aipm cannot be sure pnpm skips
+            continue
+        key, value = parsed
         if _EXPANDS_WITH_DEFAULT.search(key):
             return True
-        if re.sub(r"[-_]", "", key).casefold() != _VERIFY_KEY:
-            continue
-        value = _unquote(value).casefold() if equals else "true"
-        if "${" in value or value not in SAFE_VERIFY_DEPS:
-            return True
+        setting = re.sub(r"[-_]", "", key).casefold() == _VERIFY_KEY
+        if (setting and not _safe_verify(value)) or (spells and not setting):
+            return True  # an installing value, or the setting's letters in another spelling
     return False
 
 
-def _unquote(text: str) -> str:
-    text = text.strip()
-    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
-        return text[1:-1].strip()
-    return text
+_JS_SPACE = (
+    "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008"
+    "\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+"""JavaScript's `\\s` and `trim()`: unlike Python's `str.strip()`, they include U+FEFF."""
+_NEWLINES = re.compile(r"[\r\n]+")
+_SECTION = re.compile(rf"\[[^\]]*\][{_JS_SPACE}]*")
+_JSON_WORDS: dict[str, object] = {"true": True, "false": False, "null": None}
+"""The unquoted values `ini` turns into JSON's literals."""
+_ASSIGNMENT = re.compile(r"([^=]+)(=([^\n\r\u2028\u2029]*))?")
+"""`ini`'s line pattern; JavaScript's `.` matches no line terminator."""
+
+
+def _ini_ignores(line: str) -> bool:
+    """A blank line, a comment or a section header, which `ini.decode` sets nothing from."""
+    if not line.strip(_JS_SPACE) or line.lstrip(_JS_SPACE)[:1] in ("#", ";"):
+        return True
+    return line.startswith("[") and _SECTION.fullmatch(line) is not None
+
+
+def _ini_line(line: str) -> tuple[str, object] | None:
+    """`(key, value)` as `ini.decode` (npm's `ini` 4) reads one line that `_ini_ignores` does
+    not, or `None` for a line it skips. A key that is not a string after `JSON.parse` names no
+    setting."""
+    match = _ASSIGNMENT.fullmatch(line)
+    if match is None:
+        return None
+    key = _ini_unsafe(match.group(1))
+    if not isinstance(key, str):
+        return None
+    if len(key) > 2 and key.endswith("[]"):
+        key = key[:-2]
+    value: object = _ini_unsafe(match.group(3)) if match.group(2) is not None else True
+    if isinstance(value, str) and value in _JSON_WORDS:
+        value = _JSON_WORDS[value]
+    return key, value
+
+
+def _ini_unsafe(text: str) -> object:
+    """`ini`'s `unsafe()`: a quoted value (single quotes stripped first) through `JSON.parse`;
+    otherwise cut at the first unescaped `;` or `#`, with `\\;`, `\\#` and `\\\\` unescaped."""
+    text = text.strip(_JS_SPACE)
+    if text[:1] in ('"', "'") and text.endswith(text[0]):
+        if text[0] == "'":
+            text = text[1:-1]
+        try:
+            return loads_bounded(text)
+        except ValueError:  # also `TooDeep`: a deeply nested array names no setting either
+            return text
+    out: list[str] = []
+    escaped = False
+    for ch in text:
+        if escaped:
+            out.append(ch if ch in "\\;#" else "\\" + ch)
+            escaped = False
+        elif ch in ";#":
+            break
+        elif ch == "\\":
+            escaped = True
+        else:
+            out.append(ch)
+    if escaped:
+        out.append("\\")
+    return "".join(out).strip(_JS_SPACE)
+
+
+def _safe_verify(value: object) -> bool:
+    """`false`, or a string `error`, `warn` or `false` with no expansion."""
+    if value is False:
+        return True
+    return isinstance(value, str) and "${" not in value and value.casefold() in SAFE_VERIFY_DEPS
 
 
 def _read_small(root: Path, name: str) -> bytes | None:

@@ -29,6 +29,8 @@ from aipm.gates.command_gate import (
 )
 from aipm.gates.context import GateContext
 from aipm.security.command_policy import CommandPolicy, check_argv
+from aipm.security.diff_checks import is_dependency_path, is_package_config
+from aipm.state.pnpm_workspace import npmrc_installs
 from tests.security.test_gates import make_ctx
 
 VARIABLES = (
@@ -412,6 +414,17 @@ NPMRC_INSTALLS = {
     "in-a-section": "[x]\nverify-deps-before-run=install\n",
     "expanded-key": "${AIPM_NOPE:-verify-deps-before-run}=install\n",
     "expanded-value": "verify-deps-before-run=${AIPM_NOPE:-install}\n",
+    # The security review of the follow-up: ini's `unsafe()` reads these as the setting.
+    "hash-in-key": "verify-deps-before-run#x=install\n",
+    "semicolon-in-key": "verify-deps-before-run;x=install\n",
+    "bom": "\ufeffverify-deps-before-run=install\n",
+    "feff-after-key": "verify-deps-before-run\ufeff=install\n",
+    "json-key": '"verify-deps-before-run"=install\n',
+    "single-quoted-json-key": "'\"verify-deps-before-run\"'=install\n",
+    "json-escaped-key": '"\\u0076erify-deps-before-run"=install\n',
+    "line-separator-in-value": "verify-deps-before-run=error\u2028install\n",
+    "crlf": "x=1\r\nverify-deps-before-run=install\r\n",
+    "null": "verify-deps-before-run=null\n",
 }
 NPMRC_SAFE = {
     "error": "verify-deps-before-run=error\n",
@@ -420,6 +433,8 @@ NPMRC_SAFE = {
     "comment": "# verify-deps-before-run=install\n; verify-deps-before-run=install\n",
     "other-keys": "registry=https://registry.npmjs.org/\n//r/:_authToken=${NPM_TOKEN}\n",
     "empty": "",
+    "inline-comment": "verify-deps-before-run=error ; pnpm fails rather than installs\n",
+    "quoted-safe": "verify-deps-before-run='false'\n",
 }
 
 
@@ -467,3 +482,71 @@ def test_a_gate_is_refused_when_npmrc_cannot_be_checked(tmp_path: Path, kind: st
     with pytest.raises(PolicyViolation, match="cannot be checked"):
         run_unit(ctx)
     assert not log.exists()
+
+
+# -------------------------------- the security review of the follow-up: corepack's env file
+
+
+@pytest.mark.parametrize("stage", ["gate", "prepare"])
+def test_corepack_reads_no_env_file_from_the_repository(tmp_path: Path, stage: str) -> None:
+    """corepack 0.32.0 loads `COREPACK_*` settings from the working directory's
+    `.corepack.env` (a `COREPACK_HOME` with a planted pnpm ran, even with
+    `COREPACK_ENABLE_NETWORK=0`), unless `COREPACK_ENV_FILE=0`. Gates and prepare."""
+    log = tmp_path / "env-file.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    program = bin_dir / "uv"
+    program.write_text(
+        COREPACK_RECORDER.format(python=sys.executable, log=str(log)).replace(
+            "COREPACK_ENABLE_NETWORK", "COREPACK_ENV_FILE"
+        )
+    )
+    program.chmod(0o755)
+    ctx = gate_ctx(tmp_path, [str(program), "test"], prepare=[str(program), "sync"])
+    if stage == "gate":
+        assert run_unit(ctx) is GateStatus.PASS
+    else:
+        outcome = run_prepare(ctx)
+        assert outcome is not None and outcome.result.status is GateStatus.PASS, outcome
+    assert log.read_text(encoding="utf-8") == "0"
+
+
+@pytest.mark.parametrize("path", [".corepack.env", "sub/.COREPACK.ENV"])
+def test_an_agent_cannot_add_a_corepack_env_file(path: str) -> None:
+    """Package configuration: a change holds prepare (`diff_checks.PACKAGE_CONFIG`)."""
+    assert is_package_config(path)
+    assert is_dependency_path(path)
+
+
+@pytest.mark.parametrize("name", ["pnpm.js", "pnpm.cjs", "pnpx.mjs", "pnpm", "corepack"])
+def test_a_changed_file_named_like_pnpm_does_not_refuse_a_gate(name: str) -> None:
+    """A `{paths}` value with a `/` names a workspace file, never the program on PATH
+    (`_names`): the node-pnpm stack's lint gate must not fail because a changed file is called
+    `src/pm/pnpm.js`."""
+    argv = ["node", "node_modules/eslint/bin/eslint.js", f"src/pm/{name}"]
+    policy = CommandPolicy(allowed_prefixes=(tuple(argv[:2]),))
+    assert check_argv(argv, policy, stage="gate", values=frozenset({2})) == tuple(argv)
+    with pytest.raises(PolicyViolation):  # the same text in the template is still read
+        check_argv(argv, CommandPolicy(allowed_prefixes=(tuple(argv),)), stage="gate")
+
+
+@pytest.mark.parametrize(
+    ("text", "installs"),
+    [
+        ("'1'=x\n", False),  # JSON.parse gives a number: no setting
+        ("'[[[[1]]]]'=verify\n", False),
+        ("'" + "[" * 100_000 + "'=x\n", False),  # too deep for json: the text is the key
+        ("verify-deps-before-run=err\\or\n", True),  # `\o` stays `\o`
+        ("verify-deps-before-run=warn\\\n", True),  # a trailing `\` stays
+        ("verify-deps-before-run=e\\#rror\n", True),  # `\#` is `#`: `e#rror`
+        ("verify-deps-before-run[]=error\n", False),
+        ("verify-deps-before-run=\n", True),  # an empty value
+        ("verify-deps-before-run='\"error\"'\n", False),
+        ("[verify-deps-before-run]\nx=1\n", False),  # a section names no setting
+        ("registry=https://x.invalid/verify-deps-before-run\n", True),  # its letters elsewhere
+        ("=verify-deps-before-run\n", True),  # a line ini skips
+    ],
+)
+def test_npmrc_is_read_as_ini_reads_it(tmp_path: Path, text: str, installs: bool) -> None:
+    (tmp_path / ".npmrc").write_text(text, encoding="utf-8")
+    assert npmrc_installs(tmp_path) is installs

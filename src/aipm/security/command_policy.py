@@ -508,14 +508,16 @@ def _check_install(argv: Argv) -> None:
             raise _deny(f"package installation is allowed only in the prepare step: {item!r}")
 
 
-def _launched(argv: Argv) -> list[Argv]:
+def _launched(argv: Argv, values: frozenset[int] = frozenset()) -> list[Argv]:
     """The package-manager argv each launcher in `argv` starts, read the way the policy reads
     `argv[0]`: `corepack pnpm dlx x` is `pnpm dlx x`, `node …/pnpm.cjs install` is `pnpm
     install`. A launcher shape the policy cannot read with certainty is refused (the owner's
-    decision on session 5, item 1)."""
+    decision on session 5, item 1). An expanded placeholder value with a `/` names a workspace
+    file, never a launcher or pnpm itself (`_names`)."""
+    workspace = {i for i in values if "/" in argv[i]}
     found: list[Argv] = []
     for index, arg in enumerate(argv):
-        program = _program(arg)
+        program = "" if index in workspace else _program(arg)
         rest = argv[index + 1 :]
         if program == "corepack":
             manager = rest[0].casefold() if rest else ""
@@ -532,7 +534,7 @@ def _launched(argv: Argv) -> list[Argv]:
             found.append((manager, *rest[1:]))
         elif program in _SCRIPT_RUNNERS:
             for position, later in enumerate(rest):
-                name = _entry_name(later)
+                name = "" if index + 1 + position in workspace else _entry_name(later)
                 if name == "pnpx" or name in PNPX_SCRIPTS:
                     raise _deny(f"{later!r} is pnpx, which fetches and runs a package; refused")
                 if name != "pnpm" and name not in PNPM_SCRIPTS:
@@ -547,11 +549,11 @@ def _launched(argv: Argv) -> list[Argv]:
     return found
 
 
-def _check_launchers(argv: Argv, stage: Stage) -> None:
+def _check_launchers(argv: Argv, stage: Stage, values: frozenset[int]) -> None:
     """What a launcher starts gets the checks `argv[0]` gets: fetch-and-run and, in a gate,
     installation. The other runners of pnpm, yarn and npm are `exec`, which is denied at any
     position (`_check_denied_anywhere`)."""
-    for launched in _launched(argv):
+    for launched in _launched(argv, values):
         fetch = _matches(FETCH_AND_RUN, launched)
         if fetch is not None:
             raise _deny(f"{' '.join(fetch)} fetches and runs a package; it is hard-denied")
@@ -587,7 +589,7 @@ def check_argv(
     _check_code_modules(checked)
     _check_toolchains(checked)
     _check_denied_anywhere(checked, values)
-    _check_launchers(checked, stage)
+    _check_launchers(checked, stage, values)
     if stage == "gate":
         _check_install(checked)
     return checked

@@ -135,3 +135,43 @@ def test_an_npm_script_calling_pnpm_is_refused_when_npmrc_installs(
     with pytest.raises(PolicyViolation, match="verify-deps-before-run"):
         run_command_gate("unit", cfg.gates["unit"], ctx, paths=[], required=True)
     assert not (ctx.root / "node_modules").exists()
+
+
+def test_a_corepack_env_file_cannot_plant_a_package_manager(
+    tmp_path: Path,
+    cache: Path,  # noqa: F811 - the fixture
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The security review of the follow-up: corepack 0.32.0 read `COREPACK_HOME` from the
+    repository's `.corepack.env` and ran a pnpm planted there, even with
+    `COREPACK_ENABLE_NETWORK=0`. Gates run with `COREPACK_ENV_FILE=0`."""
+    corepack = need("corepack")
+    need("node")
+    ctx = make_ctx(tmp_path, runtime=need("srt"))
+    home = ctx.root / "fresh-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    planted = ctx.root / ".cp" / "v1" / "pnpm" / "9.9.9"
+    (planted / "bin").mkdir(parents=True)
+    (planted / ".corepack").write_text(
+        json.dumps({"locator": {"name": "pnpm", "reference": "9.9.9"},
+                    "bin": {"pnpm": "./bin/pnpm.cjs"}, "hash": "x"}),
+        encoding="utf-8",
+    )  # fmt: skip
+    (planted / "package.json").write_text(
+        json.dumps({"name": "pnpm", "version": "9.9.9", "bin": {"pnpm": "./bin/pnpm.cjs"}}),
+        encoding="utf-8",
+    )
+    (planted / "bin" / "pnpm.cjs").write_text('console.log("PLANTED PNPM RAN")\n', encoding="utf-8")
+    (ctx.root / ".corepack.env").write_text(f"COREPACK_HOME={ctx.root / '.cp'}\n", encoding="utf-8")
+    (ctx.root / "package.json").write_text(
+        json.dumps({"name": "app", "version": "1.0.0", "packageManager": "pnpm@9.9.9",
+                    "scripts": {"test": "node -e 0"}}),
+        encoding="utf-8",
+    )  # fmt: skip
+    run = [corepack, "pnpm", "test"]
+    cfg = Config.model_validate({"allowed_executables": [run], "gates": {"unit": {"run": run}}})
+    ctx = dataclasses.replace(ctx, cfg=cfg, package_cache=cache)
+    outcome = run_command_gate("unit", cfg.gates["unit"], ctx, paths=[], required=True)
+    assert "PLANTED PNPM RAN" not in outcome.full_output, outcome.full_output
+    assert outcome.result.status is GateStatus.FAIL, outcome.full_output
