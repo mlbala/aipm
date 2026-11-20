@@ -58,6 +58,7 @@ All notable changes to aipm are recorded here. The format follows [Keep a Change
 - A directory where aipm expected a file (a `.gitignore` directory in a cloned repository, a trust store path) is refused instead of crashing.
 - Under `srt`, a command's `TMPDIR` is its own per-attempt temp dir. srt set it to `/tmp/claude`, which it never creates, so on Linux Go (`go vet`, `go test`) and pnpm failed with "no such file or directory". aipm now passes srt `CLAUDE_CODE_TMPDIR`, and `pass_env` refuses `CLAUDE_CODE_TMPDIR` and `CLAUDE_TMPDIR`, since srt makes the directory they name writable.
 - Removing a run's package cache crashed on Linux, where `os.chmod` cannot skip links; it now falls back to opening the directory without following links.
+- Under `srt`, a built-in scanner's temp files go in `<out>/tmp`, the `TMPDIR` it is given, instead of beside its report in `<out>`. The sandbox temp dir may now be a directory inside an allowed write path, if it is normalised, outside every denied path and not reached through a link below that path; anything else still exits 6.
 
 ### Security
 
