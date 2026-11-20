@@ -8,8 +8,8 @@ Checked by hand on pnpm 10.34.9 (the progress doc, session 5, item 2): without a
 `NPM_CONFIG_WORKSPACE_DIR` pinned to the worktree, pnpm read only the worktree root's file, for
 every spelling; `--filter` and `-r` never read a package's own file. The directory's `.npmrc`
 is still read (pnpm takes the project `.npmrc` from the directory): its
-`verify-deps-before-run` loses to the gate's variables, and its `lockfile-dir` is the open item
-in the progress doc.
+`verify-deps-before-run` loses to the gate's variables, and its `lockfile-dir` loses to prepare's
+`--lockfile-dir=.`.
 
 Needs pnpm and srt on PATH (`.github/sandbox/node_modules/.bin` locally and in CI's sandbox
 job, where `AIPM_REQUIRE_REAL_SRT=1` turns a missing tool into a failure). No network: the
@@ -232,8 +232,9 @@ def test_prepare_keeps_the_lockfile_and_virtual_store_in_the_worktree(
     """A committed `lockfile-dir` moved the lockfile and the virtual store (the relative
     `--virtual-store-dir` is resolved against it) outside the worktree: without srt, every
     task's `node_modules` linked into one store there, outside the diff checks (the M-2 class);
-    under srt prepare failed. Checked by hand on pnpm 10.34.9: `--lockfile-dir=<worktree>`
-    beats all three sources; `npm_config_lockfile_dir` beats only the `.npmrc` ones."""
+    under srt prepare failed. Checked by hand on pnpm 10.34.9: `--lockfile-dir=.` (prepare
+    runs in the worktree) beats all three sources; `npm_config_lockfile_dir` beats only the
+    `.npmrc` ones."""
     pnpm = need("pnpm")
     elsewhere = tmp_path / "elsewhere"
     ctx = worktree(tmp_path, cache, sandboxed=sandboxed, sub_settings="")

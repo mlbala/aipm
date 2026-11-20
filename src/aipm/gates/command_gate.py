@@ -309,7 +309,7 @@ def run_prepare(ctx: GateContext) -> CommandOutcome | None:
     argv[0] = resolve_program(argv[0], ctx.root)
     argv[1:1] = (  # after the policy check: aipm's own
         *cache_args(argv[0], ctx.package_dir),
-        *lockfile_args(argv[0], ctx.root),
+        *lockfile_args(argv[0]),
     )
     profile = sandbox_for(ctx, ProcessKind.PREPARE, min_network(prepare.network, ctx), argv)
     started = time.monotonic()

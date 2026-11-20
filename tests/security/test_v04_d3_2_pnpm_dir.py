@@ -108,7 +108,8 @@ def test_prepare_in_a_sub_directory_gets_the_cache_flags_first(
     tmp_path: Path, flag: list[str]
 ) -> None:
     """`cache_args` and `lockfile_args` go right after `pnpm`, before the directory flag, and
-    the pin and the lockfile directory are the worktree root, not the directory the flag names."""
+    the pin and the lockfile directory (`.`, prepare's working directory) are the worktree root,
+    not the directory the flag names."""
     program, log = pnpm_recorder(tmp_path)
     ctx = ctx_for(tmp_path, gate=[program, "test"], prepare=[program, *flag, "install"])
     outcome = run_prepare(ctx)
@@ -121,7 +122,7 @@ def test_prepare_in_a_sub_directory_gets_the_cache_flags_first(
         f"--cache-dir={cache / 'pnpm-cache'}",
         "--virtual-store-dir=node_modules/.pnpm",
         "--modules-dir=node_modules",
-        f"--lockfile-dir={ctx.root}",
+        "--lockfile-dir=.",
         *flag,
         "install",
     ]
@@ -154,10 +155,10 @@ def test_a_sub_directory_file_is_not_checked_because_pnpm_never_reads_it(
     assert log.exists()
 
 
-def test_only_pnpm_gets_the_lockfile_flag(tmp_path: Path) -> None:
+def test_only_pnpm_gets_the_lockfile_flag() -> None:
     """Review of item 2: a committed `lockfile-dir` moved prepare's lockfile and virtual store
     outside the worktree; the flag beats `.npmrc` and `pnpm-workspace.yaml` (checked by hand on
     pnpm 10.34.9)."""
-    assert lockfile_args("/opt/bin/pnpm", tmp_path) == (f"--lockfile-dir={tmp_path}",)
+    assert lockfile_args("/opt/bin/pnpm") == ("--lockfile-dir=.",)
     for other in ("npm", "uv", "go", "cargo", "/usr/bin/python3", "pnpx", "corepack"):
-        assert lockfile_args(other, tmp_path) == ()
+        assert lockfile_args(other) == ()
