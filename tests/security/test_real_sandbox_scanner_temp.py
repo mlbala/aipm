@@ -10,8 +10,13 @@ Checked by hand on srt 0.0.81 (the progress doc, session 5, item 4). Runs throug
 
 import json
 import os
+import shutil
 import sys
+import tempfile
+from collections.abc import Iterator
 from pathlib import Path
+
+import pytest
 
 from aipm.execution.sandbox import launcher_for
 from aipm.scanners.base import ScanContext, Tool, run_tool
@@ -39,8 +44,19 @@ with open(sys.argv[1], "w") as out:
 """
 
 
-def test_a_scanner_writes_its_temp_files_in_its_own_tmp(tmp_path: Path) -> None:
+@pytest.fixture
+def short_tmp() -> Iterator[Path]:
+    """A short base dir, as `aipm scan` makes with `mkdtemp`. On Linux srt puts its socat bridge
+    sockets in its own `TMPDIR`, which `run_tool` sets to `<out>/tmp`; under pytest's `tmp_path`
+    the socket path passes the 107-byte limit and srt fails ("Failed to create bridge sockets")."""
+    base = Path(tempfile.mkdtemp(prefix="aipm-"))
+    yield base
+    shutil.rmtree(base, ignore_errors=True)
+
+
+def test_a_scanner_writes_its_temp_files_in_its_own_tmp(short_tmp: Path) -> None:
     srt = need("srt")
+    tmp_path = short_tmp
     repo = tmp_path / "repo"
     repo.mkdir()
     out = tmp_path / "scan-out"
