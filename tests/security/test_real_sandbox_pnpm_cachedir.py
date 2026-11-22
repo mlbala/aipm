@@ -16,9 +16,19 @@ fails `test_a_committed_cache_dir_is_never_read`. `pnpm cache list` and `cache v
 `--cache-dir` ("Unknown option") and list the user's own cache when it comes with the other
 flags; `pnpm config get` refuses `--store-dir`. Neither can observe `cache_args`.
 
+`NO_OFFLINE_META` is also what pnpm prints when it reads no cache at all, so the committed-dir
+test first runs the same install without `--cache-dir` (the rest of prepare's flags and
+variables, under the same profile) and requires `NO_OFFLINE_TARBALL`: the committed `cacheDir` is
+live, and only the flag keeps pnpm from it (security review). A pnpm that dropped or renamed the
+key fails that control. The proof is read-side; the write checks (nothing made or changed at the
+committed path) hold anyway, because pnpm writes its metadata cache only after a download.
+
+The project's `.npmrc` pins the registry, because the metadata cache is keyed by registry host
+and a user's `~/.npmrc` could name a mirror. Prepare's network profile is `none`.
+
 Needs pnpm and srt on PATH (`.github/sandbox/node_modules/.bin` locally and in CI's sandbox
 job, where `AIPM_REQUIRE_REAL_SRT=1` turns a missing tool into a failure). No network: the
-install is offline and fails before any download.
+install is offline and fails before any download, and under srt the profile allows none.
 """
 
 import dataclasses
@@ -29,18 +39,24 @@ import pytest
 
 from aipm.config.schema import Config
 from aipm.domain.models import GateStatus
+from aipm.execution.package_cache import cache_args, cache_env, lockfile_args, pnpm_guard_env
+from aipm.execution.process import build_env, run_safe
+from aipm.execution.sandbox import ProcessKind
 from aipm.gates.command_gate import run_prepare
 from aipm.gates.context import GateContext
 from tests.security.test_gates import make_ctx
 from tests.security.test_real_sandbox import (
+    TIMEOUT_S,
     cache,  # noqa: F401 - the fixture
     need,
+    run,
 )
 
 DEP = "aipm-probe-dep"
 META_DIRS = ("metadata-v1.3", "metadata-full-v1.3", "metadata-ff-v1.3")
 """pnpm 10's metadata cache layouts (abbreviated, full, full-filtered); planted in all three, so
-whichever pnpm reads holds the entry. A pnpm that renamed them would fail every test closed."""
+whichever pnpm reads holds the entry. A pnpm that renamed them would fail the tests that expect
+`FOUND`, the committed-dir test's control included."""
 FOUND = "ERR_PNPM_NO_OFFLINE_TARBALL"
 MISSING = "ERR_PNPM_NO_OFFLINE_META"
 
@@ -85,10 +101,14 @@ def _ctx(tmp_path: Path, run_cache: Path, *, sandboxed: bool) -> GateContext:
         json.dumps({"name": "app", "version": "1.0.0", "dependencies": {DEP: "1.0.0"}}),
         encoding="utf-8",
     )
+    (ctx.root / ".npmrc").write_text("registry=https://registry.npmjs.org/\n", encoding="utf-8")
     cfg = Config.model_validate(
         {
             "allowed_executables": [[pnpm, "install"]],
-            "prepare": {"run": [pnpm, "install", "--offline", "--ignore-scripts"]},
+            "prepare": {
+                "run": [pnpm, "install", "--offline", "--ignore-scripts"],
+                "network": "none",
+            },
         }
     )
     return dataclasses.replace(ctx, cfg=cfg, package_cache=run_cache)
@@ -108,10 +128,32 @@ def _prepare(ctx: GateContext) -> str:
     assert outcome is not None and outcome.result.status is GateStatus.FAIL, (
         outcome and outcome.full_output
     )
-    output = outcome.full_output
+    return _code(outcome.full_output)
+
+
+def _code(output: str) -> str:
     found, missing = FOUND in output, MISSING in output
     assert found != missing, output
     return FOUND if found else MISSING
+
+
+def _without_the_flag(ctx: GateContext, run_cache: Path, *, sandboxed: bool) -> str:
+    """Prepare's install with everything but `--cache-dir`, as prepare would run it without the
+    flag: `npm_config_cache_dir` (from `cache_env`) still names the run's cache."""
+    pnpm = need("pnpm")
+    flags = [a for a in cache_args(pnpm, run_cache) if not a.startswith("--cache-dir=")]
+    argv = [pnpm, *flags, *lockfile_args(pnpm), "install", "--offline", "--ignore-scripts"]
+    temp = ctx.root.parent / f"{ctx.root.name}-temp"
+    extra = {**cache_env(pnpm, run_cache, temp), **pnpm_guard_env(pnpm, ctx.root)}
+    if sandboxed:
+        result = run(ProcessKind.PREPARE, argv, workspace=ctx.root, cache=run_cache, extra=extra)
+    else:
+        temp.mkdir(mode=0o700, exist_ok=True)
+        env = build_env(extra={"TMPDIR": str(temp), **extra})
+        result = run_safe(argv, cwd=ctx.root, env=env, timeout_s=TIMEOUT_S,
+                          max_output_bytes=200_000)  # fmt: skip
+    assert result.returncode != 0, result
+    return _code((result.stdout + result.stderr).decode("utf-8", errors="replace"))
 
 
 # ------------------------------------------------------------------ a committed cacheDir
@@ -125,12 +167,15 @@ def test_a_committed_cache_dir_is_never_read(
     sandboxed: bool,
     spelling: str,
 ) -> None:
-    """Metadata only in the committed dir: pnpm does not see it, and leaves the dir as it was.
-    Without `--cache-dir` the file beats `npm_config_cache_dir` and pnpm finds it."""
+    """Metadata only in the committed dir: without `--cache-dir` the file beats
+    `npm_config_cache_dir` and pnpm finds it (the control); with prepare's flags pnpm does not
+    see it, and the dir is left as it was."""
     ctx = _ctx(tmp_path, cache, sandboxed=sandboxed)
     committed = _commit(ctx, tmp_path, spelling)
     _plant(committed)
     before = _tree(committed)
+    assert _without_the_flag(ctx, cache, sandboxed=sandboxed) == FOUND
+    assert _tree(committed) == before
     assert _prepare(ctx) == MISSING
     assert _tree(committed) == before
 
