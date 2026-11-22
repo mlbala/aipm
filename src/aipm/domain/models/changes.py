@@ -77,8 +77,8 @@ class ChangeSet:
 class GateWorkspace:
     """Where gates run: the work tree, the attempt's private temp dir and the base commit.
 
-    `temp_dir` is mode 0700, outside the work tree; `{report_file}` and sandbox settings live
-    there, and it is removed when the attempt ends.
+    `temp_dir` is mode 0700, outside the work tree; `{report_file}` lives there, and it is
+    removed when the attempt ends. srt's settings go in a private dir per call instead.
     """
 
     root: Path

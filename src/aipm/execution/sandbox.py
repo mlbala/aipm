@@ -1,7 +1,8 @@
 """Sandboxing with `srt`, from the table in SECURITY.md §9.1 (C-13, ADR-0013, ADR-0020).
 
-`profile_for` builds the rules for one process, `wrap` writes them to a 0600 settings file in the
-per-attempt temp dir and returns the argv that runs under `srt`, and `resolve_sandbox` decides
+`profile_for` builds the rules for one process, `wrap` writes them to a 0600 settings file in its
+settings dir (`run_safe` makes that a private dir per call, `check_private_dir`) and returns the
+argv that runs under `srt`, and `resolve_sandbox` decides
 whether a sandbox can be used. `security.require_sandbox` makes a missing one exit 8; otherwise
 every use prints a warning.
 
@@ -255,7 +256,7 @@ def _inside_allowed(temp: Path, profile: SandboxProfile) -> bool:
     if entry is None:
         return False
     denied = (*profile.deny_write, *profile.deny_read)
-    if any(temp.is_relative_to(d) or _holds_folded(d, temp) for d in denied):
+    if any(temp.is_relative_to(d) or holds_folded(d, temp) for d in denied):
         return False
     lineage = (temp, *temp.parents)
     if any(p.full_match(pat) for pat in profile.deny_write_patterns for p in lineage):
@@ -266,7 +267,7 @@ def _inside_allowed(temp: Path, profile: SandboxProfile) -> bool:
     return os.path.realpath(temp) == str(expected)
 
 
-def _holds_folded(parent: Path, path: Path) -> bool:
+def holds_folded(parent: Path, path: Path) -> bool:
     """`holds`, with case folded: a deny entry spelled through a link (`/var` and
     `/private/var`), or in another case on a case-insensitive disk, still covers `path`. On a
     case-sensitive disk this refuses more than it must, never less."""
@@ -291,6 +292,30 @@ def _link_below(entry: Path, temp: Path) -> bool:
         if stat.S_ISLNK(mode):
             return True
     return False
+
+
+SRT_OWN_WRITABLE: tuple[str, ...] = ("/tmp/claude", "/private/tmp/claude")  # noqa: S108 - refused, never used
+"""What srt 0.0.81 makes writable for every command by itself (`SANDBOX_OWN_WRITE_PATHS`)."""
+SRT_HOME_WRITABLE: tuple[str, ...] = (".npm/_logs", ".claude/debug")
+"""What srt 0.0.81 makes writable under home unless read-denied (`HOME_CONVENIENCE_WRITE_DIRS`),
+relative to home."""
+
+
+def check_private_dir(host: Path, profile: SandboxProfile) -> None:
+    """Refuse (exit 6) a private dir for srt (its settings and host-side files) that the
+    sandboxed command could write: inside the profile's `allow_write` or srt's own writable
+    paths, compared as text and with links resolved and case folded."""
+    home = Path.home()
+    writable = (
+        *profile.allow_write,
+        *(Path(p) for p in SRT_OWN_WRITABLE),
+        *(home / rel for rel in SRT_HOME_WRITABLE),
+    )
+    if any(host.is_relative_to(p) or holds_folded(p, host) for p in writable):
+        raise PolicyViolation(
+            f"srt's temp dir {host} would be inside a path the sandboxed process may write",
+            hint="Point TMPDIR outside the repository, aipm's working directories and /tmp/claude.",
+        )
 
 
 type Runtime = str | tuple[str, ...]
@@ -466,6 +491,7 @@ def wrap(argv: Sequence[str], profile: SandboxProfile) -> tuple[str, ...]:
         )
     check_shell_safe(argv)
     document = settings_document(profile)
+    temp_env(profile)  # a refused temp dir (a scanner's settings dir) gets nothing written
     name = f"srt-{profile.kind.value}-{secrets.token_hex(6)}.json"
     target = profile.settings_dir / name
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW

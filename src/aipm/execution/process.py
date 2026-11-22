@@ -17,20 +17,29 @@ sends SIGTERM, then SIGKILL (ARCHITECTURE §12.6). A stopped call returns its re
 
 import asyncio
 import contextlib
+import dataclasses
 import math
 import os
 import re
+import shutil
 import signal
 import subprocess  # noqa: TID251 - the one process module (ARCHITECTURE §5.1)
+import tempfile
 import threading
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Generator, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, cast
 
 from aipm.domain.errors import PolicyViolation, UsageError
-from aipm.execution.sandbox import LEGACY_TEMP_ENV, SandboxProfile, temp_env, wrap
+from aipm.execution.sandbox import (
+    LEGACY_TEMP_ENV,
+    SandboxProfile,
+    check_private_dir,
+    temp_env,
+    wrap,
+)
 
 BASE_ENV_ALLOWLIST: tuple[str, ...] = (
     "PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "USER",
@@ -136,6 +145,51 @@ def _check_call(
     sandboxed.pop(LEGACY_TEMP_ENV, None)
     sandboxed.update(temp_env(sandbox))  # aipm's value, never the caller's
     return wrapped, sandboxed
+
+
+@contextlib.contextmanager
+def _prepared(
+    argv: object,
+    *,
+    cwd: Path,
+    env: object,
+    timeout_s: float,
+    max_output_bytes: int,
+    sandbox: SandboxProfile | None,
+) -> Generator[tuple[tuple[str, ...], dict[str, str]]]:
+    """`_check_call`, and for a sandboxed call a private dir for srt itself, removed after.
+
+    srt reads its settings file once at startup and keeps its host-side files (its socat and
+    mux sockets, the empty mount source, the credential-mask store, the bwrap arguments) in its
+    own `TMPDIR`. Both used to be in the attempt temp dir or a scanner's `<out>/tmp`, which the
+    command may write: on macOS a process left behind by an earlier command (R-14) could rewrite
+    the next command's settings before srt read them. So each call gets a fresh 0700 dir outside
+    every path this call's profile, and srt itself, makes writable (`check_private_dir`, exit 6
+    otherwise), holding the settings
+    file and serving as srt's `TMPDIR`.
+
+    The command's own `TMPDIR` is still the profile's temp dir: srt sets it from
+    `CLAUDE_CODE_TMPDIR` whenever it has a filesystem policy (on Linux, inside its network
+    proxy setup, which aipm's always-present `allowedDomains` turns on).
+    """
+    if sandbox is None:
+        yield _check_call(
+            argv, cwd=cwd, env=env, timeout_s=timeout_s, max_output_bytes=max_output_bytes,
+            sandbox=None,
+        )  # fmt: skip
+        return
+    host = Path(tempfile.mkdtemp(prefix="aipm-srt-"))
+    try:
+        check_private_dir(host, sandbox)
+        temp = sandbox.temp_dir if sandbox.temp_dir is not None else sandbox.settings_dir
+        private = dataclasses.replace(sandbox, settings_dir=host, temp_dir=temp)
+        checked, environment = _check_call(
+            argv, cwd=cwd, env=env, timeout_s=timeout_s, max_output_bytes=max_output_bytes,
+            sandbox=private,
+        )  # fmt: skip
+        yield checked, {**environment, "TMPDIR": str(host)}
+    finally:
+        shutil.rmtree(host, ignore_errors=True)
 
 
 class _Capture:
@@ -258,7 +312,7 @@ def run_safe(
     sandbox: SandboxProfile | None = None,
 ) -> ProcessResult:
     """Run one process safely and return its result."""
-    checked, environment = _check_call(
+    call = _prepared(
         argv,
         cwd=cwd,
         env=env,
@@ -266,24 +320,25 @@ def run_safe(
         max_output_bytes=max_output_bytes,
         sandbox=sandbox,
     )
-    captures = (_Capture(max_output_bytes), _Capture(max_output_bytes))
-    start = time.monotonic()
-    proc = subprocess.Popen(  # noqa: S603 - argv list, no shell, constructed env
-        checked,
-        cwd=cwd,
-        env=environment,
-        stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        start_new_session=True,
-        close_fds=True,
-        shell=False,
-    )
-    _track(proc.pid)
-    try:
-        return _finish(proc, checked, captures, stdin, timeout_s=timeout_s, start=start)
-    finally:
-        _untrack(proc.pid)
+    with call as (checked, environment):
+        captures = (_Capture(max_output_bytes), _Capture(max_output_bytes))
+        start = time.monotonic()
+        proc = subprocess.Popen(  # noqa: S603 - argv list, no shell, constructed env
+            checked,
+            cwd=cwd,
+            env=environment,
+            stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+            close_fds=True,
+            shell=False,
+        )
+        _track(proc.pid)
+        try:
+            return _finish(proc, checked, captures, stdin, timeout_s=timeout_s, start=start)
+        finally:
+            _untrack(proc.pid)
 
 
 def _finish(
@@ -398,7 +453,7 @@ async def run_safe_async(
     sandbox: SandboxProfile | None = None,
 ) -> ProcessResult:
     """The asyncio variant of `run_safe`. Cancelling it kills the process group."""
-    checked, environment = _check_call(
+    call = _prepared(
         argv,
         cwd=cwd,
         env=env,
@@ -406,23 +461,24 @@ async def run_safe_async(
         max_output_bytes=max_output_bytes,
         sandbox=sandbox,
     )
-    captures = (_Capture(max_output_bytes), _Capture(max_output_bytes))
-    start = time.monotonic()
-    proc = await asyncio.create_subprocess_exec(  # noqa: TID251 - argv list, constructed env
-        *checked,
-        cwd=cwd,
-        env=environment,
-        stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        start_new_session=True,
-        close_fds=True,
-    )
-    _track(proc.pid)
-    try:
-        return await _afinish(proc, checked, captures, stdin, timeout_s=timeout_s, start=start)
-    finally:
-        _untrack(proc.pid)
+    with call as (checked, environment):
+        captures = (_Capture(max_output_bytes), _Capture(max_output_bytes))
+        start = time.monotonic()
+        proc = await asyncio.create_subprocess_exec(  # noqa: TID251 - argv list, constructed env
+            *checked,
+            cwd=cwd,
+            env=environment,
+            stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+            close_fds=True,
+        )
+        _track(proc.pid)
+        try:
+            return await _afinish(proc, checked, captures, stdin, timeout_s=timeout_s, start=start)
+        finally:
+            _untrack(proc.pid)
 
 
 async def _afinish(
