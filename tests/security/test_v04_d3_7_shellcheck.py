@@ -6,13 +6,15 @@ authorship rules, so a quoting bug in any of them is a security bug. `security.y
 added without being named there fails this test.
 
 The workflow is read with aipm's safe YAML loader and checked as written; nothing here runs on
-GitHub. A shell script is a file git tracks (or would track) whose name ends in `.sh` or whose
-first line is a `sh`, `bash` or `dash` shebang.
+GitHub. A shell script is a file git tracks (or would track) whose name ends in a shell suffix
+or whose shebang starts a shell. A shebang naming an interpreter this test does not know fails,
+so a shell spelled another way is never missed. The job may hold only the keys and steps it
+needs, so a later `shell:`, `env:`, `.shellcheckrc` or PATH change cannot make it check nothing.
 """
 
 import re
 import shlex
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from aipm.state.yamlio import load_yaml
@@ -20,7 +22,13 @@ from tests.conftest import REPO_ROOT, run_git
 
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "security.yml"
 
-SHEBANG = re.compile(rb"#!\s*(?:/usr/bin/env\s+(?:-S\s+)?)?(?:\S*/)?(?:sh|bash|dash)(?:\s|$)")
+SHELLS = {"sh", "bash", "dash", "ksh", "mksh", "ash", "busybox"}
+"""Interpreters that make a file a shell script (shellcheck reads it as POSIX sh here)."""
+
+OTHER_INTERPRETERS = {"python3"}
+"""Interpreters known not to be shells; any other shebang fails until this test knows it."""
+
+SUFFIXES = (".sh", ".bash", ".ksh", ".dash", ".bats")
 
 KNOWN = {
     "install.sh",
@@ -34,7 +42,14 @@ KNOWN = {
 }
 """The shell scripts known when the job was added, so a detector that finds nothing fails."""
 
+JOB_KEYS = {"name", "runs-on", "permissions", "steps"}
+STEP_KEYS = {"name", "uses", "with", "run"}
+SCAN_OPTIONS = ["--norc", "--severity=style", "--shell=sh"]
+
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
+DIRECTIVE = re.compile(r"#\s*shellcheck\s+(.*)")
+DISABLE = re.compile(r"disable=(SC\d{4}(?:,SC\d{4})*)\s+#\s*\S")
+"""`# shellcheck disable=SCxxxx # reason`: named checks only, each with a reason."""
 
 
 def as_dict(value: object) -> dict[str, Any]:
@@ -42,30 +57,49 @@ def as_dict(value: object) -> dict[str, Any]:
     return value  # pyright: ignore[reportUnknownVariableType]
 
 
-def is_shell_script(path: Path) -> bool:
-    if path.name.endswith(".sh"):
-        return True
+def interpreter(line: bytes) -> str | None:
+    """The interpreter a `#!` line starts, as a bare name, or None without a shebang.
+
+    `env` is looked through, skipping its options; an `env` option that takes a value
+    (`-u NAME`) leaves NAME, which is an unknown interpreter and so fails closed.
+    """
+    if not line.startswith(b"#!"):
+        return None
+    words = line[2:].decode("utf-8", errors="replace").split()
+    if not words:
+        return ""
+    name = PurePosixPath(words[0]).name
+    if name == "env":
+        rest = [word for word in words[1:] if not word.startswith("-")]
+        name = PurePosixPath(rest[0]).name if rest else ""
+    return name
+
+
+def first_line(path: Path) -> bytes:
     with path.open("rb") as handle:
-        first = handle.readline(256)
-    return SHEBANG.match(first) is not None
+        return handle.readline(256)
+
+
+def repository_files() -> list[str]:
+    """Every tracked file, plus untracked files that are not ignored."""
+    out = run_git(REPO_ROOT, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
+    return sorted({name for name in out.split("\0") if name and (REPO_ROOT / name).is_file()})
 
 
 def shell_scripts() -> set[str]:
-    """Every tracked file, plus untracked files that are not ignored, that is a shell script."""
-    out = run_git(REPO_ROOT, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
-    names = {name for name in out.split("\0") if name}
     return {
         name
-        for name in names
-        if (REPO_ROOT / name).is_file()
-        and not (REPO_ROOT / name).is_symlink()
-        and is_shell_script(REPO_ROOT / name)
+        for name in repository_files()
+        if name.endswith(SUFFIXES) or interpreter(first_line(REPO_ROOT / name)) in SHELLS
     }
 
 
+def workflow() -> dict[str, Any]:
+    return as_dict(load_yaml(WORKFLOW.read_text(encoding="utf-8"), source=WORKFLOW.name))
+
+
 def job() -> dict[str, Any]:
-    data = as_dict(load_yaml(WORKFLOW.read_text(encoding="utf-8"), source=WORKFLOW.name))
-    jobs = as_dict(data["jobs"])
+    jobs = as_dict(workflow()["jobs"])
     assert "shellcheck" in jobs, sorted(jobs)
     return as_dict(jobs["shellcheck"])
 
@@ -91,9 +125,9 @@ def scan_argv() -> list[str]:
     return found[0]
 
 
-def checkout_shas(data: dict[str, Any]) -> set[str]:
+def checkout_shas() -> set[str]:
     shas: set[str] = set()
-    for name, other in as_dict(data["jobs"]).items():
+    for name, other in as_dict(workflow()["jobs"]).items():
         if name == "shellcheck":
             continue
         for step in as_dict(other).get("steps", []):
@@ -108,10 +142,55 @@ def test_the_detector_finds_the_known_scripts() -> None:
 
 
 def test_the_detector_reads_shebangs() -> None:
-    for line in (b"#!/bin/sh\n", b"#!/bin/bash -e\n", b"#!/usr/bin/env bash\n", b"#! /bin/dash"):
-        assert SHEBANG.match(line), line
-    for line in (b"#!/usr/bin/env python3\n", b"#!/bin/shx\n", b"# /bin/sh\n", b"sh\n"):
-        assert not SHEBANG.match(line), line
+    shells = [
+        b"#!/bin/sh\n",
+        b"#!/bin/bash -e\n",
+        b"#!/usr/bin/env bash\n",
+        b"#! /bin/dash",
+        b"#!/usr/bin/env -S -i bash\n",
+        b"#!/bin/env sh\n",
+        b"#!/usr/local/bin/env ksh\n",
+        b"#!/bin/busybox sh\n",
+    ]
+    for line in shells:
+        assert interpreter(line) in SHELLS, line
+    assert interpreter(b"#!/usr/bin/env python3\n") == "python3"
+    assert interpreter(b"#!/usr/bin/env -u X sh\n") not in SHELLS | OTHER_INTERPRETERS
+    for line in (b"#!/bin/shx\n", b"#!\n", b"#!/usr/bin/env\n"):
+        assert interpreter(line) not in SHELLS | OTHER_INTERPRETERS, line
+    for line in (b"# /bin/sh\n", b"sh\n", b""):
+        assert interpreter(line) is None, line
+
+
+def test_every_shebang_names_a_known_interpreter() -> None:
+    unknown = {
+        name: found
+        for name in repository_files()
+        if (found := interpreter(first_line(REPO_ROOT / name))) is not None
+        and found not in SHELLS | OTHER_INTERPRETERS
+    }
+    assert unknown == {}, "a shell script spelled another way, or a new interpreter"
+
+
+def test_no_shell_script_is_a_symlink() -> None:
+    links = [name for name in shell_scripts() if (REPO_ROOT / name).is_symlink()]
+    assert links == [], "shellcheck the target, not a link to it"
+
+
+def test_no_shellcheckrc_changes_what_is_checked() -> None:
+    rc = [name for name in repository_files() if PurePosixPath(name).name == ".shellcheckrc"]
+    assert rc == []
+
+
+def test_every_directive_disables_named_checks_with_a_reason() -> None:
+    problems: list[str] = []
+    for name in sorted(shell_scripts()):
+        text = (REPO_ROOT / name).read_text(encoding="utf-8")
+        for number, line in enumerate(text.splitlines(), start=1):
+            directive = DIRECTIVE.search(line)
+            if directive and not DISABLE.match(directive.group(1)):
+                problems.append(f"{name}:{number}: {line.strip()}")
+    assert problems == [], problems
 
 
 def test_the_job_is_named_and_runs_on_ubuntu() -> None:
@@ -123,29 +202,33 @@ def test_the_job_reads_contents_only() -> None:
     assert job().get("permissions") == {"contents": "read"}
 
 
+def test_the_job_holds_only_what_it_needs() -> None:
+    assert set(job()) <= JOB_KEYS, sorted(set(job()) - JOB_KEYS)
+    for step in steps():
+        assert set(step) <= STEP_KEYS, (step.get("name"), sorted(set(step) - STEP_KEYS))
+    assert "defaults" not in workflow()
+    assert "env" not in workflow()
+
+
 def test_the_checkout_is_pinned_and_keeps_no_credentials() -> None:
-    data = as_dict(load_yaml(WORKFLOW.read_text(encoding="utf-8"), source=WORKFLOW.name))
-    checkouts = [step for step in steps() if str(step.get("uses", "")).startswith("actions/")]
-    assert len(checkouts) == 1, checkouts
-    uses = str(checkouts[0]["uses"])
-    assert uses.startswith("actions/checkout@"), uses
-    sha = uses.split("@", 1)[1]
-    assert FULL_SHA.fullmatch(sha), uses
-    assert checkout_shas(data) == {sha}, "the same pinned checkout as the other jobs"
-    assert as_dict(checkouts[0].get("with"))["persist-credentials"] is False
-
-
-def test_only_the_pinned_checkout_is_used() -> None:
     uses = [str(step["uses"]) for step in steps() if "uses" in step]
     assert len(uses) == 1, uses
+    assert uses[0].startswith("actions/checkout@"), uses
+    sha = uses[0].split("@", 1)[1]
+    assert FULL_SHA.fullmatch(sha), uses
+    assert checkout_shas() == {sha}, "the same pinned checkout as the other jobs"
+    checkout = next(step for step in steps() if "uses" in step)
+    assert as_dict(checkout.get("with")) == {"persist-credentials": False}
 
 
 def test_the_job_prints_the_version_and_fails_without_shellcheck() -> None:
     text = "\n".join(runs())
     assert "shellcheck --version" in text
     assert "command -v shellcheck" in text
-    for fetch in ("curl", "wget", "http://", "https://"):
-        assert fetch not in text, f"no binary is downloaded ({fetch})"
+    banned = ("curl", "wget", "://", "GITHUB_PATH", "GITHUB_ENV", "PATH=", "ln ", "alias")
+    banned += ("add-apt-repository", "sources.list", "SHELLCHECK_OPTS", "dpkg -i", ".deb")
+    for word in banned:
+        assert word not in text, f"the job must not use {word!r}"
 
 
 def test_the_job_cannot_pass_by_skipping() -> None:
@@ -156,13 +239,11 @@ def test_the_job_cannot_pass_by_skipping() -> None:
         assert "if" not in step, step
 
 
-def test_the_scan_uses_posix_sh_and_style_severity() -> None:
+def test_the_scan_uses_posix_sh_style_severity_and_no_rc_file() -> None:
     argv = scan_argv()
     assert argv[0] == "shellcheck"
-    assert "--shell=sh" in argv
-    assert "--severity=style" in argv
-    options = [arg for arg in argv[1:] if arg.startswith("-")]
-    assert sorted(options) == ["--severity=style", "--shell=sh"], options
+    options = sorted(arg for arg in argv[1:] if arg.startswith("-"))
+    assert options == SCAN_OPTIONS, options
 
 
 def test_the_scan_names_exactly_the_shell_scripts() -> None:

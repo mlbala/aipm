@@ -123,11 +123,11 @@ jobs:
           command -v shellcheck || { echo "::error::shellcheck is not installed"; exit 1; }
           shellcheck --version
 
-      # Every shell script, named one by one: tests/security/test_v04_d3_7_shellcheck.py fails
-      # when a script is added and not named here.
+      # Every shell script, named one by one; --norc so no .shellcheckrc can turn checks off.
+      # tests/security/test_v04_d3_7_shellcheck.py fails when a script is added and not named here.
       - name: Check the shell scripts
         run: >-
-          shellcheck --shell=sh --severity=style
+          shellcheck --norc --shell=sh --severity=style
           install.sh
           .githooks/pre-push
           .githooks/commit-msg
