@@ -11,7 +11,7 @@ for arg in "$@"; do
 done
 sep=""
 printf '{"results":[' > "$out"
-for f in $(grep -rl "eval(" "$target" 2>/dev/null); do
+grep -rl "eval(" "$target" 2>/dev/null | while IFS= read -r f; do
   printf '%s{"check_id":"python.lang.security.audit.eval-detected","path":"%s","start":{"line":1},"extra":{"message":"Detected eval","severity":"ERROR"}}' \
     "$sep" "$f" >> "$out"
   sep=","

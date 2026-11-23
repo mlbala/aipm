@@ -100,3 +100,39 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: uv run --frozen --only-group dev zizmor --format=github .github/
+
+  shellcheck:
+    name: Shell scripts (shellcheck)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The runner image installs shellcheck from Ubuntu's signed archive (ubuntu-24.04: 0.9.0).
+      # Should an image drop it, it comes from the same archive; a binary is never downloaded.
+      - name: Check shellcheck is installed
+        run: |
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update -q
+            sudo apt-get install -y -q --no-install-recommends shellcheck
+          fi
+          command -v shellcheck || { echo "::error::shellcheck is not installed"; exit 1; }
+          shellcheck --version
+
+      # Every shell script, named one by one; --norc so no .shellcheckrc can turn checks off.
+      # tests/security/test_v04_d3_7_shellcheck.py fails when a script is added and not named here.
+      - name: Check the shell scripts
+        run: >-
+          shellcheck --norc --shell=sh --severity=style
+          install.sh
+          .githooks/pre-push
+          .githooks/commit-msg
+          tests/fakes/bin/gitleaks
+          tests/fakes/bin/osv-scanner
+          tests/fakes/bin/semgrep
+          tests/fakes/bin/srt
+          tests/fakes/bin/trivy

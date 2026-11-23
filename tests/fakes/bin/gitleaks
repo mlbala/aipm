@@ -11,7 +11,7 @@ done
 [ -n "$report" ] || { echo "stub gitleaks: no --report-path" >&2; exit 2; }
 sep=""
 printf '[' > "$report"
-for f in $(grep -rl "FAKE-LEAK-FOR-TESTS" "$target" 2>/dev/null); do
+grep -rl "FAKE-LEAK-FOR-TESTS" "$target" 2>/dev/null | while IFS= read -r f; do
   printf '%s{"RuleID":"fake-token","Description":"Fake token","File":"%s","StartLine":1}' \
     "$sep" "${f#"$target"/}" >> "$report"
   sep=","

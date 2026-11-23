@@ -10,7 +10,7 @@ for arg in "$@"; do
 done
 sep=""
 printf '{"Results":[' > "$out"
-for f in $(grep -rl "FAKE-LEAK-FOR-TESTS" "$target" 2>/dev/null); do
+grep -rl "FAKE-LEAK-FOR-TESTS" "$target" 2>/dev/null | while IFS= read -r f; do
   printf '%s{"Target":"%s","Secrets":[{"RuleID":"fake-token","Severity":"HIGH","Title":"Fake token","StartLine":1}]}' \
     "$sep" "${f#"$target"/}" >> "$out"
   sep=","
