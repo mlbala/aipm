@@ -91,7 +91,9 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26.x"
+          # Exact on purpose, like uv and Node: no unreviewed patch release on the day it
+          # ships. Dependabot does not update go-version inputs, so raise it by hand.
+          go-version: "1.26.11"
           cache: false
 
       - name: Install srt and pnpm (locked, no install scripts)
