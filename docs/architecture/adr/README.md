@@ -28,6 +28,7 @@ One file per decision, using the template below. A new ADR is proposed in a pull
 | [ADR-0022](0022-repository-git-config-cannot-run-programs.md) | A repository's own git config cannot make aipm's git calls run a program | Accepted |
 | [ADR-0023](0023-claude-code-dispatch-flags.md) | Claude Code dispatch reads no repository or user settings | Accepted |
 | [ADR-0024](0024-a-dispatched-agent-reads-only-its-worktree.md) | A dispatched agent reads only its own worktree | Accepted |
+| [ADR-0033](0033-guided-setup-and-keychain-keys.md) | Guided `aipm setup`, one user config path, and keys from the OS keychain | Accepted |
 
 ## Template
 
