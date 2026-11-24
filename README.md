@@ -10,6 +10,20 @@
 
 > **Status: pre-alpha, v0.4 in progress.** The commands are built step by step from the prompts in [`docs/prompts/`](docs/prompts/README.md). Every command works: `aipm`, `init`, `doctor`, `trust`, `discover`, `design`, `plan`, `approve`, `status`, `prompt`, `sync-context`, from v0.2 `verify`, `scan` and `task`, from v0.3 `run`, `build` and `merge`, and from v0.4 `auto`. `build` and `run` dispatch Claude Code, Codex CLI and Gemini CLI; Copilot CLI gets prompts and context files only ([Coding agents](#coding-agents)).
 
+## Quick start
+
+```bash
+uv tool install git+https://github.com/mlbala/aipm   # 1. install the `aipm` command, once
+read -rs ANTHROPIC_API_KEY && export ANTHROPIC_API_KEY  # 2. paste your key, press Enter (not shown)
+cd ~/my-project                                      # 3. go to YOUR project, not a clone of aipm
+aipm doctor                                          #    shows ANTHROPIC_API_KEY: set
+aipm init && aipm discover
+```
+
+That is all the setup Anthropic needs: it is the default provider, and the models have defaults, so there is no config file to write. Step 2 lasts for this terminal only and keeps the key out of your shell history; to keep the key for every terminal, see step 2 of [Set up your model provider and API keys](#set-up-your-model-provider-and-api-keys), which also covers other providers and changing models.
+
+aipm works on the repository you run it in (or the one `-C` names). You do not need to clone aipm to use it; a clone is for changing aipm itself, and you point it at another project with `uv run aipm -C ~/my-project …` (see [CONTRIBUTING.md](CONTRIBUTING.md#try-your-changes)).
+
 ## Install
 
 ```bash
@@ -27,6 +41,8 @@ Or run [`install.sh`](install.sh) (`sh install.sh [-y] [-t TAG]`), which install
 A tag older than `v0.4.0` has no attested wheel; the script refuses it and prints the `uv tool install git+…@<tag>` command that builds it from source.
 
 aipm needs Python 3.13 or later. It is distributed from GitHub only ([ADR-0001](docs/architecture/adr/0001-distribute-from-github.md)).
+
+aipm runs on macOS and Linux. It does not run on Windows directly, because its process handling and sandbox need macOS or Linux; on Windows, install and run it inside [WSL 2](https://learn.microsoft.com/windows/wsl/install) and follow the Linux instructions (your user config is `~/.config/aipm/config.yaml`). Keep your projects and your home directory on WSL's Linux file system, not under `/mnt/c`, where file permissions and the checks aipm makes on paths do not work as on Linux. Native Windows and WSL are not tested in CI.
 
 It needs git 2.55 or later, or a git older than 2.54. git 2.54 (including the Apple Git that macOS ships as `/usr/bin/git`) cannot turn off hooks named in your git config (`hook.<name>.command`), so aipm refuses it (exit 8) while such a hook is configured. `aipm doctor` shows which git you have.
 
@@ -63,14 +79,19 @@ llm:                                   # DeepSeek, OpenRouter, Azure OpenAI, vLL
 
 A local Ollama server needs no key; see [Models and providers](#models-and-providers). The roles you can give their own model are `interviewer`, `prd_writer`, `architect`, `threat_modeler`, `planner` and `ac_reviewer`; `default` covers the rest. To see the cost of each run as well as its tokens, add prices under `llm.pricing` (USD per million tokens, for example `claude-haiku-5-5: {input_per_mtok: 0.10, output_per_mtok: 0.50}`).
 
-**2. Set the API key** for that provider, and the key of each coding agent you build with (`ANTHROPIC_API_KEY` for Claude Code, `CODEX_API_KEY` for Codex, `GEMINI_API_KEY` for Gemini; see [Coding agents](#coding-agents)). Use a dedicated key with a spend limit. On macOS, the Keychain keeps it out of plain files:
+**2. Set the API key** for that provider, and the key of each coding agent you build with (`ANTHROPIC_API_KEY` for Claude Code, `CODEX_API_KEY` for Codex, `GEMINI_API_KEY` for Gemini; see [Coding agents](#coding-agents)). Use a dedicated key with a spend limit. Keep it in your system keychain, and hand it only to aipm with a shell function, so the key is in no plain file and other programs your shell starts never see it:
 
 ```bash
-security add-generic-password -a "$USER" -s anthropic-api-key -w     # asks for the key
-echo 'export ANTHROPIC_API_KEY="$(security find-generic-password -s anthropic-api-key -w)"' >> ~/.zshrc
+# macOS: store the key once (it asks for it), then add the function to ~/.zshrc
+security add-generic-password -a "$USER" -s anthropic-api-key -w
+echo 'aipm() { ANTHROPIC_API_KEY="$(security find-generic-password -s anthropic-api-key -w)" command aipm "$@"; }' >> ~/.zshrc
+
+# Linux (libsecret-tools): store the key once, then add the function to ~/.bashrc or ~/.zshrc
+secret-tool store --label=anthropic-api-key service anthropic-api-key
+echo 'aipm() { ANTHROPIC_API_KEY="$(secret-tool lookup service anthropic-api-key)" command aipm "$@"; }' >> ~/.bashrc
 ```
 
-Or put `export ANTHROPIC_API_KEY=…` in your shell profile, or in a private file outside your projects that you load with `set -a; . ~/path/to/aipm.env; set +a`. Do not keep keys in a `.env` file inside a project you run aipm on.
+For several keys, set each one the same way inside the function (`ANTHROPIC_API_KEY=… CODEX_API_KEY=… command aipm "$@"`). Do not write the key itself into `~/.zshrc`, `~/.bashrc` or another file: a build's tests and agents run as you, and the sandbox does not hide those files from them. A keychain item is not secret from every program either: an unsandboxed program running as you can ask for it. So use a key you can revoke, with a spend limit. Never keep keys in a `.env` file inside a project you run aipm on.
 
 **3. Check.** Open a new terminal and run `aipm doctor`: `Config: ok`, and each key you set shows as `set` (never its value).
 
@@ -78,7 +99,7 @@ The provider settings (`llm.provider`, `llm.base_url`, `llm.api_key_env`, `llm.p
 
 ## Use
 
-The v0.1 flow, in any git repository:
+The v0.1 flow, in any git repository of your own (run it in your project's folder, not in a clone of aipm):
 
 ```bash
 aipm init                       # .pm/, stack detection, repo map

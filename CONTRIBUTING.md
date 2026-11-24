@@ -13,6 +13,37 @@ git config core.hooksPath .githooks   # once per clone: the commit-msg and pre-p
 uv run aipm --help
 ```
 
+## Try your changes
+
+Run your checkout against a separate test project, never against the aipm repository itself. Without `-C`, aipm works on the repository around the current directory, so from the clone's root it would treat aipm's own source as the project: it would create `.pm/` here, rewrite this repository's `AGENTS.md` and `CLAUDE.md`, and turn plugins off because `.venv` is inside it.
+
+The sample project in `examples/` is a good start. Copy it outside the clone and make it a git repository:
+
+```bash
+mkdir -p ~/aipm-sandbox && cp -R examples/clinic-booking ~/aipm-sandbox/
+git -C ~/aipm-sandbox/clinic-booking init -q
+git -C ~/aipm-sandbox/clinic-booking add -A
+git -C ~/aipm-sandbox/clinic-booking commit -qm init
+```
+
+`uv run aipm` does not go through the README's `aipm()` shell function, so give the key to `uv run` the same way. On macOS, after storing the key as the README's [Set up your model provider and API keys](README.md#set-up-your-model-provider-and-api-keys) describes, add this function to `~/.zshrc` (on Linux, use `secret-tool lookup service anthropic-api-key`). Do not export the key globally, write it into a shell profile, or put a `.env` file in this repository.
+
+```bash
+aipm-dev() { ANTHROPIC_API_KEY="$(security find-generic-password -s anthropic-api-key -w)" uv run --project ~/path/to/aipm aipm "$@"; }
+```
+
+Then run your checkout against the sample:
+
+```bash
+aipm-dev -C ~/aipm-sandbox/clinic-booking doctor
+aipm-dev -C ~/aipm-sandbox/clinic-booking init
+aipm-dev -C ~/aipm-sandbox/clinic-booking discover --from ~/aipm-sandbox/clinic-booking/idea.md
+```
+
+A relative `--from` or `--answers` path is read from the current directory, not from the `-C` project, so give the full path (the file must be inside the project).
+
+Because the function uses `uv run --project`, it works from any folder, including the sample's: `cd ~/aipm-sandbox/clinic-booking && aipm-dev status`.
+
 ## Checks
 
 Run all of these before you open a pull request; CI runs the same ones.
