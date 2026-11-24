@@ -30,6 +30,52 @@ aipm needs Python 3.13 or later. It is distributed from GitHub only ([ADR-0001](
 
 It needs git 2.55 or later, or a git older than 2.54. git 2.54 (including the Apple Git that macOS ships as `/usr/bin/git`) cannot turn off hooks named in your git config (`hook.<name>.command`), so aipm refuses it (exit 8) while such a hook is configured. `aipm doctor` shows which git you have.
 
+### Set up your model provider and API keys
+
+Do this once per machine, before `aipm init`. Two things are set, both outside every repository: the provider goes in your user config file, and the API key goes in your shell's environment. aipm reads keys only from the environment, never from a config file or a `.env` file.
+
+**1. Choose the provider.** Your user config is `~/Library/Application Support/aipm/config.yaml` on macOS and `~/.config/aipm/config.yaml` on Linux (`aipm doctor` reports whether it is valid). Anthropic is the default, so the file is optional; to choose the models:
+
+```bash
+mkdir -p ~/Library/Application\ Support/aipm       # Linux: mkdir -p ~/.config/aipm
+cat > ~/Library/Application\ Support/aipm/config.yaml <<'EOF'
+llm:
+  models: {default: claude-sonnet-5-5, interviewer: claude-haiku-5-5}
+EOF
+```
+
+For any OpenAI-compatible service, name the provider, its URL, and the environment variable that holds its key. `api_key_env` is the variable's name, never the key itself:
+
+```yaml
+llm:                                   # OpenAI (base_url defaults to https://api.openai.com/v1)
+  provider: openai-compatible
+  api_key_env: OPENAI_API_KEY
+  models: {default: <an OpenAI model>}
+```
+
+```yaml
+llm:                                   # DeepSeek, OpenRouter, Azure OpenAI, vLLM, LM Studio …
+  provider: openai-compatible
+  base_url: https://api.deepseek.com
+  api_key_env: DEEPSEEK_API_KEY
+  models: {default: <a model the service lists>}
+```
+
+A local Ollama server needs no key; see [Models and providers](#models-and-providers). The roles you can give their own model are `interviewer`, `prd_writer`, `architect`, `threat_modeler`, `planner` and `ac_reviewer`; `default` covers the rest. To see the cost of each run as well as its tokens, add prices under `llm.pricing` (USD per million tokens, for example `claude-haiku-5-5: {input_per_mtok: 0.10, output_per_mtok: 0.50}`).
+
+**2. Set the API key** for that provider, and the key of each coding agent you build with (`ANTHROPIC_API_KEY` for Claude Code, `CODEX_API_KEY` for Codex, `GEMINI_API_KEY` for Gemini; see [Coding agents](#coding-agents)). Use a dedicated key with a spend limit. On macOS, the Keychain keeps it out of plain files:
+
+```bash
+security add-generic-password -a "$USER" -s anthropic-api-key -w     # asks for the key
+echo 'export ANTHROPIC_API_KEY="$(security find-generic-password -s anthropic-api-key -w)"' >> ~/.zshrc
+```
+
+Or put `export ANTHROPIC_API_KEY=…` in your shell profile, or in a private file outside your projects that you load with `set -a; . ~/path/to/aipm.env; set +a`. Do not keep keys in a `.env` file inside a project you run aipm on.
+
+**3. Check.** Open a new terminal and run `aipm doctor`: `Config: ok`, and each key you set shows as `set` (never its value).
+
+The provider settings (`llm.provider`, `llm.base_url`, `llm.api_key_env`, `llm.pricing`) are user-only: aipm ignores them, with a warning, in a repository's `.pm/config.yaml`, refuses them in `AIPM_*` variables (exit 6), and refuses a user config inside the repository (exit 6). So a repository you clone cannot send your key or your code to a server you did not choose. A repository may still pick models (`llm.models`). See [Configuration](#configuration).
+
 ## Use
 
 The v0.1 flow, in any git repository:
