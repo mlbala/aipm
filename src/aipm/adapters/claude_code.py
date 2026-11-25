@@ -36,6 +36,7 @@ from pydantic import Field, StrictBool, StrictStr, ValidationError
 from aipm.adapters._common import (
     BLOCKED_MARK,
     MAX_QUESTION,
+    agent_keys,
     blocked_question,
     check_rule_words,
     render_task_prompt,
@@ -373,16 +374,16 @@ class ClaudeCodeAdapter:
         context_file = ws.context_dir / f"agents-{secrets.token_hex(8)}.md"
         argv = self._argv(limits, ws, context_file)
         names = [*BASE_ENV_ALLOWLIST, *PROXY_ENV, *limits.pass_env]
+        keys: dict[str, str] = {}
         if limits.bare:
-            for name in REQUIRED_ENV:
-                if not os.environ.get(name):
-                    raise MissingCapability(
-                        f"{name} is not set; Claude Code in bare mode needs an API key",
-                        hint="Give coding agents a dedicated API key with a spend limit, or run "
-                        "the task yourself with `aipm prompt`.",
-                    )
+            keys = agent_keys(REQUIRED_ENV, "Claude Code in bare mode")
             names += REQUIRED_ENV
-        extra = {"CLAUDE_CONFIG_DIR": str(ws.config_home), "TMPDIR": str(ws.temp_dir), **AGENT_ENV}
+        extra = {
+            "CLAUDE_CONFIG_DIR": str(ws.config_home),
+            "TMPDIR": str(ws.temp_dir),
+            **AGENT_ENV,
+            **keys,
+        }
         context = ws.context_text or "Follow the task prompt.\n"
         caps = self._ready
         programs = () if caps is None else tuple(caps.launcher or (caps.path or "",))

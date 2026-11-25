@@ -31,6 +31,7 @@ from aipm.adapters.base import (
     Invocation,
     RenderedTaskPrompt,
 )
+from aipm.config import keychain
 from aipm.context import generator
 from aipm.context.markdown import agent_text_problems, code_span, fence
 from aipm.domain.errors import AipmError, MissingCapability, PolicyViolation, UsageError
@@ -409,15 +410,9 @@ class HeadlessAdapter:
         self._check_workspace(ws)
         prompt_file = ws.context_dir / f"prompt-{os.urandom(8).hex()}.md"
         argv = self._final(self._argv(limits, ws, prompt_file))
-        for name in self.required_env:
-            if not os.environ.get(name):
-                raise MissingCapability(
-                    f"{name} is not set; a dispatched {self.name.value} needs it",
-                    hint="Give coding agents a dedicated key with a spend limit, or run the "
-                    "task yourself with `aipm prompt`.",
-                )
+        keys = agent_keys(self.required_env, self.name.value)
         names = [*BASE_ENV_ALLOWLIST, *PROXY_ENV, *limits.pass_env, *self.required_env]
-        extra = {**self._extra_env(ws), **dict(self.agent_env)}
+        extra = {**self._extra_env(ws), **dict(self.agent_env), **keys}
         launcher = self._launcher()
         return Invocation(
             argv=argv,
@@ -430,3 +425,24 @@ class HeadlessAdapter:
 
     def parse_result(self, out: ProcessResult) -> AgentResult:
         raise NotImplementedError
+
+
+def agent_keys(required_env: Sequence[str], tool: str) -> dict[str, str]:
+    """The keys an agent declares, from the environment or the OS keychain (ADR-0033).
+
+    Only the names the adapter declares are resolved. A key found only in the keychain is
+    returned for the agent's constructed environment; one in the environment is copied by
+    `build_env` as before. Raises `MissingCapability` when one is set nowhere.
+    """
+    keys: dict[str, str] = {}
+    for name in required_env:
+        value, source = keychain.resolve(name, os.environ)
+        if value is None:
+            raise MissingCapability(
+                f"{name} is not set; a dispatched {tool} needs it",
+                hint="Run `aipm setup`, or give coding agents a dedicated key with a spend "
+                "limit, or run the task yourself with `aipm prompt`.",
+            )
+        if source == "keychain":
+            keys[name] = value
+    return keys

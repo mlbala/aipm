@@ -10,7 +10,7 @@ A new user has to do three things by hand before the first `aipm discover`: find
 
 Comparable tools are easier because they read the provider, URL and key from a `.env` in the working directory. aipm must not do that: SECURITY.md §6 rule 5 and invariant I-8 exist because a cloned repository could otherwise send the user's key and code to its own server. This ADR keeps that rule and every user-only key unchanged, and removes the manual steps instead.
 
-SECURITY.md §8 already allows keys "from the OS keychain through the optional `keyring` extra", and `pyproject.toml` declares the extra, but no code reads it.
+SECURITY.md §8 allowed keys "from the OS keychain through the optional `keyring` extra", and `pyproject.toml` declares the extra, but no code read it.
 
 ## Options
 
@@ -25,7 +25,7 @@ Option 2, in three parts. Nothing here changes a key class, what a repository's 
 
 ### 1. One user config path
 
-The default user config becomes `<account home>/.config/aipm/config.yaml` on macOS, where `<account home>` comes from the password database (`account_home()`), not from `HOME` or `XDG_CONFIG_HOME`: today only `AIPM_CONFIG` and `HOME` can move the macOS path, and this must not add a variable a repository `.env` can set. Linux keeps `$XDG_CONFIG_HOME/aipm/config.yaml`, else `~/.config/aipm/config.yaml`. `AIPM_CONFIG` still wins, with its warning.
+The default user config becomes `~/.config/aipm/config.yaml` on macOS. `XDG_CONFIG_HOME` is not read there: today only `AIPM_CONFIG` and `HOME` can move the macOS path, and this must not add a variable a repository `.env` can set. (An earlier draft built the path from the password database; the implementation keeps `HOME`, which already moved the old path and already warns when it is not the account's home, so the exposure is unchanged and tests can still isolate the user config.) Linux keeps `$XDG_CONFIG_HOME/aipm/config.yaml`, else `~/.config/aipm/config.yaml`. `AIPM_CONFIG` still wins, with its warning.
 
 On macOS, if only the old `~/Library/Application Support/aipm/config.yaml` exists, aipm reads it and prints a one-line note to move it; if both exist, the new one is read and aipm warns that the old one is ignored. Every existing check on the user config (absolute, regular file, outside the repository by inode, R-25) applies to whichever file is read.
 
@@ -37,7 +37,7 @@ A new interactive command (questionary, already a dependency):
 2. Asks for the models, with the current values as defaults, and the key-variable name, with the provider's usual name as the default; the name must pass the existing `EnvName` check.
 3. Asks for the API key with hidden input, and offers to store it in the OS keychain (part 3). Leaving it blank keeps the key in the environment, as today. aipm never writes a key to a file.
 4. Shows the target path, the environment variable that chose it (if any), and the resulting `llm:` block, and writes only after an interactive yes. `--yes` never skips this confirmation, as with trust (SECURITY.md §6 rule 4).
-5. Runs the `doctor` key and config checks and prints the result.
+5. Ends by telling the user to run `aipm doctor`, which shows the config, the provider, the models and where each key comes from.
 
 The write path:
 
@@ -66,31 +66,29 @@ Without a terminal, `aipm setup` exits 2 and names the README section.
 
 **Redaction.** Every value resolved from the keychain is added to the exact-value set of every redactor: the gateway, `StateStore`, logging, run artifacts and the pre-write secret scan. Pattern rules alone would miss keys such as Azure's 32-hex keys or custom gateway tokens. The test that checks redactors are built from the full environment is extended to keychain values.
 
-**No backend discovery.** aipm does not use `keyring.get_password` or keyring's automatic backend selection. Through those, `PYTHON_KEYRING_BACKEND`, `KEYRING_PROPERTY_*`, a `keyringrc.cfg` under a `HOME` or `XDG_CONFIG_HOME` that a repository `.env` can set, and any installed `keyring.backends` entry point would choose which code runs inside aipm, past `--no-plugins`. aipm instead builds the platform backend class directly: the macOS Keychain, or Secret Service on Linux. A security test plants a `keyringrc.cfg`, sets those variables and installs a fake backend entry point, and shows that none of them changes which backend aipm uses or what code it loads.
+**No backend discovery.** keyring's own selection (`keyring.get_password`, `PYTHON_KEYRING_BACKEND`, `KEYRING_PROPERTY_*`, a `keyringrc.cfg` under a `HOME` or `XDG_CONFIG_HOME` a repository `.env` can set, and `keyring.backends` entry points) would choose which code runs inside aipm, past `--no-plugins`. aipm does not use keyring at all. On macOS it runs `/usr/bin/security` through `run_safe` (no `ctypes`, which aipm bans), with a timeout and a constructed environment holding only `PATH=/usr/bin:/bin`, `LANG=C` and a `HOME` from the password database, so a `HOME` set by a repository `.env` cannot point it at another keychain. The key reaches `security -i` on stdin, never in argv, and must match `[A-Za-z0-9._~+/=:-]{8,4096}`, so it never needs quoting. Security tests check that no aipm module imports keyring, that keyring's variables and a planted `keyringrc.cfg` change nothing, and what argv, stdin and environment `security` gets.
 
 **No prompts, fail closed.**
 
 - A lookup runs with a timeout.
-- On macOS it never shows the authorization dialog. A lookup that would need one counts as unset.
+- On macOS it never shows the authorization dialog: aipm stores keys with `security` itself, so the item's access list trusts `security`, and the lookup runs `security` too. A lookup that fails for any reason counts as unset.
 - On Linux it never unlocks a locked collection; only `aipm setup` may ask to unlock.
 - A missing, locked or failing backend counts as unset, and the command fails closed with the existing missing-key error.
 
-**Residual risk.** On macOS, an item stored through keyring trusts the Python interpreter that created it. On Linux, Secret Service is reached over the D-Bus session bus. So repository code that runs **outside** a sandbox, as the same user, can read an `aipm` keychain item without a prompt. This is no worse than today's alternative: an exported key in a shell profile is equally readable by such code. Inside `srt`, `Library/Keychains` and `.local/share/keyrings` are already denied (`execution/sandbox.py`). Security tests check that a sandboxed gate cannot read an `aipm` item:
+**Residual risk.** On macOS, an item aipm stores trusts `/usr/bin/security`, so any program running as the user can read it through `security` without a prompt. On Linux, Secret Service is reached over the D-Bus session bus. So repository code that runs **outside** a sandbox, as the same user, can read an `aipm` keychain item without a prompt. This is no worse than today's alternative: an exported key in a shell profile is equally readable by such code. Inside `srt`, `Library/Keychains` and `.local/share/keyrings` are already denied (`execution/sandbox.py`). Security tests are to check that a sandboxed gate cannot read an `aipm` item (not yet built: `srt` is not available where this was implemented; see owner decision 2 below):
 
 - macOS: `security find-generic-password -s aipm`
 - Linux: `secret-tool lookup service aipm`
 
 On Linux, keychain keys are refused (exit 8) unless gates are shown unable to reach the D-Bus session bus. That is shown either by a sandbox probe at start-up or by the security test above, run against the `srt` version in use. With no sandbox at all, Linux keychain keys are always refused, and the environment remains the way to supply a key. This risk is added to SECURITY.md §15.
 
-**macOS dialog.** keyring's macOS backend cannot turn the authorization dialog off. So the macOS lookup calls the Security framework itself, with the authentication UI set to fail (`kSecUseAuthenticationUIFail`), and treats that failure as unset.
-
-`keyring` becomes a runtime dependency (owner decision 1). Where no supported backend is available (Linux without Secret Service, or any Linux lookup the sandbox rule above refuses), `aipm setup` skips the keychain step and prints how to set the key, and lookups use the environment only.
+The Linux probe is not built yet, so in this implementation Linux uses no keychain at all: `aipm setup` skips the keychain step and prints how to set the key, and lookups use the environment only. Whether `srt` keeps a gate's `security` away from the keychain daemon on macOS is not yet tested either (SECURITY.md R-27).
 
 ## Consequences
 
 - An Anthropic user still needs only an exported `ANTHROPIC_API_KEY`, or now `aipm setup` once. Other providers need `aipm setup` once instead of hand-written YAML.
 - macOS users with a config at the old path keep working, with a note to move it.
-- The README's current shell-function setup keeps working unchanged: it puts the key in aipm's environment, which is looked up first, and `doctor` reports it as set in the environment. Its keychain items (`service=anthropic-api-key`, created by `security` or `secret-tool`) are not the ones aipm reads, and aipm does not try to read them, since a `security`-created item would raise the dialog part 3 forbids. Once `aipm setup` ships, the README recommends it and keeps the function as the alternative for users without `keyring`.
+- The README's shell-function setup keeps working unchanged: it puts the key in aipm's environment, which is looked up first, and `doctor` reports it as set in the environment. Its keychain items (`service=anthropic-api-key`) are not the ones aipm reads (`service=aipm`). The README now recommends `aipm setup` and keeps the function as the alternative on Linux.
 - A contributor keeps their settings in `~/.config/aipm/config.yaml` (or `AIPM_CONFIG`) and runs `uv run aipm -C <project> …` from the clone.
 - There is one new write path outside `.pm/`: the user config, written only by `aipm setup` after an interactive confirmation. Security tests cover:
   - every write-path rule in part 2;
@@ -104,5 +102,11 @@ On Linux, keychain keys are refused (exit 8) unless gates are shown unable to re
 
 ## Owner decisions (2026-11-24)
 
-1. `keyring` (pure Python wheels, no install scripts; on Linux it pulls in `SecretStorage` and `jeepney`) moves from an optional extra to a runtime dependency, so that `aipm setup` can store keys for every user.
+1. `keyring` (pure Python wheels, no install scripts; on Linux it pulls in `SecretStorage` and `jeepney`) was approved as a runtime dependency. The implementation turned out not to need it: macOS uses `/usr/bin/security`, and Linux uses no keychain yet. No dependency was added; the existing optional `keyring` extra is unchanged and unused.
 2. The checkout config file (option 3) is dropped, as the security review recommended.
+
+## Owner decisions on the implementation (2026-11-25)
+
+1. Approved: part 1 builds the macOS path from `HOME`, not from the password database as first accepted. `HOME` already moved the old path and already warns when it is not the account's home, so the exposure is unchanged, and tests can still isolate the user config. `XDG_CONFIG_HOME` is not read on macOS, for the new path or the old one (the old one is built without platformdirs, which reads it).
+2. Approved: the macOS Keychain is used by default although the sandbox test above does not exist yet. Without `srt`, gates and prepare steps can read an `aipm` item through `security`, as they could read a key kept in a shell profile; under `srt`, whether `security` can still reach the keychain daemon is untested (SECURITY.md R-27). The owner chose to keep the macOS Keychain on by default, with `aipm setup` the same command on every platform (the Keychain on macOS, an environment variable elsewhere), and the risk recorded as R-27. The alternative, the Keychain only under `srt` or `security.require_sandbox: true`, was declined.
+3. Approved: `tests/security/test_redteam_v01.py::test_review_xdg_config_home_cannot_put_the_user_config_in_the_repo` checks each platform. On Linux, `XDG_CONFIG_HOME` still chooses the user config and a planted one in the repository is refused (exit 6), as before. On macOS, where it is no longer read, the test checks that the planted file is never read and its URL never used.

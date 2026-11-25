@@ -18,7 +18,8 @@ from typing import cast
 from aipm import __version__
 from aipm.app import trust as trust_use_case
 from aipm.app.workspace import find_repo_root
-from aipm.config.loader import load_config
+from aipm.config import keychain
+from aipm.config.loader import load_config, user_config_path
 from aipm.config.schema import Config
 from aipm.domain.errors import AipmError, LockHeld, UsageError
 from aipm.domain.models import ArtifactKind
@@ -182,11 +183,16 @@ def run(project: Path | None, *, env: Mapping[str, str] | None = None) -> Doctor
         warnings = [_clean(w, 500) for w in loaded.warnings]
         config_data = {"ok": True, "error": None, "sources": list(loaded.sources)}
     extra_keys: list[str] = [config.llm.api_key_env] if config else []
-    keys = {name: bool(environ.get(name)) for name in sorted({*KEY_VARIABLES, *extra_keys})}
+    sources = {
+        name: keychain.resolve(name, environ)[1] for name in sorted({*KEY_VARIABLES, *extra_keys})
+    }
+    keys = {name: source is not None for name, source in sources.items()}
     initialized = root is not None and pm_root(root).is_dir()
     sections = _Sections(
         tools=tools,
         keys=keys,
+        key_sources=sources,
+        llm=_llm(config, environ),
         root=None if root is None else str(root),
         initialized=initialized,
         config=config_data,
@@ -201,10 +207,37 @@ def run(project: Path | None, *, env: Mapping[str, str] | None = None) -> Doctor
     return DoctorReport(data=sections.data(), lines=tuple(sections.lines()))
 
 
+def _key_state(source: str | None) -> str:
+    if source == "keychain":
+        return f"set ({keychain.describe()})"
+    return "set" if source else "not set"
+
+
+def _llm(config: Config | None, environ: Mapping[str, str]) -> dict[str, object]:
+    """The user config in use, the provider and the models (ADR-0033). Never a key's value."""
+    path = user_config_path(environ)
+    state = "found" if path.is_file() else "not found: defaults in use"
+    data: dict[str, object] = {
+        "user_config": _clean(str(path), 300),
+        "user_config_state": state,
+        "keychain": keychain.describe(),
+        "provider": None,
+        "key": None,
+        "models": {},
+    }
+    if config is not None:
+        data["provider"] = config.llm.provider.value
+        data["key"] = config.llm.api_key_env
+        data["models"] = {role: _clean(model, 100) for role, model in config.llm.models.items()}
+    return data
+
+
 @dataclass(frozen=True, slots=True)
 class _Sections:
     tools: list[dict[str, object]]
     keys: dict[str, bool]
+    key_sources: dict[str, str | None]
+    llm: dict[str, object]
     root: str | None
     initialized: bool
     config: dict[str, object]
@@ -224,7 +257,11 @@ class _Sections:
             "repo": None
             if self.root is None
             else {"root": self.root, "initialized": self.initialized},
-            "config": {**self.config, "warnings": self.warnings},
+            "config": {
+                **self.config,
+                "warnings": self.warnings,
+                "llm": {**self.llm, "key_sources": self.key_sources},
+            },
             "schema": self.schema,
             "lock": self.lock,
             "trust": self.trust,
@@ -243,9 +280,13 @@ class _Sections:
             if tool.get("problem"):
                 lines.append(f"    note: {tool['problem']}")
         lines.append("API key variables (values are never shown):")
-        lines.extend(
-            f"  {name}: {'set' if found else 'not set'}" for name, found in self.keys.items()
-        )
+        lines.extend(f"  {name}: {_key_state(self.key_sources.get(name))}" for name in self.keys)
+        lines.append(f"Keychain: {self.llm['keychain']}")
+        lines.append(f"User config: {self.llm['user_config']} ({self.llm['user_config_state']})")
+        if self.llm["provider"] is not None:
+            lines.append(f"Provider: {self.llm['provider']}, key variable {self.llm['key']}")
+            models = cast(dict[str, str], self.llm["models"])
+            lines.append("Models: " + "  ".join(f"{k}={v}" for k, v in models.items()))
         if self.root is None:
             lines.append("Repository: not inside a git repository")
         else:

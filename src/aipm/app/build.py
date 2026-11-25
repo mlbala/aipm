@@ -29,6 +29,7 @@ from aipm.app.project_context import build_context
 from aipm.app.snapshot import read_snapshot
 from aipm.app.trust import require_trusted
 from aipm.app.workspace import find_repo_root, require_initialized
+from aipm.config import keychain
 from aipm.config.loader import load_config
 from aipm.config.schema import Config, duration_seconds
 from aipm.domain.errors import (
@@ -206,10 +207,11 @@ def _detect(adapter: ToolAdapter, root: Path, cfg: Config, *, dry_run: bool) -> 
     needs_key = adapter.name is not ToolName.CLAUDE or tool is None or tool.bare
     if needs_key and not dry_run:
         for name in adapter.required_env:
-            if not os.environ.get(name):
+            if keychain.resolve(name, os.environ)[0] is None:
                 raise MissingCapability(
                     f"{name} is not set; a dispatched {adapter.name.value} needs an API key",
-                    hint="Give coding agents a dedicated API key with a spend limit.",
+                    hint="Run `aipm setup`, or give coding agents a dedicated API key with a "
+                    "spend limit.",
                 )
 
 

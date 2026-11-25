@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel
 
+from aipm.config import keychain
 from aipm.config.schema import LlmConfig
 from aipm.config.schema import Provider as ProviderName
 from aipm.domain.errors import BudgetExceeded, PolicyViolation, UsageError
@@ -400,7 +401,8 @@ def _is_loopback(base_url: str | None) -> bool:
 
 
 def api_key(llm: LlmConfig, environ: Mapping[str, str]) -> str:
-    """Read the key from the variable named in `llm.api_key_env` (a user-only key)."""
+    """Read the key from the variable named in `llm.api_key_env` (a user-only key): the
+    environment first, then the OS keychain (ADR-0033)."""
     name = llm.api_key_env
     if llm.provider is ProviderName.OPENAI_COMPATIBLE and name.startswith("ANTHROPIC_"):
         raise UsageError(
@@ -408,14 +410,15 @@ def api_key(llm: LlmConfig, environ: Mapping[str, str]) -> str:
             hint="Set llm.api_key_env in your user config to the variable that holds this "
             "provider's key.",
         )
-    value = environ.get(name, "")
+    value, _source = keychain.resolve(name, environ)
     if value:
         return value
     if llm.provider is ProviderName.OPENAI_COMPATIBLE and _is_loopback(llm.base_url):
         return NO_KEY_PLACEHOLDER
     raise UsageError(
         f"{name} is not set",
-        hint=f"Export {name} with your API key, or set llm.api_key_env in your user config.",
+        hint=f"Run `aipm setup`, or export {name} with your API key, or set llm.api_key_env "
+        "in your user config.",
     )
 
 

@@ -25,6 +25,7 @@ from aipm.cli.commands import (
     prompt,
     run,
     scan,
+    setup,
     status,
     sync_context,
     task,
@@ -112,6 +113,7 @@ def main(
 # Order follows ARCHITECTURE §16.
 app.command("init")(init.command)
 app.command("doctor")(doctor.command)
+app.command("setup")(setup.command)
 app.command("trust")(trust.command)
 app.command("discover")(discover.command)
 app.command("approve")(approve.command)

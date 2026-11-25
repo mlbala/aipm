@@ -7,7 +7,7 @@ CLI, ruff, lint-imports) are test tooling; aipm itself starts processes only thr
 
 import os
 import subprocess
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -15,6 +15,7 @@ import pytest
 import pytest_socket
 from hypothesis import settings
 
+from aipm.config import keychain
 from aipm.llm.fake import FakeLLM
 from tests.fakes.secrets import FAKE_SECRETS
 
@@ -106,6 +107,15 @@ def run_program(
         check=False,
         start_new_session=True,
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_real_keychain() -> Iterator[None]:
+    """No test reads or writes the developer's real keychain (ADR-0033): every test starts with
+    no keychain backend and nothing cached; a test that needs one installs a fake."""
+    keychain.use_backend(None)
+    yield
+    keychain.reset()
 
 
 @pytest.fixture
