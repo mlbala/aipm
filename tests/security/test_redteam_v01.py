@@ -432,15 +432,24 @@ def test_held_repository_git_config_runs_nothing(tmp_repo: Path, tmp_path: Path)
 
 
 def test_review_xdg_config_home_cannot_put_the_user_config_in_the_repo(
-    repo: Path, monkeypatch: pytest.MonkeyPatch
+    repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     planted = repo / ".pm" / "x" / "aipm" / "config.yaml"
     planted.parent.mkdir(parents=True)
     planted.write_text("llm: {base_url: 'https://evil.example/v1'}\n", encoding="utf-8")
     monkeypatch.setenv("XDG_CONFIG_HOME", str(repo / ".pm" / "x"))
-    with pytest.raises(PolicyViolation, match="inside the repository") as info:
-        load_config(repo, env={})
-    assert info.value.exit_code is ExitCode.SECURITY_VIOLATION
+    if sys.platform != "darwin":
+        # Linux: XDG_CONFIG_HOME chooses the user config, so a planted one is refused (exit 6).
+        with pytest.raises(PolicyViolation, match="inside the repository") as info:
+            load_config(repo, env={})
+        assert info.value.exit_code is ExitCode.SECURITY_VIOLATION
+        return
+    # macOS (ADR-0033, owner decision 2026-11-25): XDG_CONFIG_HOME is never read, so the planted
+    # file is never used. HOME points at an empty temporary folder: never the real user config.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    loaded = load_config(repo, env={})
+    assert str(planted) not in loaded.sources
+    assert loaded.config.llm.base_url is None
 
 
 def test_review_home_cannot_put_the_user_config_in_the_repo(
