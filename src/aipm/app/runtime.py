@@ -1,9 +1,12 @@
 """Process-wide setup for a CLI command: logging with redaction (ARCHITECTURE §17)."""
 
+import logging
+import os
 from pathlib import Path
 
 from aipm.app.workspace import find_repo_root
-from aipm.config.loader import user_redact_patterns
+from aipm.config import keychain
+from aipm.config.loader import user_api_key_env, user_redact_patterns
 from aipm.domain.errors import AipmError
 from aipm.llm.cache import ResponseCache
 from aipm.observability.logging import configure_logging, log_dir
@@ -14,6 +17,7 @@ from aipm.state.attempts import WriteLedger
 from aipm.state.store import FileStateStore, open_store
 
 _STDERR_LEVELS = ("warning", "info", "debug")
+_log = logging.getLogger(__name__)
 
 
 def configure(verbose: int, project: Path | None = None) -> Path | None:
@@ -25,13 +29,29 @@ def configure(verbose: int, project: Path | None = None) -> Path | None:
     """
     root = _repo_root(project)
     stderr_level = _STDERR_LEVELS[min(max(verbose, 0), len(_STDERR_LEVELS) - 1)]
-    return configure_logging(
+    key_warnings = prime_keys(root)
+    log_file = configure_logging(
         "info",
         json_lines=False,
         stderr_level=stderr_level,
         redactor=user_redactor(root),
         file=root is None or not is_within(log_dir(), root),
     )
+    for warning in key_warnings:
+        _log.warning("%s", warning)
+    return log_file
+
+
+def prime_keys(root: Path | None) -> list[str]:
+    """Read the keys aipm may need from the OS keychain, before any redactor is built (ADR-0033).
+
+    Only the shipped adapters' key names and the user config's `llm.api_key_env` are looked up.
+    """
+    names = [*keychain.AGENT_KEY_NAMES]
+    own = user_api_key_env(root)
+    if own is not None:
+        names.append(own)
+    return keychain.prime(names, os.environ)
 
 
 def _repo_root(project: Path | None) -> Path | None:

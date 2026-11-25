@@ -21,18 +21,19 @@ becomes a warning that the CLI prints on every run.
 
 import os
 import stat
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
-from typing import Any, get_args, get_origin
+from typing import Any, cast, get_args, get_origin
 
 import platformdirs
 from pydantic import BaseModel, ValidationError
 
 from aipm.config.locations import USER_CONFIG_ENV, git_root
 from aipm.config.schema import Config, KeyClass, Tighten, key_class, stricter
-from aipm.domain.errors import PolicyViolation, SchemaError
+from aipm.domain.errors import AipmError, PolicyViolation, SchemaError
 from aipm.domain.models import SCHEMA_VERSION, ArtifactKind, NetworkProfile
 from aipm.security.env_policy import denied_pass_env
 from aipm.security.paths import is_within
@@ -84,12 +85,80 @@ class LoadedConfig:
         return LoadedConfig(config=self.unflagged, warnings=self.warnings, sources=self.sources)
 
 
+def legacy_user_config_path() -> Path | None:
+    """The macOS user config before ADR-0033 (`~/Library/Application Support/aipm/`).
+
+    Built from `HOME` alone: platformdirs reads `XDG_CONFIG_HOME` on macOS too, which a repository
+    `.env` loaded into the shell can set (R-24), so it is not used here.
+    """
+    if sys.platform != "darwin":
+        return None
+    return Path("~").expanduser() / "Library" / "Application Support" / "aipm" / "config.yaml"
+
+
 def user_config_path(env: Mapping[str, str] | None = None) -> Path:
-    """`$AIPM_CONFIG`, else `<user_config_dir>/aipm/config.yaml`."""
+    """`$AIPM_CONFIG`, else `~/.config/aipm/config.yaml` on macOS (ADR-0033), else
+    `<user_config_dir>/aipm/config.yaml` (`$XDG_CONFIG_HOME/aipm/` or `~/.config/aipm/`).
+
+    On macOS `XDG_CONFIG_HOME` is not read, so only `AIPM_CONFIG` and `HOME` can move the file,
+    as before. A file only at the old macOS path is still read (`legacy_user_config_note`).
+    """
+    current = setup_target_path(env)
+    legacy = legacy_user_config_path()
+    if (os.environ if env is None else env).get(USER_CONFIG_ENV) or legacy is None:
+        return current
+    if not os.path.lexists(current) and os.path.lexists(legacy):
+        return legacy
+    return current
+
+
+def setup_target_path(env: Mapping[str, str] | None = None) -> Path:
+    """Where the user config belongs: `$AIPM_CONFIG`, else the current default path (never the
+    old macOS one). `aipm setup` writes here."""
     override = (os.environ if env is None else env).get(USER_CONFIG_ENV)
     if override:
         return Path(override).expanduser()
+    if sys.platform == "darwin":
+        return Path("~").expanduser() / ".config" / "aipm" / "config.yaml"
     return Path(platformdirs.user_config_dir("aipm", appauthor=False)) / "config.yaml"
+
+
+def parse_user_config(text: str, source: str) -> tuple[dict[str, Any], Config]:
+    """A user config's text as data and as a validated layer (aliases and tags rejected)."""
+    raw = load_yaml(text, source=source)
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise SchemaError(f"{source} is not a mapping")
+    data = cast(dict[str, Any], raw)
+    return data, _validate(data, source)
+
+
+def legacy_user_config_note(env: Mapping[str, str] | None = None) -> str | None:
+    """A note when the old macOS user config is read, or ignored because the new one exists."""
+    legacy = legacy_user_config_path()
+    if legacy is None or (os.environ if env is None else env).get(USER_CONFIG_ENV):
+        return None
+    if not os.path.lexists(legacy):
+        return None
+    current = setup_target_path(env)
+    if user_config_path(env) == legacy:
+        return f"the user config is at the old path {legacy}; move it to {current}"
+    return f"ignored the old user config {legacy}; {current} is read instead"
+
+
+def user_api_key_env(project: Path | None = None) -> str | None:
+    """`llm.api_key_env` from the user config file only, or `None` when it cannot be read.
+
+    The keychain is consulted only for this name and the adapters' own (ADR-0033): never one a
+    repository, an `AIPM_*` variable or a flag names.
+    """
+    try:
+        path = user_config_path(os.environ)
+        layer = _user_layer(path, project, explicit=_explicit(os.environ))
+    except AipmError:
+        return None
+    return layer.llm.api_key_env
 
 
 def _describe(exc: ValidationError, source: str) -> str:
@@ -408,6 +477,9 @@ def load_config(
 
     user_path = user_config_path(environ)
     _check_user_path(user_path, project)
+    legacy_note = legacy_user_config_note(environ)
+    if legacy_note is not None:
+        warnings.append(legacy_note)
     user_raw = _read_user_layer(user_path, explicit=_explicit(environ))
     if user_raw != {}:
         sources.append(str(user_path))

@@ -884,7 +884,9 @@ Every output schema includes `injection_suspected: list[str]` (each entry at mos
 
 ## 15. Configuration
 
-**Layering** (later layers win): built-in defaults < `<user_config_dir>/aipm/config.yaml` < `.pm/config.yaml` < `AIPM_*` environment variables < CLI flags.
+**Layering** (later layers win): built-in defaults < the user config < `.pm/config.yaml` < `AIPM_*` environment variables < CLI flags.
+
+**The user config** is `$AIPM_CONFIG`, else `~/.config/aipm/config.yaml` on macOS (`XDG_CONFIG_HOME` is not read there, so only `AIPM_CONFIG` and `HOME` can move it), else `$XDG_CONFIG_HOME/aipm/config.yaml` or `~/.config/aipm/config.yaml` on Linux. A macOS file only at the old `~/Library/Application Support/aipm/config.yaml` is still read, with a note to move it; when both exist, the old one is ignored with a warning. `aipm setup` writes it ([ADR-0033](adr/0033-guided-setup-and-keychain-keys.md)).
 
 **Repo config is limited by key class.** Every config field carries one of three classes in the schema (field metadata), and the loader enforces them ([SECURITY.md §6](SECURITY.md#6-execution-trust) rule 5). Where two classes could apply, the more specific key wins (`security.extra_allowed_executables` is user-only although `security.*` is tighten-only).
 
@@ -972,7 +974,8 @@ logging: {level: info, json: false}
 |---|---|---|---|
 | `aipm` | v0.1 | | Phase report and next step (§7.3) |
 | `aipm init` | v0.1 | `--provider`, `--tool`, `--stack`, `--force` | Creates `.pm/`, detects the stack, writes the repo map, copies gates, runs the trust flow |
-| `aipm doctor` | v0.1 | | Tool versions, capabilities, sandbox, which API key env vars are set (never their values), plugins. `--fix-schema` arrives with the first v2 schema (§6.2). |
+| `aipm doctor` | v0.1 | | Tool versions, capabilities, sandbox, which API key env vars are set and whether from the environment or the keychain (never their values), the keychain in use, the user config path, provider and models, plugins. `--fix-schema` arrives with the first v2 schema (§6.2). |
+| `aipm setup` | v0.4 | | Interactive only (exit 2 without a terminal; `--yes` skips nothing). Asks for the provider, base URL, key-variable name and models, shows the file and its `llm:` block, writes the user config after a yes, and offers to store the key in the OS keychain ([ADR-0033](adr/0033-guided-setup-and-keychain-keys.md)) |
 | `aipm trust` | v0.1 | `--show`, `--revoke`, `--confirm HASH12` | Shows the exact argv of `prepare` and all gates, dispatch flags, network profiles, the hashes of the repository's committed toolchain files ([ADR-0032](adr/0032-toolchain-files-in-the-trust-surface.md)) and the surface hash, then records trust ([SECURITY.md §6](SECURITY.md#6-execution-trust)) |
 | `aipm discover` | v0.1 | `--from FILE`, `--answers FILE`, `--defaults`, `--edit Q-ID`, `--max-rounds`, `--threshold`, `--accept-risk` | §8 |
 | `aipm approve <prd\|design\|plan\|context>` | v0.1 | `--yes` | Non-interactive approval |

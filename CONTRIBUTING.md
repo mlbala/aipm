@@ -26,23 +26,23 @@ git -C ~/aipm-sandbox/clinic-booking add -A
 git -C ~/aipm-sandbox/clinic-booking commit -qm init
 ```
 
-`uv run aipm` does not go through the README's `aipm()` shell function, so give the key to `uv run` the same way. On macOS, after storing the key as the README's [Set up your model provider and API keys](README.md#set-up-your-model-provider-and-api-keys) describes, add this function to `~/.zshrc` (on Linux, use `secret-tool lookup service anthropic-api-key`). Do not export the key globally, write it into a shell profile, or put a `.env` file in this repository.
+Give your checkout the key once. On macOS, `uv run aipm setup` stores it in the Keychain, where every later `uv run aipm` finds it. On Linux, `uv run aipm` does not go through the README's `aipm()` shell function, so wrap `uv run` the same way and add this to `~/.bashrc` or `~/.zshrc`. Do not export the key globally, write it into a shell profile, or put a `.env` file in this repository.
 
 ```bash
-aipm-dev() { ANTHROPIC_API_KEY="$(security find-generic-password -s anthropic-api-key -w)" uv run --project ~/path/to/aipm aipm "$@"; }
+aipm-dev() { ANTHROPIC_API_KEY="$(secret-tool lookup service anthropic-api-key)" uv run --project ~/path/to/aipm aipm "$@"; }
 ```
 
-Then run your checkout against the sample:
+Then run your checkout against the sample (with `aipm-dev` in place of `uv run aipm` on Linux):
 
 ```bash
-aipm-dev -C ~/aipm-sandbox/clinic-booking doctor
-aipm-dev -C ~/aipm-sandbox/clinic-booking init
-aipm-dev -C ~/aipm-sandbox/clinic-booking discover --from ~/aipm-sandbox/clinic-booking/idea.md
+uv run aipm -C ~/aipm-sandbox/clinic-booking doctor
+uv run aipm -C ~/aipm-sandbox/clinic-booking init
+uv run aipm -C ~/aipm-sandbox/clinic-booking discover --from ~/aipm-sandbox/clinic-booking/idea.md
 ```
 
 A relative `--from` or `--answers` path is read from the current directory, not from the `-C` project, so give the full path (the file must be inside the project).
 
-Because the function uses `uv run --project`, it works from any folder, including the sample's: `cd ~/aipm-sandbox/clinic-booking && aipm-dev status`.
+From another folder, such as the sample's, point uv at the clone: `cd ~/aipm-sandbox/clinic-booking && uv run --project ~/path/to/aipm aipm status` (`aipm-dev` already does this).
 
 ## Checks
 

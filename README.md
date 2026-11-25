@@ -14,13 +14,13 @@
 
 ```bash
 uv tool install git+https://github.com/mlbala/aipm   # 1. install the `aipm` command, once
-read -rs ANTHROPIC_API_KEY && export ANTHROPIC_API_KEY  # 2. paste your key, press Enter (not shown)
+aipm setup                                           # 2. pick the provider and models, paste your key
 cd ~/my-project                                      # 3. go to YOUR project, not a clone of aipm
-aipm doctor                                          #    shows ANTHROPIC_API_KEY: set
+aipm doctor                                          #    shows your provider, and ANTHROPIC_API_KEY: set
 aipm init && aipm discover
 ```
 
-That is all the setup Anthropic needs: it is the default provider, and the models have defaults, so there is no config file to write. Step 2 lasts for this terminal only and keeps the key out of your shell history; to keep the key for every terminal, see step 2 of [Set up your model provider and API keys](#set-up-your-model-provider-and-api-keys), which also covers other providers and changing models.
+`aipm setup` asks a few questions (press Enter to keep the defaults: Anthropic and its default models), writes your user config, and on macOS stores the key in your Keychain, so it works in every terminal. On Linux, or without setup, give the key to this terminal only, without it reaching your shell history: `read -rs ANTHROPIC_API_KEY && export ANTHROPIC_API_KEY`. [Set up your model provider and API keys](#set-up-your-model-provider-and-api-keys) has the details and the manual way.
 
 aipm works on the repository you run it in (or the one `-C` names). You do not need to clone aipm to use it; a clone is for changing aipm itself, and you point it at another project with `uv run aipm -C ~/my-project …` (see [CONTRIBUTING.md](CONTRIBUTING.md#try-your-changes)).
 
@@ -48,13 +48,17 @@ It needs git 2.55 or later, or a git older than 2.54. git 2.54 (including the Ap
 
 ### Set up your model provider and API keys
 
-Do this once per machine, before `aipm init`. Two things are set, both outside every repository: the provider goes in your user config file, and the API key goes in your shell's environment. aipm reads keys only from the environment, never from a config file or a `.env` file.
+Do this once per machine, before `aipm init`. Two things are set, both outside every repository: the provider goes in your user config file, and the API key goes in your environment or your macOS Keychain. aipm never reads a key from a config file or a `.env` file.
 
-**1. Choose the provider.** Your user config is `~/Library/Application Support/aipm/config.yaml` on macOS and `~/.config/aipm/config.yaml` on Linux (`aipm doctor` reports whether it is valid). Anthropic is the default, so the file is optional; to choose the models:
+**The easy way: `aipm setup`.** It asks for the provider (Anthropic, OpenAI, another OpenAI-compatible service, or a local Ollama server), the server's URL where one is needed, the name of the key's variable, and the models. It shows the exact file and what it will write, and writes only after you say yes. Then it asks for the key (typing is hidden) and stores it in the macOS Keychain under the service `aipm`; press Enter to skip. Run it again to change anything. It needs a terminal; `--yes` does not skip its questions. On Linux it does not store keys yet (see step 2 below).
+
+**The manual way:**
+
+**1. Choose the provider.** Your user config is `~/.config/aipm/config.yaml` (or wherever `AIPM_CONFIG` points, if you set it; `aipm doctor` shows the path and whether it is valid). A macOS file at the old `~/Library/Application Support/aipm/config.yaml` is still read, with a note to move it. Anthropic is the default, so the file is optional; to choose the models:
 
 ```bash
-mkdir -p ~/Library/Application\ Support/aipm       # Linux: mkdir -p ~/.config/aipm
-cat > ~/Library/Application\ Support/aipm/config.yaml <<'EOF'
+mkdir -p ~/.config/aipm
+cat > ~/.config/aipm/config.yaml <<'EOF'
 llm:
   models: {default: claude-sonnet-5-5, interviewer: claude-haiku-5-5}
 EOF
@@ -79,7 +83,7 @@ llm:                                   # DeepSeek, OpenRouter, Azure OpenAI, vLL
 
 A local Ollama server needs no key; see [Models and providers](#models-and-providers). The roles you can give their own model are `interviewer`, `prd_writer`, `architect`, `threat_modeler`, `planner` and `ac_reviewer`; `default` covers the rest. To see the cost of each run as well as its tokens, add prices under `llm.pricing` (USD per million tokens, for example `claude-haiku-5-5: {input_per_mtok: 0.10, output_per_mtok: 0.50}`).
 
-**2. Set the API key** for that provider, and the key of each coding agent you build with (`ANTHROPIC_API_KEY` for Claude Code, `CODEX_API_KEY` for Codex, `GEMINI_API_KEY` for Gemini; see [Coding agents](#coding-agents)). Use a dedicated key with a spend limit. Keep it in your system keychain, and hand it only to aipm with a shell function, so the key is in no plain file and other programs your shell starts never see it:
+**2. Set the API key** for that provider, and the key of each coding agent you build with (`ANTHROPIC_API_KEY` for Claude Code, `CODEX_API_KEY` for Codex, `GEMINI_API_KEY` for Gemini; see [Coding agents](#coding-agents)). Use a dedicated key with a spend limit. `aipm setup` stores keys in the macOS Keychain, where aipm finds them by itself (the environment wins when both are set). Without setup, or on Linux, keep the key in your system keychain and hand it only to aipm with a shell function, so the key is in no plain file and other programs your shell starts never see it:
 
 ```bash
 # macOS: store the key once (it asks for it), then add the function to ~/.zshrc
@@ -93,7 +97,7 @@ echo 'aipm() { ANTHROPIC_API_KEY="$(secret-tool lookup service anthropic-api-key
 
 For several keys, set each one the same way inside the function (`ANTHROPIC_API_KEY=… CODEX_API_KEY=… command aipm "$@"`). Do not write the key itself into `~/.zshrc`, `~/.bashrc` or another file: a build's tests and agents run as you, and the sandbox does not hide those files from them. A keychain item is not secret from every program either: an unsandboxed program running as you can ask for it. So use a key you can revoke, with a spend limit. Never keep keys in a `.env` file inside a project you run aipm on.
 
-**3. Check.** Open a new terminal and run `aipm doctor`: `Config: ok`, and each key you set shows as `set` (never its value).
+**3. Check.** Open a new terminal and run `aipm doctor`: `Config: ok`, your user config path, provider and models, and each key you set shows as `set`, or `set (macOS Keychain)` (never its value).
 
 The provider settings (`llm.provider`, `llm.base_url`, `llm.api_key_env`, `llm.pricing`) are user-only: aipm ignores them, with a warning, in a repository's `.pm/config.yaml`, refuses them in `AIPM_*` variables (exit 6), and refuses a user config inside the repository (exit 6). So a repository you clone cannot send your key or your code to a server you did not choose. A repository may still pick models (`llm.models`). See [Configuration](#configuration).
 
@@ -141,7 +145,8 @@ With `--json`, the steps' own output goes to stderr and stdout carries one envel
 |---|---|---|
 | `aipm` | Phase report and the next step | v0.1 |
 | `aipm init` | Create `.pm/`, detect the stack, write the repo map, run the trust flow | v0.1 |
-| `aipm doctor` | Tool versions, capabilities, sandbox, which API keys are set (never their values) | v0.1 |
+| `aipm setup` | Choose the provider and models, write your user config, store your key in the macOS Keychain | v0.4 |
+| `aipm doctor` | Tool versions, capabilities, sandbox, your user config, provider and models, which API keys are set and where (never their values) | v0.1 |
 | `aipm trust` | Show the exact commands aipm may run, then record your trust | v0.1 |
 | `aipm discover` | Requirements interview, then `requirements.yaml` and the PRD | v0.1 |
 | `aipm approve <prd\|design\|plan\|context>` | Non-interactive approval | v0.1 |
@@ -295,7 +300,7 @@ llm:
 
 ### Configuration
 
-Settings come in layers, later ones winning: built-in defaults, your user config (`$AIPM_CONFIG`, or `config.yaml` in your platform's user config directory), the repository's `.pm/config.yaml`, `AIPM_*` environment variables (`AIPM_LLM__MODELS__DEFAULT` sets `llm.models.default`), then command-line flags. A repository cannot set user-only keys such as `llm.base_url` or `llm.api_key_env`, and it can only make security settings and budgets stricter; aipm prints a warning for every repository setting it ignores and every relaxation you make ([ARCHITECTURE.md §15](docs/architecture/ARCHITECTURE.md#15-configuration)). `AIPM_*` variables cannot set user-only keys either: aipm refuses to run (exit 6) until you unset the variable and put the key in your user config or pass a flag. Your user config and the trust store must live outside the repository, wherever `AIPM_CONFIG`, `HOME`, `XDG_CONFIG_HOME` or `XDG_STATE_HOME` point. An `AIPM_CONFIG` that names a missing file makes every command that reads the configuration exit 6 (create it empty, or unset the variable). aipm warns on every run when `AIPM_CONFIG` is set, when `HOME` is not your account's home directory, and when one of these variables or `XDG_CACHE_HOME` points inside a git work tree. Tools such as pipenv load a repository's `.env` file into your shell, so do not run aipm from a shell that loaded an untrusted repository's `.env`.
+Settings come in layers, later ones winning: built-in defaults, your user config (`$AIPM_CONFIG`, or `~/.config/aipm/config.yaml`; on Linux `$XDG_CONFIG_HOME/aipm/config.yaml` when that is set), the repository's `.pm/config.yaml`, `AIPM_*` environment variables (`AIPM_LLM__MODELS__DEFAULT` sets `llm.models.default`), then command-line flags. A repository cannot set user-only keys such as `llm.base_url` or `llm.api_key_env`, and it can only make security settings and budgets stricter; aipm prints a warning for every repository setting it ignores and every relaxation you make ([ARCHITECTURE.md §15](docs/architecture/ARCHITECTURE.md#15-configuration)). `AIPM_*` variables cannot set user-only keys either: aipm refuses to run (exit 6) until you unset the variable and put the key in your user config or pass a flag. Your user config and the trust store must live outside the repository, wherever `AIPM_CONFIG`, `HOME`, `XDG_CONFIG_HOME` or `XDG_STATE_HOME` point. An `AIPM_CONFIG` that names a missing file makes every command that reads the configuration exit 6 (create it empty, or unset the variable). aipm warns on every run when `AIPM_CONFIG` is set, when `HOME` is not your account's home directory, and when one of these variables or `XDG_CACHE_HOME` points inside a git work tree. Tools such as pipenv load a repository's `.env` file into your shell, so do not run aipm from a shell that loaded an untrusted repository's `.env`.
 
 ## A recorded session
 
