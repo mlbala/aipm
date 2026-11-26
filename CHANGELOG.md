@@ -47,6 +47,7 @@ All notable changes to aipm are recorded here. The format follows [Keep a Change
 
 ### Changed
 
+- Only the commands that may call the model or start a coding agent (`discover`, `design`, `plan`, `verify`, `build`, `run`, `auto`) and `doctor` read keys from the macOS Keychain; `status`, `init` and the other commands read no stored key (`aipm setup` only reads back the key it stores), so a locked Keychain never interrupts them ([ADR-0033](docs/architecture/adr/0033-guided-setup-and-keychain-keys.md)).
 - The macOS user config moves to `~/.config/aipm/config.yaml`, as on Linux; `XDG_CONFIG_HOME` does not move it on macOS. A file only at the old `~/Library/Application Support/aipm/config.yaml` is still read, with a note to move it.
 - **Repositories that commit `pnpm-workspace.yaml` must re-trust once** after upgrading (`aipm trust --show`, then `aipm trust`): the file is now hashed into the surface, so a pull that changes it, including a new workspace member or catalog entry, asks for trust again. pnpm 10 reads settings from it that win over the environment (session 3 of the v0.4 decisions; ADR-0032).
 - A `pnpm` prepare step now runs as `pnpm --store-dir=<run cache>/pnpm-store --package-import-method=copy <subcommand> …`: aipm adds the flags after the command policy check, so the trusted argv in `.pm/config.yaml` and its allowed prefix are unchanged. Installs copy files from the run's store (more disk than a copy-on-write clone).

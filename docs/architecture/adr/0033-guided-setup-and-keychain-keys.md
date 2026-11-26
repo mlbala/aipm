@@ -74,6 +74,7 @@ Without a terminal, `aipm setup` exits 2 and names the README section.
 - On macOS it never shows the authorization dialog: aipm stores keys with `security` itself, so the item's access list trusts `security`, and the lookup runs `security` too. A lookup that fails for any reason counts as unset.
 - On Linux it never unlocks a locked collection; only `aipm setup` may ask to unlock.
 - A missing, locked or failing backend counts as unset, and the command fails closed with the existing missing-key error.
+- Note (2026-11-26): whether a lookup on a **locked** macOS Keychain shows the unlock prompt or fails is not yet tested. Since then, only the commands that may call the model or start a coding agent, and `doctor`, read keys (SECURITY §8), so other commands never trigger a lookup.
 
 **Residual risk.** On macOS, an item aipm stores trusts `/usr/bin/security`, so any program running as the user can read it through `security` without a prompt. On Linux, Secret Service is reached over the D-Bus session bus. So repository code that runs **outside** a sandbox, as the same user, can read an `aipm` keychain item without a prompt. This is no worse than today's alternative: an exported key in a shell profile is equally readable by such code. Inside `srt`, `Library/Keychains` and `.local/share/keyrings` are already denied (`execution/sandbox.py`). Security tests are to check that a sandboxed gate cannot read an `aipm` item (not yet built: `srt` is not available where this was implemented; see owner decision 2 below):
 

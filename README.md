@@ -97,7 +97,7 @@ echo 'aipm() { ANTHROPIC_API_KEY="$(secret-tool lookup service anthropic-api-key
 
 For several keys, set each one the same way inside the function (`ANTHROPIC_API_KEY=… CODEX_API_KEY=… command aipm "$@"`). Do not write the key itself into `~/.zshrc`, `~/.bashrc` or another file: a build's tests and agents run as you, and the sandbox does not hide those files from them. A keychain item is not secret from every program either: an unsandboxed program running as you can ask for it. So use a key you can revoke, with a spend limit. Never keep keys in a `.env` file inside a project you run aipm on.
 
-**3. Check.** Open a new terminal and run `aipm doctor`: `Config: ok`, your user config path, provider and models, and each key you set shows as `set`, or `set (macOS Keychain)` (never its value).
+**3. Check.** Open a new terminal and run `aipm doctor`: `Config: ok`, your user config path, provider and models, and each key you set shows as `set`, or `set (macOS Keychain)` (never its value). aipm reads the Keychain only in the commands that may call the model or a coding agent (`discover`, `design`, `plan`, `verify`, `build`, `run`, `auto`) and in `doctor`; if your Keychain is locked, macOS may ask for its password then.
 
 The provider settings (`llm.provider`, `llm.base_url`, `llm.api_key_env`, `llm.pricing`) are user-only: aipm ignores them, with a warning, in a repository's `.pm/config.yaml`, refuses them in `AIPM_*` variables (exit 6), and refuses a user config inside the repository (exit 6). So a repository you clone cannot send your key or your code to a server you did not choose. A repository may still pick models (`llm.models`). See [Configuration](#configuration).
 
