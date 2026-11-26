@@ -8,6 +8,7 @@ never runs during `commit`; the integrity hashes are compared before git starts 
 import dataclasses
 import hashlib
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -86,6 +87,9 @@ def test_output_that_was_cut_is_an_error(tmp_repo: Path, monkeypatch: pytest.Mon
     def fake_run(argv: list[str], **_: object) -> ProcessResult:
         return ProcessResult(tuple(argv), 0, b"x\0", b"", False, True, 0.01)
 
+    # A git past 2.54, so the fake answers only the call under test, not the config-hook
+    # check aipm adds for git 2.54 (tested in test_redteam_v03.py).
+    monkeypatch.setattr(git, "_versions", {shutil.which("git"): (2, 55)})
     monkeypatch.setattr(git, "run_safe", fake_run)
     with pytest.raises(UsageError, match="larger than aipm reads"):
         git.untracked(tmp_repo)
@@ -97,6 +101,9 @@ def test_a_failing_call_names_git_s_first_line(
     def fake_run(argv: list[str], **_: object) -> ProcessResult:
         return ProcessResult(tuple(argv), 128, b"", b"fatal: bad object\nmore\n", False, False, 0)
 
+    # A git past 2.54, so the fake answers only the call under test, not the config-hook
+    # check aipm adds for git 2.54 (tested in test_redteam_v03.py).
+    monkeypatch.setattr(git, "_versions", {shutil.which("git"): (2, 55)})
     monkeypatch.setattr(git, "run_safe", fake_run)
     with pytest.raises(UsageError, match="fatal: bad object") as info:
         git.diff_names(tmp_repo, "a" * 40)
