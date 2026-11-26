@@ -119,7 +119,7 @@ def handled(ctx: typer.Context, command: str) -> Generator[None]:
     from aipm.app.session import command_span
 
     opts = global_options(ctx)
-    log_file = configure(opts.verbose, opts.project)
+    log_file = configure(opts.verbose, opts.project, command)
     with command_span(command) as span:
         try:
             yield

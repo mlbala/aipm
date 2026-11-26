@@ -17,19 +17,26 @@ from aipm.state.attempts import WriteLedger
 from aipm.state.store import FileStateStore, open_store
 
 _STDERR_LEVELS = ("warning", "info", "debug")
+
+KEY_COMMANDS = frozenset({"discover", "design", "plan", "verify", "build", "run", "auto", "doctor"})
+"""The commands that may call the model or start a coding agent, plus `doctor`, which reports
+where each key comes from. Only these read keys from the OS keychain (ADR-0033): every other
+command skips the lookups, so a locked keychain never prompts for `aipm status`."""
 _log = logging.getLogger(__name__)
 
 
-def configure(verbose: int, project: Path | None = None) -> Path | None:
+def configure(verbose: int, project: Path | None = None, command: str | None = None) -> Path | None:
     """Configure logging for one command; returns the JSON log file, if one could be opened.
 
     `-v` shows info on stderr and `-vv` debug; the file always records info and above.
     `project` is the `-C` directory. No log file is opened when the log directory lies inside
     that repository, as it does when a repository `.env` sets `HOME` or `XDG_STATE_HOME`.
+    `command` is the aipm command being run: keys are read from the keychain only for the
+    commands in `KEY_COMMANDS` (or when no command is named).
     """
     root = _repo_root(project)
     stderr_level = _STDERR_LEVELS[min(max(verbose, 0), len(_STDERR_LEVELS) - 1)]
-    key_warnings = prime_keys(root)
+    key_warnings = prime_keys(root) if command is None or command in KEY_COMMANDS else []
     log_file = configure_logging(
         "info",
         json_lines=False,
