@@ -6,6 +6,7 @@ CLI, ruff, lint-imports) are test tooling; aipm itself starts processes only thr
 """
 
 import os
+import shutil
 import subprocess
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
@@ -16,6 +17,8 @@ import pytest_socket
 from hypothesis import settings
 
 from aipm.config import keychain
+from aipm.domain.errors import AipmError
+from aipm.execution import git
 from aipm.llm.fake import FakeLLM
 from tests.fakes.secrets import FAKE_SECRETS
 
@@ -107,6 +110,24 @@ def run_program(
         check=False,
         start_new_session=True,
     )
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _real_git_version_cached() -> None:
+    """Read the version of the git on PATH once, with the real process runner, before any test.
+
+    aipm caches `git --version` per git path for the whole process (`aipm.execution.git`).
+    Tests that replace `run_safe` with a fake answering every call with empty output rely on
+    that cache already holding the real version, as it does once any earlier test has run git.
+    Seeding it here makes them pass alone and under `pytest -n auto`, as they do in a serial
+    run. A test that needs an unread version still sets `_versions` itself.
+    """
+    found = shutil.which("git")
+    if found is not None:
+        try:
+            git.git_version(found)
+        except AipmError:
+            pass  # no readable git: the tests that need one fail on their own
 
 
 @pytest.fixture(autouse=True)
