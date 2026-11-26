@@ -8,6 +8,8 @@ gates, and `aipm prompt` and `aipm verify` on the clinic example.
 
 import json
 import os
+import re
+import shutil
 import sys
 import time
 from collections.abc import Callable, Mapping
@@ -19,7 +21,7 @@ import pytest
 from ruamel.yaml import YAML
 
 from aipm.config.schema import Config
-from aipm.domain.errors import PolicyViolation, UsageError
+from aipm.domain.errors import ExitCode, MissingCapability, PolicyViolation, UsageError
 from aipm.domain.models import (
     AcceptanceCriterion,
     BuiltinGate,
@@ -59,7 +61,7 @@ from aipm.security.diff_checks import (
 )
 from aipm.security.paths import denied_for_llm
 from aipm.security.redact import Redactor
-from tests.conftest import run_git
+from tests.conftest import run_git, run_program
 from tests.integration.conftest import UserDirs, user_dirs  # noqa: F401 - an autouse fixture
 from tests.integration.flow import aipm, ok, planned, tasks, trust
 from tests.integration.test_verify_cli import FIXTURE, STUBS, edit_config, install, use_test_gates
@@ -87,6 +89,25 @@ def home(user_dirs: UserDirs) -> Path:  # noqa: F811 - the imported fixture
 def append_config(repo: Path, text: str) -> None:
     with (repo / ".git" / "config").open("a", encoding="utf-8") as handle:
         handle.write(text)
+
+
+GIT_2_54_REFUSAL = r"git 2\.54 .*would run the hooks your git config names \('probe'\)"
+
+
+def git_ignores_the_hook_switch() -> bool:
+    """Whether the git on PATH is one that runs hooks named in config and cannot be told not to
+    (git 2.54, Apple Git-157 among them). aipm then refuses that git whenever a config it reads
+    names a hook (exit 8), before any other check (red-team v0.3, `test_redteam_v03.py`).
+
+    The version is read here, not through aipm's own reader, so a fault in that reader cannot
+    send these tests down the wrong branch."""
+    found = shutil.which("git")
+    assert found is not None
+    out = run_program([found, "--version"], env={"LANG": "C"}, cwd=Path(os.sep)).stdout
+    match = re.search(r"\bgit version (\d+)\.(\d+)", out)
+    assert match is not None, out
+    version = (int(match.group(1)), int(match.group(2)))
+    return git.CONFIG_HOOKS_FROM <= version < git.HOOK_SWITCH_FROM
 
 
 def task(**kw: object) -> Task:
@@ -176,6 +197,13 @@ def test_repository_settings_that_run_a_program_are_refused(
     tmp_repo: Path, home: Path, setting: str
 ) -> None:
     append_config(tmp_repo, setting)
+    if setting.startswith("[hook ") and git_ignores_the_hook_switch():
+        # This git cannot turn the hook off, so aipm refuses the git itself first.
+        with pytest.raises(MissingCapability, match=GIT_2_54_REFUSAL) as refused:
+            git.check_repo_config(tmp_repo)
+        assert refused.value.exit_code is ExitCode.MISSING_TOOL
+        assert "2.55" in (refused.value.hint or "")
+        return
     with pytest.raises(PolicyViolation) as info:
         git.check_repo_config(tmp_repo)
     assert info.value.exit_code == 6
@@ -214,6 +242,23 @@ def test_config_hooks_never_run_in_snapshots_or_commits(
     marker = tmp_path / "hook-ran"
     with (home / ".gitconfig").open("a", encoding="utf-8") as handle:
         handle.write(case_text("C-039").replace("<marker>", str(marker)))
+    if git_ignores_the_hook_switch():
+        # This git would run the hook whatever aipm sets, so aipm refuses every call. The test's
+        # own git reads no global config, so it cannot run the hook.
+        head = run_git(tmp_repo, "rev-parse", "HEAD").strip()
+        (tmp_repo / "b.py").write_text("x = 1\n", encoding="utf-8")
+        calls: list[Callable[[], object]] = [
+            lambda: git.head_sha(tmp_repo),
+            lambda: git.snapshot_files(tmp_repo, head, watch_ignored=lambda _: True),
+            lambda: git.diff_text(tmp_repo, head, ["b.py"], max_bytes=4096),
+            lambda: git.commit(tmp_repo, ["b.py"], message="m", trailers=[]),
+        ]
+        for call in calls:
+            with pytest.raises(MissingCapability, match=GIT_2_54_REFUSAL) as refused:
+                call()
+            assert refused.value.exit_code is ExitCode.MISSING_TOOL
+        assert not marker.exists()
+        return
     head = git.head_sha(tmp_repo)
     (tmp_repo / "b.py").write_text("x = 1\n", encoding="utf-8")
     git.snapshot_files(tmp_repo, head, watch_ignored=lambda _: True)
